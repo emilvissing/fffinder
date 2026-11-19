@@ -864,7 +864,7 @@ Your actions, then **Edit Actions…** and **Reload Actions**. See [Nushell acti
 
 Cmd on macOS, Ctrl elsewhere.
 
-Back, Forward, Enclosing Folder, and Move to Trash each have two shortcuts, Finder's and the one Explorer and the Linux file managers use. Both work on every system. Menus and tooltips have room for one, so they show Finder's on macOS, such as Cmd+[ and Cmd+Backspace, and the other on Linux and Windows, such as Alt+Left and Delete.
+Back, Forward, Enclosing Folder, Move to Trash, and Open each have Finder's shortcut and the one Explorer and the Linux file managers use. Both work on every system. Menus and tooltips have room for one, so they show Finder's on macOS, such as Cmd+[, Cmd+Backspace, and Cmd+O, and the other on Linux and Windows, such as Alt+Left, Delete, and Enter (the Return key).
 
 ### Anywhere
 

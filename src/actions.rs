@@ -126,7 +126,28 @@ fn key_table(mac: bool, cx: &App) -> Vec<KeyBinding> {
     let quick_look = context(QUICK_LOOK);
     let tree = context(TREE);
     let one_pane = context("FinderFiles && OnePane");
-    let mut bindings = vec![
+    let mut bindings = Vec::new();
+    // The first key the table has for Refresh, Open, and Quick Look is F5,
+    // Return, and Space, and a Mac's menu bar would show those. Finder's shows
+    // Cmd-O and Cmd-Y, and Cmd-R is how a Mac refreshes, so a Mac binds these
+    // here too, ahead of the table, whose order decides what the window's
+    // menus show on every system. They still act once; see the end of the
+    // table.
+    //
+    // A key the window doesn't take is the menu bar's to try, and with Cmd-R
+    // on Refresh the one item there with F5 is Copy to Other Pane. So that F5
+    // outside the file views can't copy, a Mac has it refresh anywhere in the
+    // window. In the file views the table's own F5 bindings come first, bound
+    // as they are to less of the window.
+    if mac {
+        bindings.extend([
+            key("secondary-r", Refresh, &finder, cx),
+            key("f5", Refresh, &finder, cx),
+            key("secondary-o", OpenSelected, &files, cx),
+            key("secondary-y", QuickLook, &files, cx),
+        ]);
+    }
+    bindings.extend([
         key("secondary-q", Quit, &None, cx),
         key("secondary-,", ShowSettings, &None, cx),
         key("secondary-n", NewWindow, &None, cx),
@@ -247,12 +268,12 @@ fn key_table(mac: bool, cx: &App) -> Vec<KeyBinding> {
         key("delete", MoveToTrash, &tree, cx),
         key("secondary-z", input::Undo, &tree, cx),
         key("secondary-shift-z", input::Redo, &tree, cx),
-    ];
-    // The last key bound to Back, Forward, Enclosing Folder, and Move to Trash
-    // is the one Explorer and the Linux file managers use, which suits their
-    // menus and tooltips. A Mac's should show Finder's, so those are bound
-    // again here, last. A key bound twice still acts once, as long as its
-    // handler doesn't pass it on with `cx.propagate()`.
+    ]);
+    // The last key bound to Back, Forward, Enclosing Folder, Move to Trash,
+    // and Open is the one Explorer and the Linux file managers use, which
+    // suits their menus and tooltips. A Mac's should show Finder's, so those
+    // are bound again here, last. A key bound twice still acts once, as long
+    // as its handler doesn't pass it on with `cx.propagate()`.
     if mac {
         bindings.extend([
             key("secondary-[", GoBack, &finder, cx),
@@ -260,6 +281,7 @@ fn key_table(mac: bool, cx: &App) -> Vec<KeyBinding> {
             key("secondary-up", GoUp, &finder, cx),
             key("secondary-backspace", MoveToTrash, &files, cx),
             key("secondary-backspace", MoveToTrash, &tree, cx),
+            key("secondary-o", OpenSelected, &files, cx),
         ]);
     }
     bindings
@@ -525,6 +547,85 @@ mod tests {
                     action.name()
                 );
             }
+        });
+    }
+
+    /// Refresh, Open, and Quick Look have a key without Cmd, bound first, and
+    /// one with it: the action, and all of its keys in the order they're
+    /// bound, whatever their context, on a Mac and off one. A Mac shows the
+    /// first in its menu bar and the last in the window's menus.
+    const CMD_KEY_ACTIONS: [(&dyn Action, &[&str], &[&str]); 3] = [
+        (
+            &Refresh,
+            &["secondary-r", "f5", "f5", "secondary-r"],
+            &["f5", "secondary-r"],
+        ),
+        (
+            &OpenSelected,
+            &[
+                "secondary-o",
+                "enter",
+                "secondary-down",
+                "secondary-o",
+                "enter",
+                "secondary-o",
+            ],
+            &["enter", "secondary-down", "secondary-o", "enter"],
+        ),
+        (
+            &QuickLook,
+            &[
+                "secondary-y",
+                "space",
+                "secondary-y",
+                "space",
+                "secondary-y",
+            ],
+            &["space", "secondary-y", "space", "secondary-y"],
+        ),
+    ];
+
+    /// Every key `table` has for `action`, in the order it binds them.
+    fn all_keys_for(table: &[KeyBinding], action: &dyn Action, cx: &App) -> Vec<String> {
+        let os = cx.platform_info().os;
+        table
+            .iter()
+            .filter(|binding| binding.action().partial_eq(action))
+            .map(|binding| binding.keystrokes()[0].inner().unparse(os))
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn refresh_open_and_quick_look_have_their_cmd_key_first_and_last_on_a_mac(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let table = key_table(true, cx);
+            for (action, on_a_mac, _) in CMD_KEY_ACTIONS {
+                let bound: Vec<String> = on_a_mac.iter().map(|keys| spelled(keys, cx)).collect();
+                assert_eq!(all_keys_for(&table, action, cx), bound, "{}", action.name());
+            }
+            // The first of the two F5s is the Mac's own, for the whole window.
+            assert_eq!(
+                keys_for(&table, &Refresh, FINDER, cx),
+                ["secondary-r", "f5", "secondary-r"].map(|keys| spelled(keys, cx))
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn refresh_open_and_quick_look_have_only_the_tables_keys_off_a_mac(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let table = key_table(false, cx);
+            for (action, _, off_a_mac) in CMD_KEY_ACTIONS {
+                let bound: Vec<String> = off_a_mac.iter().map(|keys| spelled(keys, cx)).collect();
+                assert_eq!(all_keys_for(&table, action, cx), bound, "{}", action.name());
+            }
+            assert_eq!(
+                keys_for(&table, &Refresh, FINDER, cx),
+                [spelled("secondary-r", cx)],
+                "F5 is a key of the file views"
+            );
         });
     }
 

@@ -1468,6 +1468,26 @@ fn the_menu_still_warns_without_a_second_pane(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui_kit::test]
+fn f5_refreshes_outside_the_file_views_on_a_mac(cx: &mut TestAppContext) {
+    // Outside the file views a Mac's menu bar would run Copy to Other Pane
+    // for the key, so a Mac has it refresh anywhere in the window. On other
+    // systems F5 is a key of the file views alone.
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let fx = Fixture::new("f5-search-field");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("f"));
+    assert!(!ui.files_focused(), "the keyboard is in the search field");
+    std::fs::write(fx.path("arrived.txt"), "x").unwrap();
+    assert!(!ui.names().contains(&"arrived.txt".to_string()));
+
+    ui.press("f5");
+
+    assert!(ui.names().contains(&"arrived.txt".to_string()));
+}
+
 // ----- where a search starts, and where it leaves you ------------------------------------
 
 /// The first item the window lists.

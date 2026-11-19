@@ -1932,6 +1932,61 @@ fn the_item_menu_shows_this_systems_keys_for_move_to_trash(cx: &mut TestAppConte
     assert!(window.debug_bounds(other).is_none(), "{other} in the menu");
 }
 
+#[gpui_kit::test]
+fn menus_in_the_window_show_this_systems_keys_for_open_quick_look_and_refresh(
+    cx: &mut TestAppContext,
+) {
+    // The kit says which key hints it drew only in a debug build.
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let fx = Fixture::new("open-keys");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+
+    // Each has a key with Cmd and one without, and a menu shows one of them:
+    // Finder's Cmd-O for Open on a Mac and Return elsewhere, and the key with
+    // Cmd for the other two everywhere.
+    let (shown, others) = if cfg!(target_os = "macos") {
+        (["kbd:cmd-o", "kbd:cmd-y"], ["kbd:enter", "kbd:space"])
+    } else {
+        (["kbd:enter", "kbd:ctrl-y"], ["kbd:ctrl-o", "kbd:space"])
+    };
+    ui.right_click(item_id("row", &fx.path("notes.txt")));
+    assert!(ui.menu_labels().contains(&"Quick Look".to_string()));
+    let mut window = gpui_kit::VisualTestContext::from_window(ui.handle, ui.cx);
+    for keys in shown {
+        assert!(
+            window.debug_bounds(keys).is_some(),
+            "no {keys} in the item menu"
+        );
+    }
+    for keys in others {
+        assert!(
+            window.debug_bounds(keys).is_none(),
+            "{keys} in the item menu"
+        );
+    }
+    ui.press("escape");
+
+    let refresh = if cfg!(target_os = "macos") {
+        "kbd:cmd-r"
+    } else {
+        "kbd:ctrl-r"
+    };
+    let content = ui.snapshot("content").bounds();
+    ui.right_click_at("content", at(40., f32::from(content.size.height) - 30.));
+    assert!(ui.menu_labels().contains(&"Refresh".to_string()));
+    assert!(
+        window.debug_bounds(refresh).is_some(),
+        "no {refresh} in the background menu"
+    );
+    assert!(
+        window.debug_bounds("kbd:f5").is_none(),
+        "kbd:f5 in the background menu"
+    );
+}
+
 // ----- dialogs ---------------------------------------------------------------------
 
 #[gpui_kit::test]

@@ -6,6 +6,7 @@ mod common;
 use common::{Fixture, Open, Ui, cmd};
 use fffinder::finder::{PickerOptions, QuickLookMode, SearchScope};
 use fffinder::model::Location;
+use fffinder::system::SystemCall;
 use fffinder_core::ViewMode;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
 use gpui_kit::{Keystroke, TestAppContext};
@@ -86,6 +87,54 @@ fn a_key_bound_twice_acts_once(cx: &mut TestAppContext) {
     ui.press(&cmd("]"));
     ui.press(&cmd("up"));
     assert_eq!(ui.folder(), Some(fx.path("Projects")), "one folder up");
+}
+
+#[gpui_kit::test]
+fn open_quick_look_and_refresh_act_once_with_their_keys_bound_twice(cx: &mut TestAppContext) {
+    let fx = Fixture::new("open-keys-twice");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // A Mac has the Cmd keys for Open, Quick Look, and Refresh bound more
+    // than once too. Binding the keys again does that to all of their keys.
+    ui.cx.update(fffinder::actions::bind_keys);
+
+    ui.select("notes.txt");
+    let opened = SystemCall::Open(fx.path("notes.txt"));
+    for (before, keys) in ["enter".to_string(), cmd("down"), cmd("o")]
+        .iter()
+        .enumerate()
+    {
+        ui.press(keys);
+        assert_eq!(
+            ui.system_calls(),
+            vec![opened.clone(); before + 1],
+            "{keys} opens the file once"
+        );
+    }
+
+    ui.press(&cmd("y"));
+    assert!(
+        ui.read(|f| f.quick_look_is_open()),
+        "opened, not closed again"
+    );
+    ui.press("space");
+    assert!(
+        !ui.read(|f| f.quick_look_is_open()),
+        "closed, not opened again"
+    );
+    ui.press("space");
+    assert!(ui.read(|f| f.quick_look_is_open()));
+    ui.press(&cmd("y"));
+    assert!(!ui.read(|f| f.quick_look_is_open()));
+
+    std::fs::write(fx.path("first.txt"), "x").unwrap();
+    ui.press("f5");
+    assert!(
+        ui.names().contains(&"first.txt".to_string()),
+        "F5 refreshes"
+    );
+    std::fs::write(fx.path("second.txt"), "x").unwrap();
+    ui.press(&cmd("r"));
+    assert!(ui.names().contains(&"second.txt".to_string()));
 }
 
 #[gpui_kit::test]
