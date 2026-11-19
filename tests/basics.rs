@@ -772,6 +772,80 @@ fn the_file_keys_come_back_when_a_refused_name_scrolls_away(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn the_file_keys_come_back_when_a_key_leaves_the_folder_during_a_rename(cx: &mut TestAppContext) {
+    let fx = Fixture::new("rename-left");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    ui.click("view-list");
+    ui.go_to(&fx.path("Projects"));
+    ui.select("atlas");
+    ui.press("f2");
+    assert!(ui.exists("rename-input"));
+
+    // The window's shortcuts work in the field too. Back shows another
+    // folder, which has no row for the field.
+    ui.press(&cmd("["));
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    assert!(!ui.exists("rename-input"));
+    assert!(fx.path("Projects/atlas").is_dir(), "nothing was renamed");
+    assert!(ui.files_focused());
+    assert_eq!(ui.selected(), ["Projects"]);
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Roadmap.md"], "the arrow keys work again");
+}
+
+#[gpui_kit::test]
+fn a_click_outside_the_files_ends_a_rename_and_gives_them_the_keyboard(cx: &mut TestAppContext) {
+    let fx = Fixture::new("rename-click-out");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    let projects = fx.path("Projects");
+    ui.update(|f, _, cx| f.add_favorite(projects.clone(), cx));
+    let favorite = ui.read(|f| {
+        f.favorites()
+            .iter()
+            .position(|p| p.path == projects)
+            .unwrap()
+    });
+    ui.click("view-list");
+
+    // The status bar takes no keys, and a press on it leaves the keyboard
+    // where it is. That is in the files by then: a press outside the field
+    // has ended the edit, and what was typed is kept.
+    retype_name(&mut ui, "Roadmap.md", "Plan.md");
+    ui.click("status-text");
+    assert!(!ui.exists("rename-input"));
+    assert!(fx.path("Plan.md").exists());
+    assert!(ui.files_focused());
+    assert_eq!(ui.selected(), ["Plan.md"]);
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Projects"], "the arrow keys work again");
+
+    // A row of the sidebar's list goes to its folder as well, and the name
+    // is kept before the window leaves the item's folder.
+    retype_name(&mut ui, "notes.txt", "todo.txt");
+    ui.click(("fav", favorite));
+    assert!(fx.path("todo.txt").exists());
+    assert_eq!(ui.folder(), Some(projects));
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(ui.selected(), ["atlas"]);
+
+    // A name that was refused goes on being edited, as after any press
+    // outside its field, and the field still has the keyboard: Escape
+    // reaches it.
+    ui.go_to(&fx.dir);
+    retype_name(&mut ui, "Budget.csv", "a/b");
+    ui.press("enter");
+    ui.click("status-text");
+    assert!(ui.exists("rename-input"), "still editing, to fix the name");
+    ui.press("escape");
+    assert!(!ui.exists("rename-input"));
+    assert!(fx.path("Budget.csv").exists());
+    assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
 fn leaving_a_refused_name_says_why_once_and_keeps_the_selection(cx: &mut TestAppContext) {
     let fx = Fixture::new("rename-refused");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -873,6 +947,28 @@ fn switching_to_another_app_leaves_a_rename_as_it_is(cx: &mut TestAppContext) {
 
     assert!(ui.exists("rename-input"));
     assert!(fx.path("Roadmap.md").exists(), "nothing was renamed");
+
+    ui.activate();
+    ui.type_text(" name");
+    ui.press("enter");
+    assert!(fx.path("Half typed name").exists());
+}
+
+#[gpui_kit::test]
+fn a_rename_goes_on_when_its_row_comes_back_while_in_another_app(cx: &mut TestAppContext) {
+    let fx = long_folder("rename-switch-scrolled");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    ui.click("view-list");
+    retype_name(&mut ui, "item 000.txt", "Half typed");
+
+    // The list scrolls under the mouse while another app is in front. The
+    // edit is left as it is, and nothing else takes the keyboard meanwhile.
+    ui.deactivate();
+    ui.scroll("list-columns", point(px(0.), px(-3000.)));
+    assert!(!ui.exists("rename-input"));
+    ui.scroll("list-columns", point(px(0.), px(3000.)));
+    assert!(ui.exists("rename-input"));
 
     ui.activate();
     ui.type_text(" name");

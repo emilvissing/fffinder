@@ -772,6 +772,7 @@ impl Finder {
                     this.check_rename_field(window, cx);
                 }
             }),
+            cx.on_focus_lost(window, Self::keyboard_lost),
             // Every browser dims what's cut, wherever the cut was made or ended.
             cx.observe_global::<crate::system::FileClipboard>(|_, cx| cx.notify()),
             // And every browser goes on with another `nu`, wherever it was
@@ -2559,6 +2560,53 @@ impl Finder {
         self.files_focus.is_focused(window)
     }
 
+    /// What had the keyboard is no longer drawn. Keys then go nowhere, the
+    /// window's shortcuts included, until something is clicked. When it was
+    /// a part of this browser, the files take the keyboard: the sidebar's
+    /// tree, hidden or shown as a list, from here or from another window; a
+    /// menu whose item or button went from under it; the field of a name
+    /// being edited, when a key took the window to another folder.
+    fn keyboard_lost(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Every browser in the window is told. For the one that had the
+        // keyboard, the nearest thing still drawn around what went is the
+        // browser itself, when a whole part of it went, or something in it.
+        let Some(nearest) = window.focus_lost_restore_target(cx) else {
+            return;
+        };
+        // A name still being edited ends in inline_rename.rs when its field
+        // goes, where what was typed is kept or dropped and the keyboard
+        // goes back. While the window is inactive the edit is left alone
+        // there, and its field has the keyboard again once it is drawn again.
+        if self.renaming.is_some() || !self.focus.contains(&nearest, window) {
+            return;
+        }
+        self.focus_files(window, cx);
+        // The frame being drawn found the files without the keyboard, and
+        // moving it now asks for no other frame. Without one the selection
+        // would go on looking inactive.
+        window.defer(cx, |window, _| window.refresh());
+    }
+
+    /// A press on what takes no keys: a bar, the sidebar's list, the space
+    /// around the controls. It would give the keyboard to the browser as a
+    /// whole, where typed letters and the arrow keys go nowhere. The keyboard
+    /// stays where it is instead, so a search field goes on taking letters,
+    /// and the files their keys, after a click on the status bar or on a
+    /// favorite. The files get it when the browser as a whole already has
+    /// it, or something outside this browser does, like split view's other
+    /// pane.
+    fn keyboard_stays(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A part that takes the keyboard has taken it by now, and a button
+        // that leaves it where it is has said so.
+        if window.default_prevented() {
+            return;
+        }
+        if self.focus.is_focused(window) || !self.focus.contains_focused(window, cx) {
+            self.focus_files(window, cx);
+        }
+        window.prevent_default();
+    }
+
     /// Mouse selection on row `ix` with Finder modifier semantics.
     pub fn click_row(
         &mut self,
@@ -4177,6 +4225,7 @@ impl Render for Finder {
                     this.go_forward(&GoForward, window, cx)
                 }),
             )
+            .on_any_mouse_down(cx.listener(Self::keyboard_stays))
             // Watched from here so a drag goes on wherever the mouse wanders.
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<list::ResizeDrag>, _, cx| {

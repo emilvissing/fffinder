@@ -3,14 +3,18 @@
 
 mod common;
 
-use common::{Fixture, Ui, cmd, item_id};
+use common::{Fixture, Open, Ui, cmd, item_id};
 use fffinder::actions::{SidebarAsList, SidebarAsTree};
 use fffinder::disk_access::{Access, Checked};
 use fffinder::finder::{NodeKey, Section};
 use fffinder::model::Location;
 use fffinder::system::SystemCall;
 use fffinder_core::{SidebarMode, SmartFolder};
-use gpui_kit::{Modifiers, MouseButton, TestAppContext, point, px};
+use gpui_kit::{
+    InputEvent as _, KeyDownEvent, Keystroke, Modifiers, MouseButton, TestAppContext, point, px,
+};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 /// A window on the fixture with the fixture folder as a favorite and the
@@ -489,6 +493,304 @@ fn the_sidebar_switches_between_list_and_tree(cx: &mut TestAppContext) {
     assert_eq!(ui.read(|f| f.config().sidebar_mode), SidebarMode::List);
     ui.click("sidebar-tree");
     assert_eq!(ui.read(|f| f.config().sidebar_mode), SidebarMode::Tree);
+}
+
+#[gpui_kit::test]
+fn the_files_get_the_keyboard_when_the_tree_goes(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tree-gone");
+    let (mut ui, _) = tree_window(cx, &fx);
+    let shown = |ui: &Ui| ui.read(|f| f.config().show_sidebar);
+    let click_in_the_tree = |ui: &mut Ui| {
+        ui.click(("fav", favorite_ix(ui, &fx)));
+        assert!(tree_focused(ui), "a click gives the tree the keyboard");
+    };
+
+    // The keyboard can't stay in a tree that isn't drawn. No key would do
+    // anything there, not even the one that hid the sidebar, to show it
+    // again.
+    click_in_the_tree(&mut ui);
+    ui.press(&cmd("alt-s"));
+    assert!(!shown(&ui));
+    assert!(ui.files_focused());
+    ui.press(&cmd("alt-s"));
+    assert!(shown(&ui), "the key that hid the sidebar shows it again");
+
+    // The button that hides it leaves the keyboard where it is, as buttons
+    // do, and that is in the tree.
+    click_in_the_tree(&mut ui);
+    ui.click("hide-sidebar");
+    assert!(!shown(&ui));
+    assert!(ui.files_focused());
+    ui.press(&cmd("alt-s"));
+    assert!(shown(&ui));
+
+    // As a list, the sidebar has no tree to have the keyboard.
+    click_in_the_tree(&mut ui);
+    ui.dispatch(SidebarAsList);
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(
+        ui.selected(),
+        ["Budget.csv"],
+        "the arrow keys are the files'"
+    );
+}
+
+#[gpui_kit::test]
+fn the_files_get_the_keyboard_when_another_tab_turns_the_tree_off(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tree-gone-elsewhere");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            workspace: true,
+            ..Default::default()
+        },
+    );
+    let dir = fx.dir.clone();
+    ui.update(|f, _, cx| {
+        f.add_favorite(dir, cx);
+        f.set_sidebar_mode(SidebarMode::Tree, cx);
+    });
+    // A second tab, then the first again, with the keyboard in its tree.
+    ui.press(&cmd("t"));
+    ui.press("ctrl-shift-tab");
+    ui.click(("fav", favorite_ix(&ui, &fx)));
+    assert!(tree_focused(&mut ui));
+    let other = ui
+        .workspace
+        .clone()
+        .expect("opened with tabs")
+        .read_with(ui.cx, |w, _| w.tabs()[1].clone());
+
+    // The sidebar's mode is one setting for every tab and window, so the
+    // tree goes here when it is turned off anywhere.
+    other.update(ui.cx, |f, cx| f.set_sidebar_mode(SidebarMode::List, cx));
+    ui.settle();
+    assert_eq!(ui.read(|f| f.config().sidebar_mode), SidebarMode::List);
+    assert!(ui.files_focused(), "the files of the tab that had the tree");
+    let in_the_other = ui.window(|window, cx| other.read(cx).files_focused(window));
+    assert!(!in_the_other, "not those of the tab that isn't showing");
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Budget.csv"]);
+}
+
+#[gpui_kit::test]
+fn the_files_of_the_pane_whose_tree_went_get_the_keyboard(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tree-gone-split");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            workspace: true,
+            ..Default::default()
+        },
+    );
+    let dir = fx.dir.clone();
+    ui.update(|f, _, cx| {
+        f.add_favorite(dir, cx);
+        f.set_sidebar_mode(SidebarMode::Tree, cx);
+    });
+    ui.press(&cmd("\\"));
+    let pane = ui
+        .workspace
+        .clone()
+        .expect("opened with tabs")
+        .read_with(ui.cx, |w, _| w.split_pane().cloned())
+        .expect("split view is on");
+    let files_of = |ui: &mut Ui, of: &gpui_kit::Entity<fffinder::finder::Finder>| {
+        ui.window(|window, cx| of.read(cx).files_focused(window))
+    };
+    let selected_in = |ui: &Ui, of: &gpui_kit::Entity<fffinder::finder::Finder>| -> Vec<String> {
+        of.read_with(ui.cx, |f, _| {
+            f.selected_entries().into_iter().map(|e| e.name).collect()
+        })
+    };
+    let favorite = favorite_ix(&ui, &fx);
+
+    // Both panes are drawn, and each is told that the keyboard is in
+    // something that went. The other pane starts without a sidebar, so the
+    // only tree is the first pane's.
+    ui.click(("fav", favorite));
+    assert!(tree_focused(&mut ui));
+    ui.press(&cmd("alt-s"));
+    assert!(!ui.read(|f| f.config().show_sidebar));
+    assert!(
+        ui.files_focused(),
+        "the files of the pane that had the tree"
+    );
+    assert!(!files_of(&mut ui, &pane), "not those of the other pane");
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Budget.csv"]);
+    assert!(selected_in(&ui, &pane).is_empty(), "which got no key");
+
+    // The same the other way around: the other pane's sidebar, shown by the
+    // key while that pane has the keyboard, and hidden with it in its tree.
+    ui.click_in("split-pane", "status-text");
+    ui.press(&cmd("alt-s"));
+    assert!(pane.read_with(ui.cx, |f, _| f.config().show_sidebar));
+    ui.click_in("split-pane", ("fav", favorite));
+    let in_its_tree = ui.window(|window, cx| pane.read(cx).tree_focused_for_test(window));
+    assert!(
+        in_its_tree,
+        "a click gives the other pane's tree the keyboard"
+    );
+    ui.press(&cmd("alt-s"));
+    assert!(!pane.read_with(ui.cx, |f, _| f.config().show_sidebar));
+    assert!(files_of(&mut ui, &pane));
+    assert!(!ui.files_focused());
+    ui.press("down");
+    assert_eq!(selected_in(&ui, &pane), ["Budget.csv"]);
+    assert_eq!(ui.selected(), ["Budget.csv"], "the first pane got no key");
+}
+
+#[gpui_kit::test]
+fn the_files_are_drawn_with_the_keyboard_once_the_tree_has_gone(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tree-gone-drawn");
+    let (mut ui, _) = tree_window(cx, &fx);
+    // A frame says what got the keyboard only in an active window.
+    ui.activate();
+    ui.click(("fav", favorite_ix(&ui, &fx)));
+    assert!(tree_focused(&mut ui));
+    let drawn = Rc::new(Cell::new(false));
+    ui.update({
+        let drawn = drawn.clone();
+        move |f, window, cx| {
+            let files = f.files_focus_handle();
+            cx.on_focus(&files, window, move |_, _, _| drawn.set(true))
+                .detach();
+        }
+    });
+
+    // The key the way the system sends it. `press` draws a frame after the
+    // key whether or not the window asked for one, and here the window has
+    // to ask: the frame that finds the tree gone is drawn before the files
+    // get the keyboard, and shows their selection as inactive.
+    let hide = ui
+        .cx
+        .update(|cx| Keystroke::parse_with_os(&cmd("alt-s"), cx.platform_info().os))
+        .expect("a key");
+    let hide = KeyDownEvent {
+        keystroke: hide,
+        is_held: false,
+        prefer_character_input: false,
+    };
+    ui.window(|window, cx| {
+        window.dispatch_event(hide.to_platform_input(), cx);
+    });
+    assert!(!ui.read(|f| f.config().show_sidebar));
+    assert!(drawn.get(), "a frame found the keyboard in the files");
+}
+
+#[gpui_kit::test]
+fn a_rename_in_the_tree_ends_with_the_keyboard_in_the_files_when_the_tree_goes(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("tree-gone-rename");
+    let (mut ui, home) = tree_window(cx, &fx);
+    // A field says that it lost the keyboard only in an active window.
+    ui.activate();
+    let projects = home.under(fx.path("Projects"));
+    ui.click(home.disclosure_id());
+    ui.click(projects.row_id());
+    ui.press("f2");
+    assert!(ui.exists("rename-input"));
+    ui.type_text("Plans");
+
+    // The field goes with the sidebar. What was typed is kept, as when the
+    // field goes any other way, and the keyboard doesn't go back to a tree
+    // that isn't there.
+    ui.press(&cmd("alt-s"));
+    assert!(fx.path("Plans").is_dir());
+    assert_eq!(ui.folder(), Some(fx.path("Plans")));
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(ui.selected(), ["atlas"]);
+
+    // The same when the tree is put away for the list.
+    ui.press(&cmd("alt-s"));
+    ui.click(home.under(fx.path("Plans")).row_id());
+    ui.press("f2");
+    ui.type_text("Notes");
+    ui.dispatch(SidebarAsList);
+    assert!(fx.path("Notes").is_dir());
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(ui.selected(), ["atlas"]);
+}
+
+#[gpui_kit::test]
+fn a_rename_in_the_tree_goes_on_when_the_tree_comes_back_while_in_another_app(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("tree-back-rename");
+    let (mut ui, home) = tree_window(cx, &fx);
+    ui.activate();
+    let projects = home.under(fx.path("Projects"));
+    ui.click(home.disclosure_id());
+    ui.click(projects.row_id());
+    ui.press("f2");
+    ui.type_text("Half");
+
+    // The sidebar is hidden and shown again from another window, which has
+    // the same setting, while this one is behind it. The edit is left as it
+    // is, and nothing else takes the keyboard meanwhile.
+    ui.deactivate();
+    ui.update(|f, _, cx| f.set_sidebar_visible(false, cx));
+    assert!(!ui.exists("rename-input"));
+    ui.update(|f, _, cx| f.set_sidebar_visible(true, cx));
+    assert!(ui.exists("rename-input"));
+
+    ui.activate();
+    ui.type_text(" typed");
+    ui.press("enter");
+    assert!(fx.path("Half typed").is_dir());
+    assert!(tree_focused(&mut ui), "the keyboard is back in the tree");
+}
+
+#[gpui_kit::test]
+fn a_rename_in_the_tree_ends_in_the_files_when_the_window_is_back_and_the_tree_is_not(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("tree-not-back-rename");
+    let (mut ui, home) = tree_window(cx, &fx);
+    ui.activate();
+    let projects = home.under(fx.path("Projects"));
+    ui.click(home.disclosure_id());
+    ui.click(projects.row_id());
+    ui.press("f2");
+    ui.type_text("Plans");
+
+    // The sidebar is hidden from another window while this one is behind
+    // it, and stays hidden.
+    ui.deactivate();
+    ui.update(|f, _, cx| f.set_sidebar_visible(false, cx));
+    assert!(
+        fx.path("Projects").is_dir(),
+        "the edit waits for the window"
+    );
+
+    ui.activate();
+    assert!(fx.path("Plans").is_dir(), "what was typed is kept");
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(ui.selected(), ["atlas"]);
+}
+
+#[gpui_kit::test]
+fn a_click_on_the_status_bar_leaves_the_keyboard_in_the_tree(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tree-status-bar");
+    let (mut ui, home) = tree_window(cx, &fx);
+    ui.click(("fav", favorite_ix(&ui, &fx)));
+    assert!(tree_focused(&mut ui));
+
+    ui.click("status-text");
+    assert!(tree_focused(&mut ui));
+    ui.press("right");
+    assert!(
+        ui.exists(home.under(fx.path("Projects")).row_id()),
+        "Right opens the place, as before the click"
+    );
 }
 
 #[gpui_kit::test]

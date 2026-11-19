@@ -199,9 +199,12 @@ impl Finder {
         cx.notify();
     }
 
-    /// Give the keyboard back to the sidebar's tree, or to the files.
+    /// Give the keyboard back to the sidebar's tree, or to the files. The
+    /// files get it in the tree's place when the tree went with the field,
+    /// hidden with the sidebar or put away for the list: no key would do
+    /// anything there.
     fn keyboard_back(&mut self, to_sidebar: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if to_sidebar {
+        if to_sidebar && self.config.show_sidebar && self.tree_on() {
             self.tree_focus.focus(window, cx);
         } else {
             self.focus_files(window, cx);

@@ -225,7 +225,7 @@ In tree mode, every Favorites and Locations row has a triangle. Click it to open
 - Cmd+click or middle-click a folder to open it in a new tab.
 - The tree follows the window. Go anywhere, by the path bar, Back, Go to Folder, or double-clicking a folder in the window, and the tree opens down to that folder, selects it, and scrolls to it. It stays under the sidebar row you were browsing when it can, and otherwise uses the row whose folder holds the new one most closely. Settings > Sidebar > "Open the tree to the folder shown" turns this off. The tree then selects the folder only where it already shows.
 - The same folder can show under several rows, like your home folder under Favorites and under the disk in Locations. Each opens and closes on its own.
-- Clicking a row gives the sidebar the keyboard. See [In the folder tree](#in-the-folder-tree) for the keys.
+- Clicking a row gives the sidebar the keyboard. See [In the folder tree](#in-the-folder-tree) for the keys. Hiding the sidebar or switching it to list mode gives the keyboard to the files.
 - Drag items onto a folder in the tree to move them into it, or hold Option (macOS) or Ctrl (Linux and Windows) to copy. Hold a drag over a closed folder for a moment and it opens, so you can go on down into it. The window stays where it is.
 - Drag a folder out of the tree to move it, as you would from the window. Let go anywhere in the sidebar but on a folder or the Trash and nothing happens. Add to Sidebar in its right-click menu makes it a favorite.
 - The tree keeps up with changes. fffinder reads a folder when it opens, then checks every two seconds whether an open folder changed and reads it again if so. A folder without a triangle that gets a folder inside gets its triangle by the same check. What you do in fffinder shows at once.
@@ -876,6 +876,8 @@ Your actions, then **Edit Actions…** and **Reload Actions**. See [Nushell acti
 Cmd on macOS, Ctrl elsewhere.
 
 Back, Forward, Enclosing Folder, Move to Trash, and Open each have Finder's shortcut and the one Explorer and the Linux file managers use. Both work on every system. Menus and tooltips have room for one, so they show Finder's on macOS, such as Cmd+[, Cmd+Backspace, and Cmd+O, and the other on Linux and Windows, such as Alt+Left, Delete, and Enter (the Return key).
+
+Most keys go to the part of the window that has the keyboard: the file views, the sidebar's folder tree, or a text field. Click a part to give it the keyboard. A click on what takes no keys leaves the keyboard where it was: the path bar, the status bar, a row of the sidebar's list, or the empty part of a bar. So the arrow keys still move through the files after a click on a favorite, and the search field goes on taking letters after a click on the status bar. In split view, such a click in the pane that doesn't have the keyboard gives it to that pane's files. When the part that has the keyboard goes away, the file views get it, as when the sidebar is hidden while its folder tree has the keyboard.
 
 ### Anywhere
 

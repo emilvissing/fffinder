@@ -14,7 +14,7 @@ use fffinder_core::{Appearance, GroupKey, KindFilter, SmartFolder, SortKey, View
 use gpui_kit::Action as _;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::kbd::Kbd;
-use gpui_kit::{KeyContext, TestAppContext};
+use gpui_kit::{Focusable as _, KeyContext, TestAppContext};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -315,6 +315,33 @@ fn a_history_menu_closes_when_the_window_changes_size(cx: &mut TestAppContext) {
     ui.right_click("forward");
     ui.activate();
     assert_eq!(ui.menu_labels(), ["Projects"]);
+}
+
+#[gpui_kit::test]
+fn the_keys_work_on_when_a_history_menu_is_left_behind_by_its_button(cx: &mut TestAppContext) {
+    let fx = Fixture::new("history-left-behind");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.resize(900., 600.);
+    ui.go_to(&fx.path("Projects"));
+    ui.right_click("back");
+    assert!(ui.menu_open());
+
+    // Keys still reach the window while a menu is open. Hiding the sidebar
+    // leaves the window its size and gives the toolbar another width, so the
+    // menu isn't closed, and isn't drawn either: Back is no longer where it
+    // was pressed. The menu had the keyboard.
+    ui.press(&cmd("alt-s"));
+    assert!(!ui.read(|f| f.config().show_sidebar));
+    assert!(
+        !ui.menu_open(),
+        "in a window this wide, hiding the sidebar moves Back"
+    );
+    assert!(ui.files_focused());
+    ui.press(&cmd("alt-s"));
+    assert!(
+        ui.read(|f| f.config().show_sidebar),
+        "the key that hid the sidebar shows it again"
+    );
 }
 
 #[gpui_kit::test]
@@ -1387,9 +1414,10 @@ fn a_click_in_the_scope_bar_gives_the_files_a_keyboard_that_was_nowhere(cx: &mut
     let mut ui = Ui::open(cx, &fx.dir);
     ui.click("search");
     ui.type_text("atlas");
-    // A click on the status bar leaves the keyboard with no part of the
-    // window: the search field has lost it, and the files don't have it.
-    ui.click("status-text");
+    // With the browser itself focused, the keyboard is with no part of it:
+    // the search field has lost it, and the files don't have it. No click or
+    // key does that, but code that focuses the view does.
+    ui.update(|f, window, cx| f.focus_handle(cx).focus(window, cx));
     ui.type_text("x");
     assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
     assert!(!ui.files_focused());
@@ -1879,15 +1907,41 @@ fn a_button_under_no_results_takes_no_keyboard_away_with_it(cx: &mut TestAppCont
     ui.press("down");
     assert_eq!(ui.selected(), ["Budget.csv"]);
 
-    // A click on the status bar leaves the keyboard with no part of the
-    // window, and the button gives it to the files, as the scope bar does.
+    // With the browser itself focused, the keyboard is with no part of it.
+    // No click or key does that, but code that focuses the view does. The
+    // button gives the keyboard to the files then, as the scope bar does.
     ui.click("search-scope");
     assert!(ui.names().is_empty());
-    ui.click("status-text");
+    ui.update(|f, window, cx| f.focus_handle(cx).focus(window, cx));
     assert!(!ui.files_focused());
     ui.click("empty-widen-scope");
     assert_eq!(ui.names(), ["Budget.csv"]);
     assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn a_button_under_no_results_that_goes_by_itself_leaves_the_files_the_keyboard(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("search-nothing-gone");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Projects"));
+    ui.click("search-scope");
+    ui.click("search");
+    ui.type_text("budget");
+    assert!(ui.names().is_empty());
+
+    // A right click gives the button the keyboard. The toolbar's button
+    // then widens the search without it, and leaves the keyboard where it
+    // is, as buttons do: on a button that goes once something is found.
+    ui.right_click("empty-widen-scope");
+    assert_eq!(ui.snapshot("empty-widen-scope").focused(), Some(true));
+    ui.click("search-scope");
+    assert_eq!(ui.names(), ["Budget.csv"]);
+    assert!(!ui.exists("empty-widen-scope"));
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Budget.csv"]);
 }
 
 #[gpui_kit::test]
@@ -2131,6 +2185,146 @@ fn sidebar_rows_and_menus(cx: &mut TestAppContext) {
 
     ui.click("index-settings");
     assert!(ui.dialog_open(), "the gear opens Settings");
+}
+
+#[gpui_kit::test]
+fn a_click_in_the_sidebars_list_leaves_the_keyboard_where_it_was(cx: &mut TestAppContext) {
+    let fx = Fixture::new("sidebar-keyboard");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let query = |ui: &Ui| ui.read(|f| f.query().to_string());
+    let projects = fx.path("Projects");
+    let atlas = SmartFolder {
+        name: "Atlas".into(),
+        query: "atlas".into(),
+        kind: KindFilter::Any,
+        scope: None,
+        contents: false,
+        filter: None,
+    };
+    ui.update(|f, _, cx| {
+        f.add_favorite(projects.clone(), cx);
+        f.add_smart_folder(atlas, cx);
+    });
+    let favorite = ui.read(|f| {
+        f.favorites()
+            .iter()
+            .position(|p| p.path == projects)
+            .unwrap()
+    });
+    ui.click("view-list");
+    assert!(ui.files_focused());
+
+    // In the files, where the arrow keys then move through what the row
+    // shows: a favorite's folder, and what a Smart Folder finds.
+    ui.click(("fav", favorite));
+    assert_eq!(ui.folder(), Some(projects.clone()));
+    assert!(ui.files_focused(), "after a click on a favorite");
+    ui.press("down");
+    assert_eq!(ui.selected(), ["atlas"]);
+    ui.click(("smart", 0usize));
+    assert_eq!(query(&ui), "atlas");
+    assert!(ui.files_focused(), "after a click on a Smart Folder");
+    let found = ui.names();
+    ui.press("down");
+    assert_eq!(ui.selected(), found[..1], "the first of {found:?}");
+
+    // In the search field, where the row ends the search and the next
+    // letters start another in the folder it shows.
+    ui.click("search");
+    ui.click(("fav", favorite));
+    assert_eq!(query(&ui), "");
+    ui.type_text("atl");
+    assert_eq!(query(&ui), "atl");
+}
+
+#[gpui_kit::test]
+fn a_click_on_the_status_bar_or_the_path_bar_leaves_the_keyboard_in_the_files(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("bars-keyboard");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.select("Budget.csv");
+
+    ui.click("status-text");
+    assert!(ui.files_focused(), "after a click on the status bar");
+    ui.press("down");
+    assert_eq!(ui.selected(), ["notes.txt"], "the arrow keys still move");
+    ui.type_text("ro");
+    assert_eq!(ui.selected(), ["Roadmap.md"], "and typing still selects");
+
+    // The path bar, to the right of its last crumb.
+    let last = fffinder_core::places::breadcrumbs(&fx.dir).len() - 1;
+    let crumb = ui.snapshot(("crumb", last)).bounds();
+    let width = ui.window(|window, _| window.viewport_size().width);
+    let blank = gpui_kit::point((crumb.right() + width) / 2., crumb.center().y);
+    ui.click_point(blank);
+    assert!(ui.files_focused(), "after a click on the path bar");
+    ui.press("up");
+    assert_eq!(ui.selected(), ["Projects"]);
+
+    // The right button and the middle one take it no more than the left.
+    ui.right_click("status-text");
+    assert!(!ui.menu_open(), "the status bar has no menu");
+    assert!(ui.files_focused(), "after a right-click");
+    ui.click_with(gpui_kit::MouseButton::Middle, "status-text");
+    assert!(ui.files_focused(), "after a middle-click");
+    ui.press("up");
+    assert_eq!(ui.selected(), ["notes.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_click_on_the_other_panes_status_bar_takes_the_keyboard_to_its_files(cx: &mut TestAppContext) {
+    let fx = Fixture::new("bars-split");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            workspace: true,
+            ..Default::default()
+        },
+    );
+    ui.press(&cmd("\\"));
+    let pane = ui
+        .workspace
+        .clone()
+        .expect("opened with tabs")
+        .read_with(ui.cx, |w, _| w.split_pane().cloned())
+        .expect("split view is on");
+    // The new pane has the keyboard, so this is its Nushell panel. Then
+    // back to the first pane's files.
+    ui.press("ctrl-`");
+    assert!(pane.read_with(ui.cx, |f, _| f.nu_panel_open()));
+    let first = ui.view.clone();
+    ui.window(|window, cx| first.read(cx).files_focus_handle().focus(window, cx));
+
+    // A button leaves the keyboard where it is, which is in the other pane.
+    // Run has nothing to run.
+    ui.click_in("split-pane", "nu-run");
+    assert!(ui.files_focused(), "the first pane still has the keyboard");
+
+    // The status bar takes no keys, and the keyboard isn't in its pane to
+    // stay where it is.
+    ui.click_in("split-pane", "status-text");
+    let in_its_files = ui.window(|window, cx| pane.read(cx).files_focused(window));
+    assert!(in_its_files, "the pane that was clicked has the keyboard");
+    ui.press("down");
+    let selected: Vec<String> = pane.read_with(ui.cx, |f, _| {
+        f.selected_entries().into_iter().map(|e| e.name).collect()
+    });
+    assert_eq!(selected, ["Budget.csv"]);
+    assert!(ui.selected().is_empty(), "the first pane got no key");
+}
+
+#[gpui_kit::test]
+fn typing_goes_on_in_the_search_field_after_a_click_on_the_status_bar(cx: &mut TestAppContext) {
+    let fx = Fixture::new("bars-typing");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("at");
+    ui.click("status-text");
+    ui.type_text("las");
+    assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
 }
 
 #[gpui_kit::test]
@@ -2384,6 +2578,30 @@ fn the_item_menu_shows_a_result_in_its_enclosing_folder(cx: &mut TestAppContext)
     assert_eq!(ui.folder().as_deref(), hit.parent());
     assert_eq!(ui.selected(), ["Project Atlas.txt"]);
     assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn the_keys_work_on_when_an_items_menu_loses_its_item(cx: &mut TestAppContext) {
+    let fx = Fixture::new("context-menu-item-gone");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.right_click(item_id("row", &fx.path("notes.txt")));
+    assert!(ui.menu_open());
+
+    // Keys still reach the window while a menu is open. The other view has
+    // no row for the menu to be drawn at, and the menu had the keyboard.
+    ui.press(&cmd("1"));
+    assert_eq!(ui.read(|f| f.effective_view()), ViewMode::Icons);
+    assert!(!ui.menu_open());
+    assert!(ui.files_focused());
+    ui.press(&cmd("2"));
+    assert_eq!(
+        ui.read(|f| f.effective_view()),
+        ViewMode::List,
+        "the next key does its work"
+    );
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Projects"], "and so do the arrow keys");
 }
 
 #[gpui_kit::test]
@@ -3942,6 +4160,36 @@ fn the_keys_on_the_filter_bars_close_button_remove_the_filter(cx: &mut TestAppCo
     assert!(!ui.exists("filter-input"));
     assert_eq!(ui.read(|f| f.filter_text().to_string()), "");
     assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn the_files_get_the_keyboard_when_a_smart_folder_closes_the_filter_bar(cx: &mut TestAppContext) {
+    use gpui_kit::component::WindowExt as _;
+    let fx = Fixture::new("filter-smart-folder");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let atlas = SmartFolder {
+        name: "Atlas".into(),
+        query: "atlas".into(),
+        kind: KindFilter::Any,
+        scope: None,
+        contents: false,
+        filter: None,
+    };
+    ui.update(|f, _, cx| f.add_smart_folder(atlas, cx));
+    ui.press(&cmd("alt-f"));
+    assert!(ui.exists("filter-input"));
+
+    // The click leaves the keyboard in the filter's field, and the Smart
+    // Folder, which has no filter, closes the bar the field is in.
+    ui.click(("smart", 0usize));
+    assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
+    assert!(!ui.exists("filter-input"));
+    assert!(ui.files_focused());
+
+    // A shortcut still does its work: Cmd+F goes to the search field.
+    ui.press(&cmd("f"));
+    let typing_in = ui.window(|window, cx| window.focused_input(cx).map(|field| field.value(cx)));
+    assert_eq!(typing_in.as_deref(), Some("atlas"));
 }
 
 #[gpui_kit::test]
