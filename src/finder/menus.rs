@@ -135,7 +135,7 @@ pub fn item_menu(
         return trash_item_menu(finder, &entries, menu);
     }
     let single = entries.len() == 1;
-    let searching = finder.is_searching() || finder.current_folder().is_none();
+    let enclosing = finder.enclosing_target().is_some();
     let folder_for_nu: Option<PathBuf> = if first.is_dir {
         Some(first.path.clone())
     } else {
@@ -144,7 +144,6 @@ pub fn item_menu(
     let is_favorite = finder.config.favorites.contains(&first.path);
     let picker = finder.picker.is_some();
 
-    let enclosing = first.path.clone();
     let nu_dir = folder_for_nu.clone();
     let favorite = first.path.clone();
     let opens_files = !picker && entries.iter().all(|e| !e.is_dir);
@@ -195,16 +194,11 @@ pub fn item_menu(
                     .action(Box::new(OpenInEditor)),
             )
         })
-        .when(searching && single, |menu| {
+        .when(enclosing, |menu| {
             menu.item(
                 PopupMenuItem::new("Show in Enclosing Folder")
                     .icon(IconName::Folder)
-                    .on_click(window.listener_for(
-                        view,
-                        move |this: &mut Finder, _: &ClickEvent, window, cx| {
-                            this.reveal_in_place(&enclosing, window, cx)
-                        },
-                    )),
+                    .action(Box::new(ShowInEnclosingFolder)),
             )
         })
         .item(

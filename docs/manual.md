@@ -327,7 +327,7 @@ Each group has a header with its name and how many items it holds. Click the hea
 
 ## Searching
 
-Type in the search field (Cmd+F) to search. Searches start 50 ms after you stop typing. Return searches right away and moves into the results, selecting the first one. Down Arrow in the search field also moves into the results. If the results aren't in yet, both keys wait for them and then move in. Typing on, or moving the caret, calls that off, and when nothing is found the keyboard stays in the search field. Return doesn't run a search again when its results are already in; Refresh (Cmd+R) does. Escape empties the search field, which ends the search, and the keyboard stays there for other words. Escape in an empty search field gives the keyboard to the files.
+Type in the search field (Cmd+F) to search. Searches start 50 ms after you stop typing. Return searches right away and moves into the results, selecting the first one. Down Arrow in the search field also moves into the results. If the results aren't in yet, both keys wait for them and then move in. Typing on, or moving the caret, calls that off, and when nothing is found the keyboard stays in the search field. Return doesn't run a search again when its results are already in; Refresh (Cmd+R) does. Escape empties the search field, which ends the search, and the keyboard stays there for other words. Escape in an empty search field gives the keyboard to the files. Once the keyboard is in the results, Cmd+Return shows the selected one in its folder (see [Opening files](#opening-files)).
 
 From the first letter, the file area shows placeholders in place of the items it was showing, until the results are in. It does the same when you switch between Name and Contents. After that, the results stay while a search runs again, as when you type on, and so does No Results. A contents search can take seconds, so while one runs again No Results reads Searching… instead. Results for other words start at the top with nothing selected, and so do the results after you switch between This Computer and the folder, between Name and Contents, or to another kind. A search that runs again as it is, as with Refresh or while the index is being built, keeps what's selected and stays scrolled where it was. When you end a search, with Escape or by emptying the search field, the window is back where it was before the search: the same items are selected, and the view is scrolled to the same place. If you chose another view during the search, it also scrolls to the selected item.
 
@@ -393,7 +393,7 @@ A folder outside every search location gets its own temporary index when you sea
 
 ## Recents
 
-Recents (Cmd+Shift+F) shows up to 500 files from the search locations, ranked by how often and how recently you opened them in fffinder, then by modification time. It waits for the index to be ready.
+Recents (Cmd+Shift+F) shows up to 500 files from the search locations, ranked by how often and how recently you opened them in fffinder, then by modification time. It waits for the index to be ready. Show in Enclosing Folder (Cmd+Return) opens a selected file's folder with the file selected.
 
 ## Previews and Quick Look
 
@@ -487,7 +487,7 @@ The apps come from Launch Services on macOS, and on Linux from the `.desktop` en
 
 **Show in Finder** (Show in Explorer on Windows, Show in File Manager on Linux) reveals the selected items in the system file manager.
 
-**Show in Enclosing Folder** appears in the item menu for a single search result. It opens the item's folder in this window with the item selected.
+**Show in Enclosing Folder** (Cmd+Return, the item menu, or the Actions menu) opens the selected item's folder in this window, with the item selected there. It is for the lists whose items come from many folders: search results, Recents, and results sent from Nushell. It needs one selected item, and it does nothing in a folder or in the Trash. Back returns to the list you came from.
 
 ## Working with files
 
@@ -745,6 +745,7 @@ If the terminal saved in Settings isn't installed, Automatic's choice is used an
 
 - Return, double-click on a file, **Choose**, or "Choose" or "Choose Items" in the item menu prints a JSON array of absolute paths to stdout and exits 0.
 - Double-clicking a folder opens it.
+- Cmd+Return chooses nothing. As in any window, it shows a selected search result in its folder.
 - Escape or **Cancel** exits 1.
 - With `--here`, searches in the chooser find only what's in the folder it shows, as with **Search Only in "Folder name"** on. That narrows what a search shows, not what is indexed: a chooser indexes every search location itself each time it opens.
 
@@ -812,7 +813,7 @@ Right-click one or more items:
 - Quick Look
 - Get Info
 - Open in Editor (when a file is selected)
-- Show in Enclosing Folder (one search result)
+- Show in Enclosing Folder (one item in search results, Recents, or results sent from Nushell)
 - Show in Finder (Show in Explorer, Show in File Manager)
 - Cut "name", or Cut N Items
 - Copy "name", or Copy N Items
@@ -860,7 +861,7 @@ Your actions, then **Edit Actions…** and **Reload Actions**. See [Nushell acti
 - **Sort and View Options**: Sort By (Relevance, Name, Date Modified, Date Created, Size, Kind), Ascending, Descending, Keep Folders on Top, Show Hidden Files, Group By.
 - **List header** (right-click a column header in the list view): the columns, Keep Folders on Top, Calculate All Sizes, Reset Columns.
 - **Nushell**: Open Nushell Here, Run a Pipeline… (or Hide Pipeline Panel when it is open), Nushell Actions, Copy as Nushell List.
-- **Actions** (…): New Folder, New File…, New Tab, Split View, Preview Pane, Quick Look, Get Info, Rename…, Copy Path, Show in Finder, Add Folder to Sidebar, Move to Trash, Delete Immediately…, Undo, Redo, Filter with Nushell…, Go to Folder…, Connect to Server…, Search Syntax…, Settings…. On Linux and Windows, where GPUI shows no menu bar, this menu, the context menus, and the keyboard shortcuts reach the menu bar's commands.
+- **Actions** (…): New Folder, New File…, New Tab, Split View, Preview Pane, Quick Look, Get Info, Rename…, Copy Path, Show in Enclosing Folder (in search results, Recents, and results sent from Nushell), Show in Finder, Add Folder to Sidebar, Move to Trash, Delete Immediately…, Undo, Redo, Filter with Nushell…, Go to Folder…, Connect to Server…, Search Syntax…, Settings…. On Linux and Windows, where GPUI shows no menu bar, this menu, the context menus, and the keyboard shortcuts reach the menu bar's commands.
 
 ## Keyboard shortcuts
 
@@ -921,6 +922,7 @@ Back, Forward, Enclosing Folder, Move to Trash, and Open each have Finder's shor
 | Page Up, Page Down | Move the selection a screenful; in the gallery, the previous or next page of a PDF |
 | Shift+Page Up, Shift+Page Down | Extend the selection a screenful |
 | Return, Cmd+Down, Cmd+O | Open |
+| Cmd+Return | Show in Enclosing Folder (one item in search results, Recents, or results sent from Nushell) |
 | Space, Cmd+Y | Quick Look |
 | Cmd+Space | Quick Look, exploring a structured file's data |
 | Right, Left | In the list view, open or close the selected folder in place |

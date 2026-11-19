@@ -923,6 +923,26 @@ impl Finder {
         self.is_searching() || self.current_folder().is_none()
     }
 
+    /// The item Show in Enclosing Folder would show: the one selected item
+    /// of a list whose items come from many folders. The Trash isn't one.
+    /// What's in it is kept in a folder of the Trash's own, which isn't a
+    /// place to browse.
+    pub(super) fn enclosing_target(&self) -> Option<PathBuf> {
+        if !self.shows_parent_column() || self.in_trash() {
+            return None;
+        }
+        // Until a place's own items are read, the rows are still those of
+        // the place the window left, which may be the Trash. A search's rows
+        // are what it found, whatever the place.
+        if self.loading && !self.is_searching() {
+            return None;
+        }
+        match self.selected_entries().as_slice() {
+            [only] => Some(only.path.clone()),
+            _ => None,
+        }
+    }
+
     /// Show `paths` as a results view; returns how many exist and which
     /// don't.
     pub fn show_results(
@@ -1227,6 +1247,23 @@ impl Finder {
         self.history
             .navigate(Location::Folder(parent.to_path_buf()), search);
         self.location_changed(Some(item.to_path_buf()), window, cx);
+    }
+
+    /// Cmd+Return: open the folder of the one selected result, with the
+    /// result selected in it.
+    fn show_in_enclosing_folder(
+        &mut self,
+        _: &ShowInEnclosingFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = self.enclosing_target() else {
+            return;
+        };
+        self.reveal_in_place(&item, window, cx);
+        // A menu can send this while the search field has the keyboard, and
+        // the search that ends here leaves it there, in an empty field.
+        self.focus_files(window, cx);
     }
 
     // ----- listing -----------------------------------------------------------
@@ -3654,6 +3691,7 @@ impl Render for Finder {
             .on_action(cx.listener(Self::move_items_here))
             .on_action(cx.listener(Self::copy_as_nuon))
             .on_action(cx.listener(Self::reveal))
+            .on_action(cx.listener(Self::show_in_enclosing_folder))
             .on_action(cx.listener(Self::open_in_nushell))
             .on_action(cx.listener(Self::toggle_nu_panel))
             .on_action(cx.listener(Self::new_folder))

@@ -564,6 +564,39 @@ fn actions_menu_items(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_actions_menu_shows_a_result_in_its_enclosing_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("actions-menu-enclosing");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let item = "Show in Enclosing Folder";
+
+    // In a folder every item is in the folder shown, so the menu leaves it out.
+    ui.select("Roadmap.md");
+    ui.click("actions");
+    assert!(!ui.menu_labels().contains(&item.to_string()));
+    ui.press("escape");
+
+    // Among results it's there, disabled until one of them is selected.
+    ui.click("search");
+    ui.type_text("atlas");
+    ui.click("actions");
+    ui.click_menu_item(item);
+    assert!(ui.menu_open(), "a disabled item doesn't close its menu");
+    assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
+    ui.press("escape");
+
+    // The keyboard is in the search field when the item is chosen. The search
+    // ends, and the field is left for the files, where the result is selected.
+    ui.select("Project Atlas.txt");
+    ui.click("search");
+    ui.click("actions");
+    ui.click_menu_item(item);
+    assert_eq!(ui.folder(), Some(fx.path("Projects/atlas")));
+    assert_eq!(ui.read(|f| f.query().to_string()), "");
+    assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+    assert!(ui.files_focused(), "not left in the emptied search field");
+}
+
+#[gpui_kit::test]
 fn every_menu_bar_action_has_a_handler(cx: &mut TestAppContext) {
     let fx = Fixture::new("menu-bar");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -2080,6 +2113,43 @@ fn context_menus_on_items_and_empty_space(cx: &mut TestAppContext) {
     ui.click_menu_item("New Folder");
     assert!(fx.path("untitled folder").is_dir());
     ui.press("escape");
+}
+
+#[gpui_kit::test]
+fn the_item_menu_shows_a_result_in_its_enclosing_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("item-menu-enclosing");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let item = "Show in Enclosing Folder".to_string();
+    ui.click("view-list");
+
+    // An item in a folder is shown in its folder already.
+    ui.right_click(item_id("row", &fx.path("notes.txt")));
+    assert!(!ui.menu_labels().contains(&item));
+    ui.press("escape");
+
+    let hit = fx.path("Projects/atlas/Project Atlas.txt");
+    ui.click("search");
+    ui.type_text("atlas");
+    ui.right_click(item_id("row", &hit));
+    assert!(ui.menu_labels().contains(&item));
+    // The kit says which key hints it drew only in a debug build.
+    if cfg!(debug_assertions) {
+        let keys = if cfg!(target_os = "macos") {
+            "kbd:cmd-enter"
+        } else {
+            "kbd:ctrl-enter"
+        };
+        let mut window = gpui_kit::VisualTestContext::from_window(ui.handle, ui.cx);
+        assert!(
+            window.debug_bounds(keys).is_some(),
+            "no {keys} beside the item"
+        );
+    }
+
+    ui.click_menu_item(&item);
+    assert_eq!(ui.folder().as_deref(), hit.parent());
+    assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+    assert!(ui.files_focused());
 }
 
 #[gpui_kit::test]

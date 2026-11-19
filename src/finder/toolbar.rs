@@ -985,6 +985,16 @@ fn actions_menu(
             .disabled(!has_selection)
             .action(Box::new(CopyPath)),
     )
+    // Left out where it could never be enabled: in a folder, whose items are
+    // all in the folder shown, and in the Trash.
+    .when(finder.shows_parent_column() && !finder.in_trash(), |menu| {
+        menu.item(
+            PopupMenuItem::new("Show in Enclosing Folder")
+                .icon(IconName::Folder)
+                .disabled(finder.enclosing_target().is_none())
+                .action(Box::new(ShowInEnclosingFolder)),
+        )
+    })
     .item(
         PopupMenuItem::new(super::menus::reveal_label())
             .icon(IconName::ExternalLink)

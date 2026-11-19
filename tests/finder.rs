@@ -433,6 +433,166 @@ fn back_returns_to_a_search_left_without_leaving_its_folder(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn cmd_return_shows_the_selected_result_in_its_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("reveal-key");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let projects = fx.path("Projects");
+    let shown = |ui: &Ui| (ui.folder(), ui.read(|f| f.query().to_string()));
+    ui.go_to(&projects);
+
+    // The keyboard does all of it: the words, Return into the results, and
+    // Cmd-Return on the one that is selected there.
+    ui.press(&cmd("f"));
+    ui.type_text("road");
+    ui.press("enter");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    ui.press(&cmd("enter"));
+    assert_eq!(
+        shown(&ui),
+        (Some(fx.dir.clone()), String::new()),
+        "the file's folder, and no search"
+    );
+    assert_eq!(
+        ui.names(),
+        ["Budget.csv", "notes.txt", "Projects", "Roadmap.md"]
+    );
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert!(ui.files_focused(), "the arrow keys go on from the file");
+    assert!(ui.system_calls().is_empty(), "the file wasn't opened");
+
+    // Back is the search again, as it is after the menu's item.
+    ui.press(&cmd("["));
+    assert_eq!(shown(&ui), (Some(projects), "road".to_string()));
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn cmd_return_shows_an_item_of_recents_or_of_sent_results_in_its_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("reveal-key-lists");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let atlas = fx.path("Projects/atlas");
+
+    ui.press(&cmd("shift-f"));
+    ui.select("Project Atlas.txt");
+    ui.press(&cmd("enter"));
+    assert_eq!(ui.folder(), Some(atlas.clone()));
+    assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+    ui.press(&cmd("["));
+    assert_eq!(ui.read(|f| f.location().clone()), Location::Recents);
+
+    let sent = vec![fx.path("Roadmap.md"), atlas.join("Project Atlas.txt")];
+    ui.update(|f, window, cx| f.show_results("Sent".into(), sent, window, cx));
+    ui.select("Project Atlas.txt");
+    ui.press(&cmd("enter"));
+    assert_eq!(ui.folder(), Some(atlas));
+    assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+}
+
+#[gpui_kit::test]
+fn cmd_return_does_nothing_in_a_folder_or_with_two_results_selected(cx: &mut TestAppContext) {
+    let fx = Fixture::new("reveal-key-nothing");
+    let mut ui = Ui::open(cx, &fx.dir);
+
+    // An item in a folder is shown in its folder already. In the columns
+    // that goes for an item further in too, whose folder is a column there.
+    ui.select("Roadmap.md");
+    ui.press(&cmd("enter"));
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert!(ui.system_calls().is_empty(), "the key doesn't open it");
+    ui.press(&cmd("3"));
+    ui.update(|f, window, cx| f.select_in_column(0, 2, window, cx));
+    ui.press("right");
+    assert_eq!(ui.selected(), ["atlas"]);
+    ui.press(&cmd("enter"));
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    assert_eq!(ui.selected(), ["atlas"]);
+
+    // Two results are in two folders.
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+    ui.select("Project Atlas.txt");
+    ui.select_also("atlas");
+    ui.press(&cmd("enter"));
+    assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    assert_eq!(ui.selected().len(), 2);
+}
+
+#[gpui_kit::test]
+fn cmd_return_in_the_trash_acts_only_on_a_result_of_a_search(cx: &mut TestAppContext) {
+    let fx = Fixture::new("reveal-key-trash");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.select("notes.txt");
+    ui.press(&cmd("backspace"));
+    ui.update(|f, window, cx| f.navigate(Location::Trash, window, cx));
+
+    // The Trash keeps its items in a folder that isn't one to browse.
+    ui.select("notes.txt");
+    ui.press(&cmd("enter"));
+    assert_eq!(ui.read(|f| f.location().clone()), Location::Trash);
+    assert_eq!(ui.selected(), ["notes.txt"]);
+
+    // A search made there finds items where they are, like any other.
+    ui.press(&cmd("f"));
+    ui.type_text("road");
+    ui.press("enter");
+    ui.press(&cmd("enter"));
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn cmd_return_leaves_an_item_of_the_trash_alone_while_the_next_place_is_read(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("reveal-key-stale");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.select("notes.txt");
+    ui.press(&cmd("backspace"));
+    ui.update(|f, window, cx| f.navigate(Location::Trash, window, cx));
+
+    // A place's items stay on screen until the place gone to next has read
+    // its own, which Recents does only once the index is ready. Recents is
+    // a list the key works in, and what's selected is still the Trash's.
+    ui.press_without_settling(&cmd("shift-f"));
+    ui.press_without_settling("down");
+    assert_eq!(
+        ui.selected(),
+        ["notes.txt"],
+        "the Trash's item, still listed"
+    );
+    ui.press(&cmd("enter"));
+    assert_eq!(ui.read(|f| f.location().clone()), Location::Recents);
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+}
+
+#[gpui_kit::test]
+fn cmd_return_in_a_file_chooser_shows_a_result_and_chooses_nothing(cx: &mut TestAppContext) {
+    let fx = Fixture::new("reveal-key-chooser");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            picker: Some(PickerOptions { multiple: false }),
+            ..Default::default()
+        },
+    );
+    ui.go_to(&fx.path("Projects"));
+    ui.click("search");
+    ui.type_text("road");
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+
+    // Return here would choose the file, which ends the chooser and the
+    // process with it.
+    ui.press(&cmd("enter"));
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert!(ui.exists("picker-choose"), "still choosing");
+}
+
+#[gpui_kit::test]
 fn a_smart_folder_opened_twice_is_one_step_back_from_its_folder(cx: &mut TestAppContext) {
     let fx = Fixture::new("search-history-smart");
     let mut ui = Ui::open(cx, &fx.dir);
