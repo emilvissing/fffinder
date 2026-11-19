@@ -9,8 +9,8 @@ use crate::model::Location;
 use crate::theme::ui;
 use crate::trash_bin::{self, TrashError, TrashStopped, Trashed};
 use crate::undo::{self, Change, Step};
-use fffinder_core::FileEntry;
 use fffinder_core::ops;
+use fffinder_core::{FileEntry, ViewMode};
 use gpui_kit::component::button::{Button, ButtonVariant};
 use gpui_kit::component::input;
 use gpui_kit::component::notification::NotificationType;
@@ -69,7 +69,7 @@ impl Finder {
             let gone = paths.clone();
             let result = cx.background_spawn(async move { bin.trash(&paths) }).await;
             this.update_in(cx, |this, window, cx| {
-                let next = item_after(&this.rows, &gone);
+                let next = item_after(&this.selection_list(), &gone);
                 // The window leaves a folder that went to the Trash, or was
                 // inside one that did, for the folder that held it.
                 let leave_for = this
@@ -231,7 +231,7 @@ impl Finder {
                     window.push_notification((NotificationType::Error, err.to_string()), cx);
                 }
                 let selected = this.selected_entries().into_iter().map(|e| e.path);
-                let next = item_after(&this.rows, &selected.collect::<Vec<_>>());
+                let next = item_after(&this.selection_list(), &selected.collect::<Vec<_>>());
                 this.selection.clear();
                 this.files_changed(next.into_iter().collect(), cx);
             })
@@ -370,15 +370,26 @@ impl Finder {
                 || path.parent() == self.current_folder()
                 || path.parent().is_some_and(|dir| self.expanded.contains(dir))
         };
-        let here: Vec<PathBuf> = select.into_iter().filter(shows).collect();
+        let here: Vec<PathBuf> = select.iter().filter(|path| shows(path)).cloned().collect();
         self.load_listing(here, true, cx);
         if self.is_searching() {
             self.results.retain(|r| r.entry.path.exists());
             self.rebuild_rows(cx);
         }
-        self.reload_columns(cx);
+        self.reload_columns_selecting(&select, cx);
         self.check_tree_for_changes(cx);
         self.tell_others(cx);
+    }
+
+    /// The items of the list the selection is in, in the order shown: the
+    /// rows, or in the column view the items of the column in use.
+    fn selection_list(&self) -> Vec<&Path> {
+        match self.columns.get(self.active_column) {
+            Some(pane) if self.effective_view() == ViewMode::Columns => {
+                pane.entries.iter().map(|e| e.path.as_path()).collect()
+            }
+            _ => super::paths_of(&self.rows).collect(),
+        }
     }
 
     /// The bar over the Trash, with its Empty button.
@@ -417,18 +428,18 @@ pub(super) fn trash_drop_target<E: InteractiveElement>(el: E, cx: &mut Context<F
         }))
 }
 
-/// The item to select once `gone` have left the list: the first after the
+/// The item to select once `gone` have left `list`: the first after the
 /// last of them, or else the nearest before. An item inside a folder that's
 /// going goes with it.
-fn item_after(rows: &[super::Row], gone: &[PathBuf]) -> Option<PathBuf> {
+fn item_after(list: &[&Path], gone: &[PathBuf]) -> Option<PathBuf> {
     let gone: HashSet<&Path> = gone.iter().map(PathBuf::as_path).collect();
-    let is_gone = |row: &super::Row| row.entry.path.ancestors().any(|dir| gone.contains(dir));
-    let last = rows.iter().rposition(is_gone)?;
-    rows[last + 1..]
+    let is_gone = |item: &&Path| item.ancestors().any(|dir| gone.contains(dir));
+    let last = list.iter().rposition(is_gone)?;
+    list[last + 1..]
         .iter()
-        .chain(rows[..last].iter().rev())
-        .find(|row| !is_gone(row))
-        .map(|row| row.entry.path.clone())
+        .chain(list[..last].iter().rev())
+        .find(|item| !is_gone(item))
+        .map(|item| item.to_path_buf())
 }
 
 /// The folder an item in the Trash came from, as the list shows it.
@@ -452,36 +463,24 @@ pub(super) fn can_put_back(trashed: &[Trashed], entries: &[FileEntry]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::item_after;
-    use crate::finder::Row;
-    use fffinder_core::FileEntry;
     use std::path::{Path, PathBuf};
 
-    /// A row for each of `names` under `/list`, which needn't exist.
-    fn rows(names: &[&str]) -> Vec<Row> {
-        let meta = std::fs::metadata(std::env::temp_dir()).unwrap();
-        names
-            .iter()
-            .map(|name| {
-                let entry = FileEntry::from_metadata(Path::new("/list").join(name), &meta, false);
-                Row::new(entry, Vec::new(), None)
-            })
-            .collect()
-    }
-
-    fn gone(names: &[&str]) -> Vec<PathBuf> {
+    /// An item for each of `names` under `/list`, which needn't exist.
+    fn items(names: &[&str]) -> Vec<PathBuf> {
         names
             .iter()
             .map(|name| Path::new("/list").join(name))
             .collect()
     }
 
-    fn after(rows: &[Row], names: &[&str]) -> Option<PathBuf> {
-        item_after(rows, &gone(names))
+    fn after(list: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
+        let list: Vec<&Path> = list.iter().map(PathBuf::as_path).collect();
+        item_after(&list, &items(names))
     }
 
     #[test]
     fn the_next_item_is_the_one_after_the_last_to_go() {
-        let list = rows(&["a", "b", "c", "d"]);
+        let list = items(&["a", "b", "c", "d"]);
 
         assert_eq!(after(&list, &["b"]), Some("/list/c".into()));
         assert_eq!(after(&list, &["a", "c"]), Some("/list/d".into()));
@@ -489,7 +488,7 @@ mod tests {
 
     #[test]
     fn after_the_last_row_the_next_item_is_the_nearest_before_it() {
-        let list = rows(&["a", "b", "c"]);
+        let list = items(&["a", "b", "c"]);
 
         assert_eq!(after(&list, &["c"]), Some("/list/b".into()));
         assert_eq!(after(&list, &["b", "c"]), Some("/list/a".into()));
@@ -497,11 +496,11 @@ mod tests {
 
     #[test]
     fn an_open_folders_items_go_with_it() {
-        let list = rows(&["a", "dir", "dir/one", "dir/two", "z"]);
+        let list = items(&["a", "dir", "dir/one", "dir/two", "z"]);
 
         assert_eq!(after(&list, &["dir"]), Some("/list/z".into()));
 
-        let at_the_end = rows(&["a", "dir", "dir/one"]);
+        let at_the_end = items(&["a", "dir", "dir/one"]);
         assert_eq!(
             after(&at_the_end, &["dir"]),
             Some("/list/a".into()),
@@ -511,7 +510,7 @@ mod tests {
 
     #[test]
     fn with_nothing_left_or_nothing_listed_there_is_no_next_item() {
-        let list = rows(&["a", "b"]);
+        let list = items(&["a", "b"]);
 
         assert_eq!(after(&list, &["a", "b"]), None);
         assert_eq!(after(&list, &["not listed"]), None);

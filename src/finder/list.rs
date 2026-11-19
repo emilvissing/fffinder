@@ -617,10 +617,7 @@ impl Finder {
     /// Sort everything again with folders on top, or not.
     pub(super) fn folders_first_changed(&mut self, cx: &mut Context<Self>) {
         self.rebuild_rows(cx);
-        let dirs: Vec<PathBuf> = self.columns.iter().map(|c| c.dir.clone()).collect();
-        for (ix, dir) in dirs.into_iter().enumerate().skip(1) {
-            self.load_column(ix, dir, cx);
-        }
+        self.reload_columns(cx);
     }
 
     pub(super) fn set_folder_sizes(&mut self, on: bool, cx: &mut Context<Self>) {

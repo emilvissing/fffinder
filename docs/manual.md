@@ -241,7 +241,7 @@ Switch views with the toolbar, the View menu, or Cmd+1 to Cmd+4. A folder opens 
 
 - **Icons** (Cmd+1) shows a grid. Image files show thumbnails, and other documents show their icon with an extension badge. Change the icon size with the slider in the status bar.
 - **List** (Cmd+2) shows Name, then Date Modified, Size, and Kind unless you choose other columns. Click a header to sort by it, and click it again to reverse. Search results add a Folder column, or a Match column showing the matching line for a contents search. Rows alternate in color, as in Finder. Columns can be dragged wider or narrower, and the list scrolls sideways when they don't all fit. See [The list view](#the-list-view).
-- **Columns** (Cmd+3) shows the folder hierarchy as side-by-side columns. Selecting a folder opens it in a new column to the right. Selecting a file shows a preview card with its kind, size, modification date, and location in the last column. Drag the line at a column's right edge to resize that column, and new columns open at that width. Double-click the line to fit the column to its longest name. Search results and Recents always use the list in this view, as Finder does.
+- **Columns** (Cmd+3) shows the folder hierarchy as side-by-side columns. Selecting a folder opens it in a new column to the right. Selecting a file shows a preview card with its kind, size, modification date, and location in the last column. The sort applies to every column. An item stays selected when its column is sorted another way or read again, wherever it's listed then, and once it's gone, the columns to its right close. Drag the line at a column's right edge to resize that column, and new columns open at that width. Double-click the line to fit the column to its longest name. Search results and Recents always use the list in this view, as Finder does.
 - **Gallery** (Cmd+4) shows a large preview of the selected item above a strip of everything in the folder. Left and Right arrows move along the strip. The gallery always shows an item, so it selects the first one when nothing is selected.
 
 Thumbnails cover PNG, JPEG, GIF, WebP, BMP, ICO, TIFF, and SVG files up to 40 MB, and on macOS PDFs, videos, and documents (see [Thumbnails](#thumbnails)).
@@ -291,7 +291,7 @@ Drag a header onto another header to move it there. Name stays first, and in sea
 | Page Up, Page Down | Move the selection a screenful. In the gallery, go to the previous or next page of a PDF. |
 | Shift+Page Up, Shift+Page Down | Extend the selection a screenful. |
 | Cmd+A | Select all. |
-| Escape | Cancel a cut. Otherwise clear the selection. With nothing selected, end the search. In `--pick` mode, cancel. |
+| Escape | Cancel a cut. Otherwise clear the selection. In columns, that's the active column's item, and the columns to its right close. With nothing selected, end the search. In `--pick` mode, cancel. |
 
 ### Type to select
 

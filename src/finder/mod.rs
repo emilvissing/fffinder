@@ -1553,6 +1553,7 @@ impl Finder {
                         this.selection.toggle(ix);
                     }
                     this.scroll_to(first);
+                    this.select_row_in_columns(first, cx);
                 }
                 // For what stays selected too: its file may have come back
                 // another size or date, and its preview is read again then.
@@ -1734,7 +1735,7 @@ impl Finder {
                 self.load_children(dir.clone(), cx);
             }
             if let Some(ix) = self.columns.iter().skip(1).position(|pane| pane.dir == dir) {
-                self.load_column(ix + 1, dir, cx);
+                self.load_column(ix + 1, dir, None, cx);
             }
         }
     }
@@ -1765,9 +1766,24 @@ impl Finder {
 
     /// Reload the column view's panes after the first, which mirrors the rows.
     fn reload_columns(&mut self, cx: &mut Context<Self>) {
+        self.reload_columns_selecting(&[], cx);
+    }
+
+    /// [`Self::reload_columns`], selecting the first of `select` that is in
+    /// the folder of the column in use. In no other column: selecting in one
+    /// makes it the column in use, and closes the columns after it. And in
+    /// none while a search's results show in the columns' place, where the
+    /// items are selected among the results. The first column's selection
+    /// follows the rows'.
+    fn reload_columns_selecting(&mut self, select: &[PathBuf], cx: &mut Context<Self>) {
+        let in_use = (self.effective_view() == ViewMode::Columns).then_some(self.active_column);
         let dirs: Vec<PathBuf> = self.columns.iter().map(|c| c.dir.clone()).collect();
         for (ix, dir) in dirs.into_iter().enumerate().skip(1) {
-            self.load_column(ix, dir, cx);
+            let select = select
+                .iter()
+                .find(|path| in_use == Some(ix) && path.parent() == Some(dir.as_path()))
+                .cloned();
+            self.load_column(ix, dir, select, cx);
         }
     }
 
@@ -2699,9 +2715,28 @@ impl Finder {
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        self.selection.clear();
+        match self.effective_view() {
+            ViewMode::Columns => self.deselect_in_column(),
+            _ => self.selection.clear(),
+        }
         self.selection_changed(cx);
         cx.notify();
+    }
+
+    /// Whether anything is selected in the view that's showing. In the
+    /// column view that's the item selected in the column in use, which the
+    /// selection the other views show needn't hold. With the first column
+    /// in use that selection counts too: it can hold items no column shows
+    /// selected, as after Select All or a change of view, and the status
+    /// bar counts them.
+    fn has_selection(&self) -> bool {
+        match self.effective_view() {
+            ViewMode::Columns => {
+                self.column_selection().is_some()
+                    || (self.active_column == 0 && !self.selection.is_empty())
+            }
+            _ => !self.selection.is_empty(),
+        }
     }
 
     fn selection_changed(&mut self, cx: &mut Context<Self>) {
@@ -2964,7 +2999,7 @@ impl Finder {
         if crate::system::forget_cut(cx) {
             return;
         }
-        if !self.selection.is_empty() {
+        if self.has_selection() {
             self.clear_selection(cx);
         } else if self.is_searching() {
             self.end_search(window, cx);
@@ -3156,6 +3191,8 @@ impl Finder {
                 // Last-opened dates are only read when something needs them.
                 self.load_listing(Vec::new(), true, cx);
             }
+            // The column view's further columns are sorted as they're read.
+            self.reload_columns(cx);
         }
         self.rebuild_rows(cx);
     }
@@ -3172,6 +3209,7 @@ impl Finder {
             self.config.sort.ascending = ascending;
             self.settings_changed(cx);
             self.remember_folder_view(cx);
+            self.reload_columns(cx);
         }
         self.rebuild_rows(cx);
     }
@@ -3903,9 +3941,19 @@ impl Finder {
                     .selected
                     .and_then(|ix| first.entries.get(ix))
                     .map(|e| e.path.clone());
+                let was_selected = selected_path.is_some();
                 first.selected =
                     selected_path.and_then(|p| entries.iter().position(|e| e.path == p));
                 first.entries = entries;
+                // The columns after this one show what's in its selected
+                // item, and go with it when it's no longer listed. A filter
+                // that's still running hasn't said what it keeps of these
+                // rows: until it does they're cut by what it kept of the
+                // last ones, and the item may be missing only for now.
+                if was_selected && first.selected.is_none() && !self.filtering {
+                    self.columns.truncate(1);
+                    self.active_column = 0;
+                }
             }
             _ => {
                 self.columns = vec![ColumnPane {
@@ -3926,6 +3974,20 @@ impl Finder {
         col.selected.and_then(|ix| col.entries.get(ix)).cloned()
     }
 
+    /// Let go of the item selected in the column in use. The columns after
+    /// it showed what was in the item, and close. The first column's item
+    /// is the one the other views show selected, so they let go of it too.
+    fn deselect_in_column(&mut self) {
+        let col = self.active_column;
+        if let Some(pane) = self.columns.get_mut(col) {
+            pane.selected = None;
+            self.columns.truncate(col + 1);
+        }
+        if col == 0 {
+            self.selection.clear();
+        }
+    }
+
     /// Select `ix` in column `col`; folders open a new column to the right.
     pub fn select_in_column(
         &mut self,
@@ -3935,19 +3997,30 @@ impl Finder {
         cx: &mut Context<Self>,
     ) {
         self.focus_files(window, cx);
+        if self.select_in_column_quiet(col, ix, cx) && col == 0 {
+            self.selection.select_only(ix);
+        }
+    }
+
+    /// [`Self::select_in_column`] for an item the window selects by itself,
+    /// as it does the one just renamed. The keyboard stays where it is,
+    /// which may be in a name being edited or in Quick Look, and so does the
+    /// selection the other views show, which can hold more than one item.
+    ///
+    /// # Returns
+    ///
+    /// Whether the column has such an item
+    fn select_in_column_quiet(&mut self, col: usize, ix: usize, cx: &mut Context<Self>) -> bool {
         let Some(pane) = self.columns.get_mut(col) else {
-            return;
+            return false;
         };
         let Some(entry) = pane.entries.get(ix).cloned() else {
-            return;
+            return false;
         };
         pane.selected = Some(ix);
         pane.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
         self.active_column = col;
         self.columns.truncate(col + 1);
-        if col == 0 {
-            self.selection.select_only(ix);
-        }
         if entry.is_navigable() {
             let width = self.config.column_view_width();
             self.columns.push(ColumnPane {
@@ -3958,7 +4031,7 @@ impl Finder {
                 width,
                 stamp: None,
             });
-            self.load_column(col + 1, entry.path.clone(), cx);
+            self.load_column(col + 1, entry.path.clone(), None, cx);
         } else {
             self.ensure_preview(&entry, cx);
         }
@@ -3966,9 +4039,49 @@ impl Finder {
         self.columns_scroll
             .scroll_to_item(columns.saturating_sub(1));
         cx.notify();
+        true
     }
 
-    fn load_column(&mut self, col: usize, dir: PathBuf, cx: &mut Context<Self>) {
+    /// Row `ix` was selected by the window itself, as the item just renamed
+    /// or pasted is, and the folder Back came from. In the column view it's
+    /// selected in the first column too, which lists the rows, unless it
+    /// already is. Only while that column is the one in use: selecting there
+    /// closes the columns after it.
+    fn select_row_in_columns(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let first_in_use = self.effective_view() == ViewMode::Columns && self.active_column == 0;
+        let first = self.columns.first();
+        if first_in_use && first.is_some_and(|pane| pane.selected != Some(ix)) {
+            self.select_in_column_quiet(0, ix, cx);
+        }
+    }
+
+    /// An item was renamed from `was` to `now`. A column after the first
+    /// that lists its folder would show the old name until the folder is
+    /// next looked at for changes, so it's read again at once, and the item
+    /// stays selected there if it was. The first column follows the rows.
+    fn renamed_in_columns(&mut self, was: &Path, now: PathBuf, cx: &mut Context<Self>) {
+        let Some(dir) = was.parent() else {
+            return;
+        };
+        let mut panes = self.columns.iter().enumerate().skip(1);
+        if let Some((col, pane)) = panes.find(|(_, pane)| pane.dir == dir) {
+            let selected = pane.selected.and_then(|ix| pane.entries.get(ix));
+            let select = selected.is_some_and(|entry| entry.path == was);
+            self.load_column(col, dir.to_path_buf(), select.then_some(now), cx);
+        }
+    }
+
+    /// Read the folder at `dir` for column `col`, and select the item at
+    /// `select` there when it's listed. An item that was selected stays
+    /// selected wherever it's listed now: items may have come or gone before
+    /// it since, and the sort may have changed.
+    fn load_column(
+        &mut self,
+        col: usize,
+        dir: PathBuf,
+        select: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         let show_hidden = self.config.show_hidden;
         let sort = self.config.sort;
         let folders_first = self.config.folders_first;
@@ -3989,8 +4102,27 @@ impl Finder {
                 if let Some(pane) = this.columns.get_mut(col)
                     && pane.dir == dir
                 {
+                    // What's selected as of now: it may have changed while
+                    // the folder was read.
+                    let selected_path = pane
+                        .selected
+                        .and_then(|ix| pane.entries.get(ix))
+                        .map(|entry| entry.path.clone());
+                    let position =
+                        |path: &PathBuf| entries.iter().position(|entry| entry.path == *path);
+                    let kept = selected_path.as_ref().and_then(position);
+                    let wanted = select.as_ref().and_then(position);
+                    pane.selected = kept;
                     pane.entries = entries;
                     pane.stamp = stamp;
+                    if let Some(ix) = wanted.filter(|ix| kept != Some(*ix)) {
+                        this.select_in_column_quiet(col, ix, cx);
+                    } else if selected_path.is_some() && kept.is_none() {
+                        // The columns after this one showed what was in the
+                        // selected item, which is no longer listed.
+                        this.columns.truncate(col + 1);
+                        this.active_column = this.active_column.min(col);
+                    }
                     // The item that's previewed is the active pane's, and
                     // its preview is read again if it came back changed. A
                     // pane that fills in for a folder just selected is never

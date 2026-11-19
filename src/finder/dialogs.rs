@@ -882,7 +882,8 @@ impl Finder {
             }
         }
         if !followed {
-            self.load_listing(vec![target], true, cx);
+            self.load_listing(vec![target.clone()], true, cx);
+            self.renamed_in_columns(path, target, cx);
         }
         true
     }

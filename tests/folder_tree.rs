@@ -333,6 +333,30 @@ fn new_folder_and_rename_happen_in_the_tree(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_rename_in_the_tree_leaves_a_columns_selection_alone(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tree-name-columns");
+    std::fs::write(fx.path("Projects/b.txt"), "x").unwrap();
+    let (mut ui, home) = tree_window(cx, &fx);
+    let projects = home.under(fx.path("Projects"));
+    ui.click(home.disclosure_id());
+    ui.click(projects.disclosure_id());
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/b.txt")));
+
+    // The folder beside the selected item, in the second column.
+    ui.right_click(projects.under(fx.path("Projects/atlas")).row_id());
+    ui.click_menu_item("Rename…");
+    ui.type_text("maps");
+    ui.press("enter");
+
+    assert!(fx.path("Projects/maps").is_dir());
+    let columns = ui.read(|f| f.column_names_for_test());
+    assert_eq!(columns[1], ["b.txt", "maps"], "the column has the name");
+    assert_eq!(ui.selected(), ["b.txt"]);
+}
+
+#[gpui_kit::test]
 fn moving_the_folder_shown_takes_the_window_along(cx: &mut TestAppContext) {
     let fx = Fixture::new("tree-move-shown");
     std::fs::create_dir_all(fx.path("Archive/inner")).unwrap();

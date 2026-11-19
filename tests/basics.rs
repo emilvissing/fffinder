@@ -1716,12 +1716,51 @@ fn renaming_in_place_works_in_every_view_but_the_gallery(cx: &mut TestAppContext
     ui.type_text("columns");
     ui.press("enter");
     assert!(fx.path("columns.txt").exists());
+    assert_eq!(ui.selected(), ["columns.txt"], "still the selected item");
 
     ui.click("view-gallery");
     ui.press("f2");
     assert!(ui.dialog_open());
     assert!(!ui.exists("rename-field"));
     ui.press("escape");
+}
+
+#[gpui_kit::test]
+fn a_name_changed_in_a_further_column_shows_there_at_once(cx: &mut TestAppContext) {
+    let fx = projects_with("rename-column", &["a.txt", "b.txt", "c.txt"]);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/b.txt")));
+
+    ui.press("f2");
+    ui.type_text("zz");
+    ui.press("enter");
+
+    assert!(fx.path("Projects/zz.txt").exists());
+    assert_eq!(columns(&ui)[1], ["a.txt", "atlas", "c.txt", "zz.txt"]);
+    assert_eq!(ui.selected(), ["zz.txt"], "where it sorts now");
+    assert!(ui.files_focused(), "the keys go back to the files");
+    ui.look_for_changes(1);
+    assert_eq!(
+        ui.selected(),
+        ["zz.txt"],
+        "after the window has looked at the folder again too"
+    );
+
+    // A folder's own column follows it to its new name.
+    ui.click(item_id("crow", &fx.path("Projects/atlas")));
+    ui.press("f2");
+    ui.type_text("maps");
+    ui.press("enter");
+    assert_eq!(ui.selected(), ["maps"]);
+    assert_eq!(
+        columns(&ui)[1..],
+        [
+            vec!["a.txt", "c.txt", "maps", "zz.txt"],
+            vec!["Project Atlas.txt"]
+        ]
+    );
 }
 
 #[gpui_kit::test]
@@ -1734,6 +1773,23 @@ fn a_new_folder_is_named_in_place(cx: &mut TestAppContext) {
 
     assert!(!ui.dialog_open());
     assert_eq!(ui.selected(), ["untitled folder"]);
+    ui.type_text("Archive");
+    ui.press("enter");
+    assert!(fx.path("Archive").is_dir());
+    assert_eq!(ui.selected(), ["Archive"]);
+}
+
+#[gpui_kit::test]
+fn a_new_folder_is_selected_in_the_column_view_too(cx: &mut TestAppContext) {
+    let fx = Fixture::new("rename-new-column");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("notes.txt")));
+
+    ui.press(&cmd("shift-n"));
+
+    assert!(ui.exists("rename-input"));
+    assert_eq!(ui.selected(), ["untitled folder"], "while it is named");
     ui.type_text("Archive");
     ui.press("enter");
     assert!(fx.path("Archive").is_dir());
@@ -3124,6 +3180,290 @@ fn a_search_sent_along_with_a_folder_ends_at_that_folders_top(cx: &mut TestAppCo
     assert!(ui.exists(item_id("row", &fx.path("Projects/atlas"))));
 }
 
+// ----- what is selected in the column view ---------------------------------------------
+
+/// The fixture with `files` in Projects, beside its folder `atlas`.
+fn projects_with(name: &str, files: &[&str]) -> Fixture {
+    let fx = Fixture::new(name);
+    for file in files {
+        std::fs::write(fx.path("Projects").join(file), "x").unwrap();
+    }
+    fx
+}
+
+/// The names in each of the column view's columns, from the left.
+fn columns(ui: &Ui) -> Vec<Vec<String>> {
+    ui.read(|f| f.column_names_for_test())
+}
+
+#[gpui_kit::test]
+fn a_column_read_again_keeps_its_selected_item(cx: &mut TestAppContext) {
+    let fx = projects_with("column-reread", &[".x.txt", "b.txt", "c.txt"]);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/b.txt")));
+    assert_eq!(columns(&ui)[1], ["atlas", "b.txt", "c.txt"]);
+
+    // Hidden files put one more item before it.
+    ui.press(&cmd("shift-."));
+    assert_eq!(columns(&ui)[1], [".x.txt", "atlas", "b.txt", "c.txt"]);
+    assert_eq!(ui.selected(), ["b.txt"]);
+
+    // So does a file another program makes, which the next look finds.
+    std::fs::write(fx.path("Projects/a.txt"), "x").unwrap();
+    ui.look_for_changes(1);
+    assert_eq!(
+        columns(&ui)[1],
+        [".x.txt", "a.txt", "atlas", "b.txt", "c.txt"]
+    );
+    assert_eq!(ui.selected(), ["b.txt"]);
+
+    // Once it has gone, no other item is selected in its place.
+    std::fs::remove_file(fx.path("Projects/b.txt")).unwrap();
+    ui.press(&cmd("r"));
+    assert_eq!(columns(&ui)[1], [".x.txt", "a.txt", "atlas", "c.txt"]);
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+}
+
+#[gpui_kit::test]
+fn the_columns_after_a_folder_that_has_gone_close(cx: &mut TestAppContext) {
+    let fx = Fixture::new("column-folder-gone");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/atlas")));
+    assert_eq!(columns(&ui).len(), 3);
+
+    // Another program renames the folder the last column shows.
+    std::fs::rename(fx.path("Projects/atlas"), fx.path("Projects/maps")).unwrap();
+    ui.press(&cmd("r"));
+    assert_eq!(columns(&ui)[1..], [["maps"]]);
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+    // The arrow keys go on in the column that listed it.
+    ui.press("down");
+    assert_eq!(ui.selected(), ["maps"]);
+    assert_eq!(columns(&ui)[1..], [vec!["maps"], vec!["Project Atlas.txt"]]);
+
+    // And then the folder the second column shows.
+    std::fs::rename(fx.path("Projects"), fx.path("Work")).unwrap();
+    ui.press(&cmd("r"));
+    assert_eq!(
+        columns(&ui),
+        [["Budget.csv", "notes.txt", "Roadmap.md", "Work"]]
+    );
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+    ui.press("up");
+    assert_eq!(ui.selected(), ["Work"], "the first column has the keys");
+}
+
+#[gpui_kit::test]
+fn escape_lets_go_of_the_item_selected_in_a_column(cx: &mut TestAppContext) {
+    let fx = projects_with("column-escape", &["b.txt"]);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/atlas")));
+    assert_eq!(columns(&ui).len(), 3);
+
+    // In the column in use, and the column that showed what's in the item
+    // goes with it.
+    ui.press("escape");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+    assert_eq!(columns(&ui)[1..], [["atlas", "b.txt"]]);
+    ui.press("left");
+    assert_eq!(ui.selected(), ["Projects"], "the columns before it stay");
+
+    // The first column's item is the one the other views show selected.
+    ui.click(item_id("crow", &fx.path("notes.txt")));
+    ui.click("view-list");
+    assert_eq!(ui.selected(), ["notes.txt"]);
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("notes.txt")));
+    ui.press("escape");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+    ui.click("view-list");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+
+    // They let go of an item no column shows selected too, one selected
+    // before the columns were chosen: the status bar counts it.
+    ui.select("Budget.csv");
+    ui.click("view-columns");
+    ui.press("escape");
+    ui.click("view-list");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+
+    // An item the window selected itself in a further column, the next one
+    // after a move to the Trash, isn't one the other views have selected.
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/b.txt")));
+    ui.press(&cmd("backspace"));
+    assert_eq!(ui.selected(), ["atlas"]);
+    ui.press("escape");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+}
+
+#[gpui_kit::test]
+fn the_columns_close_for_what_a_filter_leaves_out_once_it_has_answered(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = projects_with("column-filter", &["b.txt"]);
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    let open_projects = |ui: &mut Ui| {
+        ui.click(item_id("crow", &fx.path("Projects")));
+        ui.click(item_id("crow", &fx.path("Projects/b.txt")));
+    };
+    ui.click("view-columns");
+    open_projects(&mut ui);
+
+    // A filter that leaves Projects out takes its column along.
+    ui.press(&cmd("alt-f"));
+    ui.type_text("name =~ 'notes'");
+    ui.press("enter");
+    assert_eq!(columns(&ui), [["notes.txt"]]);
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+
+    // One that is still running hasn't left anything out yet. When a search
+    // ends, the filter runs again for the folder's items, and until it
+    // answers they're held against what it kept of the results, which
+    // Projects wasn't one of.
+    ui.press(&cmd("a"));
+    ui.type_text("name =~ 'o'");
+    ui.press("enter");
+    assert_eq!(columns(&ui), [["notes.txt", "Projects", "Roadmap.md"]]);
+    open_projects(&mut ui);
+    ui.press(&cmd("f"));
+    ui.type_text("road");
+    ui.press("escape");
+    assert_eq!(columns(&ui)[1..], [["atlas", "b.txt"]]);
+    assert_eq!(ui.selected(), ["b.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_sort_puts_every_column_in_its_order(cx: &mut TestAppContext) {
+    let fx = Fixture::new("column-sort");
+    std::fs::write(fx.path("Projects/a.txt"), "x".repeat(3000)).unwrap();
+    std::fs::write(fx.path("Projects/b.txt"), "x".repeat(10)).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/b.txt")));
+    assert_eq!(columns(&ui)[1], ["a.txt", "atlas", "b.txt"]);
+
+    // The largest first.
+    ui.click("sort");
+    ui.click_menu_item("Size");
+    assert_eq!(columns(&ui)[1], ["a.txt", "b.txt", "atlas"]);
+    assert_eq!(ui.selected(), ["b.txt"], "the same item, where it is now");
+
+    ui.click("sort");
+    ui.click_menu_item("Ascending");
+    assert_eq!(columns(&ui)[1], ["atlas", "b.txt", "a.txt"]);
+    assert_eq!(ui.selected(), ["b.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_paste_into_the_windows_folder_leaves_a_further_column_as_it_is(cx: &mut TestAppContext) {
+    let fx = projects_with("column-paste", &["b.txt"]);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/b.txt")));
+
+    // A paste goes into the folder the window shows, which is the first
+    // column's, and what it brings is selected there in the other views.
+    ui.press(&cmd("c"));
+    ui.press(&cmd("v"));
+
+    assert!(fx.path("b.txt").exists());
+    assert_eq!(
+        columns(&ui),
+        [
+            vec!["b.txt", "Budget.csv", "notes.txt", "Projects", "Roadmap.md"],
+            vec!["atlas", "b.txt"]
+        ]
+    );
+    let selected = ui.read(|f| f.selected_entries());
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].path, fx.path("Projects/b.txt"));
+}
+
+#[gpui_kit::test]
+fn what_a_paste_brings_is_selected_in_the_first_column(cx: &mut TestAppContext) {
+    let fx = Fixture::new("column-paste-first");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.select("Budget.csv");
+    ui.select_also("notes.txt");
+    ui.press(&cmd("c"));
+    ui.go_to(&fx.path("Projects"));
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects/atlas")));
+
+    ui.press(&cmd("v"));
+
+    // A column has one item selected, so it's the first of them, and the
+    // other views have them all.
+    assert_eq!(columns(&ui), [["atlas", "Budget.csv", "notes.txt"]]);
+    assert_eq!(ui.selected(), ["Budget.csv"]);
+    ui.click("view-list");
+    assert_eq!(ui.selected(), ["Budget.csv", "notes.txt"]);
+}
+
+#[gpui_kit::test]
+fn what_undo_puts_back_in_an_earlier_column_leaves_the_one_in_use(cx: &mut TestAppContext) {
+    let fx = projects_with("column-undo", &["b.txt"]);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/b.txt")));
+    ui.press(&cmd("backspace"));
+    assert_eq!(ui.selected(), ["atlas"]);
+    ui.press("right");
+    assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+
+    ui.press(&cmd("z"));
+
+    assert_eq!(columns(&ui)[1], ["atlas", "b.txt"], "it's back");
+    assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+    assert_eq!(columns(&ui).len(), 3);
+}
+
+#[gpui_kit::test]
+fn a_result_sent_to_the_trash_leaves_the_columns_as_they_were(cx: &mut TestAppContext) {
+    let fx = projects_with("column-results", &["b.txt", "zq one.txt", "zq two.txt"]);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/b.txt")));
+
+    // Results are a list in this view. The next one is selected there, and
+    // it is in the folder of the column that was in use.
+    ui.press(&cmd("f"));
+    ui.type_text("zq");
+    ui.press("enter");
+    let first = ui.selected();
+    ui.press(&cmd("backspace"));
+    assert_eq!(ui.names().len(), 1, "one of the two is left");
+    assert_eq!(ui.selected(), ui.names());
+    assert_ne!(ui.selected(), first);
+
+    ui.press("escape");
+    ui.press("escape");
+    assert_eq!(ui.read(|f| f.query().to_string()), "");
+    assert_eq!(ui.selected(), ["b.txt"]);
+}
+
 // ----- the selection after a removal ---------------------------------------------------
 
 #[gpui_kit::test]
@@ -3141,6 +3481,43 @@ fn what_could_not_go_to_the_trash_stays_selected(cx: &mut TestAppContext) {
 
     assert!(fx.path("notes.txt").exists());
     assert_eq!(ui.selected(), ["notes.txt"], "to try again");
+    std::fs::remove_file(trash).unwrap();
+}
+
+#[gpui_kit::test]
+fn what_could_not_go_to_the_trash_keeps_its_column_as_it_was(cx: &mut TestAppContext) {
+    let fx = Fixture::new("trash-failed-column");
+    for ix in 0..100 {
+        std::fs::write(fx.path(&format!("Projects/item {ix:03}.txt")), "x").unwrap();
+        std::fs::write(fx.path(&format!("Projects/atlas/item {ix:03}.txt")), "x").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    // A Trash that's a file can't take anything.
+    let trash = common::trash_dir(&fx.dir);
+    std::fs::remove_dir_all(&trash).unwrap();
+    std::fs::write(&trash, "").unwrap();
+
+    // A folder in the first column, whose items are in the second,
+    // scrolled away from the top.
+    let atlas = item_id("crow", &fx.path("Projects/atlas"));
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.scroll(atlas.clone(), point(px(0.), px(-1200.)));
+    assert!(!ui.exists(atlas.clone()), "scrolled");
+    ui.press(&cmd("backspace"));
+    assert!(fx.path("Projects").exists());
+    assert_eq!(ui.selected(), ["Projects"], "to try again");
+    assert!(!ui.exists(atlas), "its column stayed as it was");
+
+    // And one in the second column, which Right goes to the top of.
+    let first = item_id("crow", &fx.path("Projects/atlas/item 000.txt"));
+    ui.press("right");
+    assert_eq!(ui.selected(), ["atlas"]);
+    ui.scroll(first.clone(), point(px(0.), px(-1200.)));
+    assert!(!ui.exists(first.clone()), "scrolled");
+    ui.press(&cmd("backspace"));
+    assert_eq!(ui.selected(), ["atlas"]);
+    assert!(!ui.exists(first), "its column stayed as it was");
     std::fs::remove_file(trash).unwrap();
 }
 
@@ -3163,6 +3540,39 @@ fn the_next_item_is_selected_after_moving_one_to_the_trash(cx: &mut TestAppConte
     ui.select(&last);
     ui.press(&cmd("backspace"));
     assert_eq!(ui.selected(), [before.as_str()]);
+}
+
+#[gpui_kit::test]
+fn the_next_item_is_selected_in_the_column_one_left_for_the_trash(cx: &mut TestAppContext) {
+    let fx = projects_with("trash-next-column", &["a.txt", "b.txt", "c.txt"]);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/b.txt")));
+
+    ui.press(&cmd("backspace"));
+    assert_eq!(columns(&ui)[1], ["a.txt", "atlas", "c.txt"]);
+    assert_eq!(ui.selected(), ["c.txt"]);
+
+    // The last item has none after it, so the one before it is next, and
+    // being a folder it shows its items in a column of its own.
+    ui.press(&cmd("backspace"));
+    assert_eq!(ui.selected(), ["atlas"]);
+    assert_eq!(
+        columns(&ui)[1..],
+        [vec!["a.txt", "atlas"], vec!["Project Atlas.txt"]]
+    );
+
+    // The first column lists the window's own folder.
+    ui.click(item_id("crow", &fx.path("notes.txt")));
+    ui.press(&cmd("backspace"));
+    assert_eq!(ui.selected(), ["Projects"]);
+    ui.press(&cmd("z"));
+    assert_eq!(
+        ui.selected(),
+        ["notes.txt"],
+        "Undo selects what it put back"
+    );
 }
 
 // ----- the empty-space menu --------------------------------------------------------------

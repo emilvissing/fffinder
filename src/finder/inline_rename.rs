@@ -287,6 +287,7 @@ impl Finder {
             self.rebuild_rows(cx);
             if let Some(ix) = self.rows.iter().position(|row| row.entry.path == path) {
                 self.selection.select_only(ix);
+                self.select_row_in_columns(ix, cx);
                 self.selection_changed(cx);
             }
         }

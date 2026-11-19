@@ -66,6 +66,34 @@ fn alt_up_goes_to_the_enclosing_folder_too(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn back_and_cmd_up_select_the_folder_left_in_the_column_view_too(cx: &mut TestAppContext) {
+    let fx = Fixture::new("nav-columns");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("3"));
+    ui.go_to(&fx.path("Projects"));
+    assert_eq!(ui.read(|f| f.effective_view()), ViewMode::Columns);
+
+    ui.press(&cmd("["));
+    assert_eq!(ui.folder().as_deref(), Some(fx.dir.as_path()));
+    assert_eq!(ui.selected(), ["Projects"]);
+    assert_eq!(
+        ui.read(|f| f.column_names_for_test()),
+        [
+            vec!["Budget.csv", "notes.txt", "Projects", "Roadmap.md"],
+            vec!["atlas"]
+        ],
+        "with its items in the next column, as after a click on it"
+    );
+    ui.press("right");
+    assert_eq!(ui.selected(), ["atlas"], "the arrow keys go on from it");
+
+    ui.press(&cmd("]"));
+    ui.press(&cmd("up"));
+    assert_eq!(ui.folder().as_deref(), Some(fx.dir.as_path()));
+    assert_eq!(ui.selected(), ["Projects"]);
+}
+
+#[gpui_kit::test]
 fn a_key_bound_twice_acts_once(cx: &mut TestAppContext) {
     let fx = Fixture::new("nav-keys-twice");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -464,6 +492,29 @@ fn cmd_return_shows_the_selected_result_in_its_folder(cx: &mut TestAppContext) {
     ui.press(&cmd("["));
     assert_eq!(shown(&ui), (Some(projects), "road".to_string()));
     assert_eq!(ui.names(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn cmd_return_selects_the_result_in_its_folders_column(cx: &mut TestAppContext) {
+    let fx = Fixture::new("reveal-key-columns");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("3"));
+    ui.go_to(&fx.path("Projects"));
+
+    // The results are a list in this view too, and the folder the key leads
+    // to is in columns again.
+    ui.press(&cmd("f"));
+    ui.type_text("road");
+    ui.press("enter");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    ui.press(&cmd("enter"));
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    assert_eq!(ui.read(|f| f.effective_view()), ViewMode::Columns);
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert!(
+        ui.read(|f| f.has_preview_for_test(&fx.path("Roadmap.md"))),
+        "with its preview beside the column"
+    );
 }
 
 #[gpui_kit::test]
