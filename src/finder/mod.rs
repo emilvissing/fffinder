@@ -54,6 +54,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 pub use explore::QuickLookMode;
@@ -281,6 +282,25 @@ pub struct SearchStats {
     pub stopped: bool,
 }
 
+/// Tells a content search to stop when it's dropped: when the next search
+/// starts, when the search ends, and when its tab closes. Dropping the
+/// search's task isn't enough, as that only stops waiting for the answer.
+#[derive(Default)]
+struct AbortOnDrop(Arc<AtomicBool>);
+
+impl AbortOnDrop {
+    /// The flag the search watches.
+    fn flag(&self) -> Arc<AtomicBool> {
+        self.0.clone()
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 pub struct Finder {
     focus: FocusHandle,
     files_focus: FocusHandle,
@@ -304,6 +324,8 @@ pub struct Finder {
     /// The search hasn't started yet: it's waiting for a pause in typing.
     search_waiting: bool,
     search_task: Task<()>,
+    /// Stops the content search `search_task` started once it's replaced.
+    search_abort: AbortOnDrop,
     search_gen: u64,
     /// Return or Down Arrow was pressed in the search field before the rows
     /// were the results for what's typed, and moves into them once they are.
@@ -560,6 +582,7 @@ impl Finder {
             searching: false,
             search_waiting: false,
             search_task: Task::ready(()),
+            search_abort: AbortOnDrop::default(),
             search_gen: 0,
             enter_results: None,
             rows: Vec::new(),
@@ -697,6 +720,12 @@ impl Finder {
     #[doc(hidden)]
     pub fn search_in_flight_for_test(&self) -> bool {
         self.searching
+    }
+
+    /// The flag that stops the search last started, once it's set.
+    #[doc(hidden)]
+    pub fn search_abort_for_test(&self) -> Arc<AtomicBool> {
+        self.search_abort.flag()
     }
 
     #[doc(hidden)]
@@ -1449,6 +1478,7 @@ impl Finder {
         if self.query.is_empty() {
             self.search_gen += 1;
             self.search_task = Task::ready(());
+            self.search_abort = AbortOnDrop::default();
             self.results.clear();
             self.search_stats = None;
             self.searching = false;
@@ -1494,6 +1524,11 @@ impl Finder {
         }
         self.search_gen += 1;
         let generation = self.search_gen;
+        // A content search still running for what was asked before would
+        // keep its share of the search threads, and its hold on the index,
+        // until it ended by itself.
+        self.search_abort = AbortOnDrop::default();
+        let abort = self.search_abort.flag();
         let engine = self.engine.clone();
         let engine_for_retry = self.engine.clone();
         let scope = match self.scope {
@@ -1534,7 +1569,7 @@ impl Finder {
             let (rows, stats) = cx
                 .background_spawn(async move {
                     if contents {
-                        content_search(&engine, &query, scope, request.limit)
+                        content_search(&engine, &query, scope, request.limit, &abort)
                     } else {
                         let response = engine.search(&request);
                         let rows = response
@@ -1634,16 +1669,36 @@ impl Finder {
     // ----- index status -------------------------------------------------------
 
     fn poll_index_status(&mut self, cx: &mut Context<Self>) {
-        self.index_status = self.engine.status();
+        // Reading the status takes each index's lock, which a scan may hold,
+        // or a change to the index that waits for a content search to end,
+        // so it's read off the UI thread.
+        let engine = self.engine.clone();
         self.status_task = cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_spawn({
+                    let engine = engine.clone();
+                    async move { engine.status() }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.index_status = status;
+                cx.notify();
+            })
+            .ok();
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(400))
                     .await;
+                let status = cx
+                    .background_spawn({
+                        let engine = engine.clone();
+                        async move { engine.status() }
+                    })
+                    .await;
                 let keep_going = this
                     .update(cx, |this, cx| {
                         let was_scanning = this.index_status.iter().any(|s| s.scanning);
-                        this.index_status = this.engine.status();
+                        this.index_status = status;
                         let scanning = this.index_status.iter().any(|s| s.scanning);
                         if was_scanning && !scanning {
                             // The index can now find terminals outside the app folders.
@@ -3132,20 +3187,23 @@ impl Finder {
 }
 
 /// Content search: one row per matching file, showing the first matching line.
+/// It ends early, with part of the rows, once `abort` is set.
 fn content_search(
     engine: &Engine,
     query: &str,
     scope: Option<PathBuf>,
     limit: usize,
+    abort: &Arc<AtomicBool>,
 ) -> (Vec<Row>, SearchStats) {
-    let response = engine.grep(&GrepRequest {
+    let request = GrepRequest {
         patterns: vec![query.to_string()],
         scope,
         limit: limit.max(50) * 4,
         per_file: 20,
         trim: true,
         ..Default::default()
-    });
+    };
+    let response = engine.grep_cancellable(&request, Some(abort));
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
     for hit in response.hits {
@@ -3595,10 +3653,13 @@ pub fn group_digits(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's `test` attribute would replace the standard one.
-    use super::{IndexActivity, ListingError};
+    use super::{AbortOnDrop, IndexActivity, ListingError, content_search};
     use crate::trash_bin::TrashError;
-    use fffinder_core::RootStatus;
+    use fffinder_core::{Engine, EngineOptions, RootStatus};
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn only_a_trash_kept_out_by_macos_asks_for_full_disk_access() {
@@ -3607,6 +3668,51 @@ mod tests {
         assert_eq!(denied.message, TrashError::NeedsFullDiskAccess.to_string());
         assert!(!ListingError::from(TrashError::NoHome).needs_access);
         assert!(!ListingError::new("Permission denied".into()).needs_access);
+    }
+
+    #[test]
+    fn a_search_is_told_to_stop_when_its_handle_is_dropped_or_replaced() {
+        let handle = AbortOnDrop::default();
+        let flag = handle.flag();
+        assert!(!flag.load(Ordering::Relaxed));
+        drop(handle);
+        assert!(flag.load(Ordering::Relaxed));
+
+        let mut handle = AbortOnDrop::default();
+        let first = handle.flag();
+        handle = AbortOnDrop::default();
+        assert!(
+            first.load(Ordering::Relaxed),
+            "the next search took its place"
+        );
+        assert!(!handle.flag().load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_content_search_ends_early_once_its_flag_is_set() {
+        let dir =
+            std::env::temp_dir().join(format!("fffinder-content-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in 0..200 {
+            std::fs::write(dir.join(format!("{n}.txt")), "needle\n").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let abort = Arc::new(AtomicBool::new(false));
+        let (rows, _) = content_search(&engine, "needle", None, 500, &abort);
+        assert_eq!(rows.len(), 200);
+
+        abort.store(true, Ordering::Relaxed);
+        let (rows, _) = content_search(&engine, "needle", None, 500, &abort);
+        assert!(rows.len() < 50, "{} rows", rows.len());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn root(scanning: bool, finishing: bool, files: usize) -> RootStatus {

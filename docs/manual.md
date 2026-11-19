@@ -1003,7 +1003,7 @@ These are fff-search's options. Each change applies and saves right away.
 | Letter case in searches | For content searches, quoted words, and globs. **Smart** ignores case unless the text has a capital letter; **Match Case**; **Ignore Case**. | `search.case` |
 | Results shown | The most items a search lists: 100, 200, 500, 1000, 2000, or 5000. | `result_limit` |
 | Content search skips files over | 1 MB to 1000 MB (10 MB by default). | `search.max_file_size_mb` |
-| Content search time limit | After this long a content search stops and shows what it found so far, even when that is nothing: None, or 1 to 60 seconds (5 by default). The status bar then says "stopped at the time limit". | `search.time_limit_secs` |
+| Content search time limit | After this long a content search stops and shows what it found so far, even when that is nothing: None, or 1 to 60 seconds (5 by default). The status bar then says "stopped at the time limit". Whatever the limit, a content search that is still running stops as soon as you change the search or end it. | `search.time_limit_secs` |
 | Search threads | Threads for name searches; Auto uses one per processor core. Content search always uses fff-search's own threads, one per performance core on macOS and one per core elsewhere. | `search.threads` |
 
 Changing one of the first five switches rebuilds every index, so the file counts under Search locations start over. The other controls apply to the next search, and a search on screen runs again.

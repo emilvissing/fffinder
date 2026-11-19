@@ -517,7 +517,7 @@ impl Engine {
         let started = Instant::now();
         let limit = if req.limit == 0 { 500 } else { req.limit };
         let indexes = self.indexes_for(req.scope.as_deref());
-        let indexing = indexes.iter().any(|r| r.status().scanning);
+        let indexing = indexes.iter().any(|r| r.scanning());
         let settings = self.search_settings();
         let case = settings.case;
         // fff-search reads a quoted phrase as plain fuzzy words, which find
@@ -886,18 +886,31 @@ impl Engine {
 
     /// Content search across the indexes covering `scope`.
     pub fn grep(&self, req: &GrepRequest) -> GrepResponse {
+        self.grep_cancellable(req, None)
+    }
+
+    /// [`Self::grep`] for a caller that may stop waiting for the answer.
+    /// Once `abort` is set, fff-search notices within a few files and stops
+    /// reading, the roots not yet reached are left out, and what was found
+    /// so far comes back.
+    pub fn grep_cancellable(
+        &self,
+        req: &GrepRequest,
+        abort: Option<&Arc<AtomicBool>>,
+    ) -> GrepResponse {
         if let Some(scope) = req.scope.as_deref().and_then(|s| self.root_spelling(s)) {
-            return self.grep(&GrepRequest {
+            let req = GrepRequest {
                 scope: Some(scope),
                 ..req.clone()
-            });
+            };
+            return self.grep_cancellable(&req, abort);
         }
         let settings = self.search_settings();
         let started = Instant::now();
         let limit = if req.limit == 0 { 200 } else { req.limit };
         let indexes = self.indexes_for(req.scope.as_deref());
         let mut response = GrepResponse {
-            indexing: indexes.iter().any(|r| r.status().scanning),
+            indexing: indexes.iter().any(|r| r.scanning()),
             ..Default::default()
         };
         let mut patterns: Vec<String> = req
@@ -962,6 +975,7 @@ impl Engine {
                 trim_whitespace: req.trim,
                 before_context: req.before,
                 after_context: req.after,
+                abort_signal: abort.cloned(),
                 ..Default::default()
             };
             let parser = QueryParser::new(GrepConfig);
@@ -991,9 +1005,12 @@ impl Engine {
                 let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
                 picker.multi_grep(&refs, &constraints, &options)
             };
+            // An abort has cut this root short, which isn't the time limit's
+            // doing, and the roots after it aren't searched.
+            let aborted = abort.is_some_and(|flag| flag.load(Ordering::Relaxed));
             let limit_reached = settings.time_limit_secs > 0
                 && started.elapsed() >= Duration::from_secs(settings.time_limit_secs);
-            response.stopped |= limit_reached && result.next_file_offset > 0;
+            response.stopped |= limit_reached && result.next_file_offset > 0 && !aborted;
             response.files_with_matches += result.files_with_matches;
             response.files_searched += result.total_files_searched;
             for m in &result.matches {
@@ -1024,7 +1041,7 @@ impl Engine {
                     break;
                 }
             }
-            if response.hits.len() >= limit {
+            if response.hits.len() >= limit || aborted {
                 break;
             }
         }
@@ -2700,6 +2717,53 @@ mod tests {
         hits.sort_by_key(|h| std::cmp::Reverse(h.score));
         let names: Vec<String> = hits.iter().map(|h| display_name(&h.path)).collect();
         assert_eq!(names, ["s.txt", "Safari.app", "sketch.txt", "Notes.app"]);
+    }
+
+    #[test]
+    fn a_content_search_told_to_stop_reads_no_more_than_a_few_files() {
+        let dir = std::env::temp_dir().join(format!("fff-grep-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let roots = vec![dir.join("one"), dir.join("two")];
+        for root in &roots {
+            std::fs::create_dir_all(root).unwrap();
+            for n in 0..200 {
+                std::fs::write(root.join(format!("{n}.txt")), "needle\n").unwrap();
+            }
+        }
+        let engine = Engine::new(EngineOptions {
+            roots,
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let request = GrepRequest {
+            patterns: vec!["needle".into()],
+            limit: 1000,
+            ..Default::default()
+        };
+        assert_eq!(engine.grep(&request).hits.len(), 400);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let whole = engine.grep_cancellable(&request, Some(&stop));
+        assert_eq!(whole.hits.len(), 400, "nothing told it to stop");
+
+        // fff-search looks at the flag every eighth file, and always reads
+        // the first one.
+        stop.store(true, Ordering::Relaxed);
+        let cut = engine.grep_cancellable(&request, Some(&stop));
+        assert!(!cut.hits.is_empty());
+        assert!(cut.hits.len() < 50, "{} hits", cut.hits.len());
+        assert!(cut.files_searched < 50, "{} files", cut.files_searched);
+        assert!(
+            cut.hits
+                .iter()
+                .all(|hit| hit.path.parent().is_some_and(|p| p.ends_with("one"))),
+            "the second location isn't searched at all"
+        );
+        assert!(!cut.stopped, "it wasn't the time limit that ended it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

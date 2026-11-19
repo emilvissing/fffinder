@@ -16,6 +16,7 @@ use gpui_kit::TestAppContext;
 use gpui_kit::component::ActiveTheme as _;
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 // ----- toolbar -------------------------------------------------------------------
 
@@ -358,6 +359,82 @@ fn search_scope_button(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn typing_on_stops_the_contents_search_for_what_was_typed_before(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-stop");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let abort = |ui: &Ui| ui.read(|f| f.search_abort_for_test());
+    ui.click("search");
+    ui.type_text("plain");
+    ui.click("by-contents");
+    assert_eq!(ui.names(), ["notes.txt"], "the file with the word in it");
+
+    // More is typed before the search for the first letter has answered.
+    ui.press(&cmd("f"));
+    ui.type_without_settling("a");
+    assert_eq!(ui.read(|f| f.query().to_string()), "a");
+    let first = abort(&ui);
+    ui.type_text("tlas");
+    assert!(
+        first.load(Ordering::Relaxed),
+        "the search for `a` was told to stop"
+    );
+    assert_eq!(ui.names(), ["Project Atlas.txt"]);
+    let shown = abort(&ui);
+    assert!(
+        !shown.load(Ordering::Relaxed),
+        "the search on screen ran to its end"
+    );
+
+    // Emptying the field stops a search too.
+    ui.type_without_settling("x");
+    let last = abort(&ui);
+    ui.press("escape");
+    assert_eq!(ui.read(|f| f.query().to_string()), "");
+    assert!(
+        last.load(Ordering::Relaxed),
+        "the search for `atlasx` was told to stop"
+    );
+}
+
+#[gpui_kit::test]
+fn closing_a_tab_stops_its_contents_search(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-stop-tab");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            workspace: true,
+            ..Default::default()
+        },
+    );
+    let workspace = ui.workspace.clone().expect("opened with tabs");
+    let tabs = |ui: &Ui| workspace.read_with(ui.cx, |w, _| w.tabs().len());
+    ui.press(&cmd("t"));
+    assert_eq!(tabs(&ui), 2);
+    ui.click("search");
+    ui.type_text("plain");
+    ui.click("by-contents");
+
+    // The new tab closes before its next search has answered. Only the
+    // search's flag is kept: a handle to the tab would keep the tab alive.
+    ui.press(&cmd("f"));
+    ui.type_without_settling("atlas");
+    let search = workspace.read_with(ui.cx, |w, cx| {
+        let tab = w.active().read(cx);
+        assert_eq!(tab.query(), "atlas");
+        assert!(tab.searches_contents());
+        tab.search_abort_for_test()
+    });
+    assert!(!search.load(Ordering::Relaxed));
+    ui.press(&cmd("w"));
+    assert_eq!(tabs(&ui), 1);
+    assert!(
+        search.load(Ordering::Relaxed),
+        "the closed tab's search was told to stop"
+    );
+}
+
+#[gpui_kit::test]
 fn scope_bar_controls(cx: &mut TestAppContext) {
     let fx = Fixture::new("scope-bar");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -616,6 +693,29 @@ fn sidebar_rows_and_menus(cx: &mut TestAppContext) {
 
     ui.click("index-settings");
     assert!(ui.dialog_open(), "the gear opens Settings");
+}
+
+#[gpui_kit::test]
+fn the_index_status_is_read_in_the_background(cx: &mut TestAppContext) {
+    let fx = Fixture::new("index-status");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let files = ui.read(|f| f.indexed_files());
+    assert!(files > 0, "the sidebar has the count once the window is up");
+
+    // Reading the status takes the index's locks, and can wait seconds for
+    // them behind a scan or a content search. So asking for it, as Rescan
+    // does, leaves what the window shows as it is, and the answer comes in
+    // afterwards. Here the answer is another one: the index has lost its
+    // folders in between.
+    ui.cx.update(|cx| {
+        cx.global::<fffinder::finder::AppState>()
+            .engine
+            .set_roots(&[]);
+    });
+    ui.window(|window, cx| window.dispatch_action(Rescan.boxed_clone(), cx));
+    assert_eq!(ui.read(|f| f.indexed_files()), files);
+    ui.settle();
+    assert_eq!(ui.read(|f| f.indexed_files()), 0);
 }
 
 #[gpui_kit::test]
