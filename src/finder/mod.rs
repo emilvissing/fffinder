@@ -277,7 +277,8 @@ impl From<crate::trash_bin::TrashError> for ListingError {
 #[derive(Default)]
 pub struct SearchStats {
     pub elapsed: Duration,
-    pub total_matched: usize,
+    /// More items match than the result limit let the search list.
+    pub truncated: bool,
     pub indexing: bool,
     /// A content search hit the time limit before searching every file.
     pub stopped: bool,
@@ -409,8 +410,6 @@ pub struct Finder {
     filtering: bool,
     /// Rows before the filter, for the status bar.
     unfiltered_len: usize,
-    /// The result cap the current search ran with.
-    search_limit: usize,
     /// The user's Nushell environment, when "use Nushell's colors and
     /// editor" is on (see nu_env.rs).
     nu_env: Option<Arc<crate::nu_env::NuEnv>>,
@@ -647,7 +646,6 @@ impl Finder {
             filter_error: None,
             filtering: false,
             unfiltered_len: 0,
-            search_limit: 0,
             terminals: None,
             terminals_task: Task::ready(()),
             nu_env: None,
@@ -1632,7 +1630,7 @@ impl Finder {
         let query = self.query.clone();
         let contents = self.search_contents;
         // A filter applies after the search, so fetch more for it to work on.
-        self.search_limit = if self.filter.is_empty() {
+        let limit = if self.filter.is_empty() {
             self.config.result_limit
         } else {
             filter::FILTER_SEARCH_LIMIT.max(self.config.result_limit)
@@ -1641,7 +1639,7 @@ impl Finder {
             query: query.clone(),
             scope: scope.clone(),
             kind: self.config.kind_filter,
-            limit: self.search_limit,
+            limit,
             show_hidden: self.config.show_hidden,
             files_only: false,
         };
@@ -1677,7 +1675,7 @@ impl Finder {
                             .collect();
                         let stats = SearchStats {
                             elapsed: response.elapsed,
-                            total_matched: response.total_matched,
+                            truncated: response.truncated,
                             indexing: response.indexing,
                             stopped: false,
                         };
@@ -3320,29 +3318,40 @@ fn content_search(
     let request = GrepRequest {
         patterns: vec![query.to_string()],
         scope,
-        limit: limit.max(50) * 4,
-        per_file: 20,
+        // The engine counts its limit in matching lines, and a row shows
+        // only a file's first one. With one line kept for a file, the limit
+        // counts files. One file more than fits is asked for, to learn
+        // whether any was left out.
+        limit: limit + 1,
+        per_file: 1,
         trim: true,
         ..Default::default()
     };
     let response = engine.grep_cancellable(&request, Some(abort));
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
+    // Two things tell that files were left out, and each misses a case. The
+    // engine says so when it stopped with files unsearched, which it didn't
+    // if the file too many was the last one there is. And that file is
+    // missing when the engine dropped hits after it stopped, as it does the
+    // ones outside the folder searched.
+    let mut truncated = response.more;
     for hit in response.hits {
         if !seen.insert(hit.path.clone()) {
             continue;
         }
         if let Some(entry) = FileEntry::from_path(&hit.path) {
+            if rows.len() >= limit {
+                truncated = true;
+                break;
+            }
             let line = format!("{}: {}", hit.line, hit.text.trim());
             rows.push(Row::new(entry, Vec::new(), Some(line)));
-        }
-        if rows.len() >= limit {
-            break;
         }
     }
     let stats = SearchStats {
         elapsed: response.elapsed,
-        total_matched: response.files_with_matches,
+        truncated,
         indexing: response.indexing,
         stopped: response.stopped,
     };
@@ -3557,37 +3566,14 @@ impl Finder {
                 .into_any_element()
         } else if self.rows.is_empty() && !self.loading && !self.awaits_first_results() {
             let (title, detail) = if self.is_searching() {
-                // What an index held while it was still being built is no
-                // "No Results": the search runs again as the index fills.
-                let partial = self.search_stats.as_ref().is_some_and(|s| s.indexing);
-                match self.indexing_progress() {
-                    Some(n) => (
-                        "Indexing…".to_string(),
-                        format!(
-                            "{} files indexed so far. Results appear when indexing finishes.",
-                            group_digits(n)
-                        ),
-                    ),
-                    // Without a count: the index being built is a folder's
-                    // own, outside the search locations, or the locations
-                    // were last looked at before their indexing began or as
-                    // it ended.
-                    None if partial => (
-                        "Indexing…".to_string(),
-                        "Results appear when indexing finishes.".to_string(),
-                    ),
-                    // Looking inside files can take seconds, too long to
-                    // leave "No Results" up for words it wasn't about. A name
-                    // search answers before another message could be read.
-                    None if self.searching && self.search_contents => (
-                        "Searching…".to_string(),
-                        "Looking inside files for a match.".to_string(),
-                    ),
-                    None => (
-                        "No Results".to_string(),
-                        "Try a different name, kind, or search location.".to_string(),
-                    ),
-                }
+                let stats = self.search_stats.as_ref();
+                empty_search_message(
+                    self.indexing_progress(),
+                    stats.is_some_and(|s| s.indexing),
+                    self.searching && self.search_contents,
+                    // With rows a filter hides, the search did find something.
+                    stats.is_some_and(|s| s.stopped) && self.results.is_empty(),
+                )
             } else if matches!(self.history.current(), Location::Recents) {
                 (
                     "No Recent Files".into(),
@@ -3759,6 +3745,62 @@ impl Finder {
     }
 }
 
+/// What the file area says when a search has nothing to list: the title and
+/// the line under it.
+///
+/// # Arguments
+///
+/// * `indexed` - The files indexed so far, while a search location is being
+///   indexed
+/// * `partial` - Whether the last answer came from an index still being built
+/// * `looking` - Whether a contents search is running
+/// * `stopped` - Whether the time limit ended the last search with nothing
+///   found
+fn empty_search_message(
+    indexed: Option<usize>,
+    partial: bool,
+    looking: bool,
+    stopped: bool,
+) -> (String, String) {
+    // What an index held while it was still being built is no "No Results":
+    // the search runs again as the index fills.
+    match indexed {
+        Some(n) => (
+            "Indexing…".to_string(),
+            format!(
+                "{} files indexed so far. Results appear when indexing finishes.",
+                group_digits(n)
+            ),
+        ),
+        // Without a count: the index being built is a folder's own, outside
+        // the search locations, or the locations were last looked at before
+        // their indexing began or as it ended.
+        None if partial => (
+            "Indexing…".to_string(),
+            "Results appear when indexing finishes.".to_string(),
+        ),
+        // Looking inside files can take seconds, too long to leave "No
+        // Results" up for words it wasn't about. A name search answers
+        // before another message could be read.
+        None if looking => (
+            "Searching…".to_string(),
+            "Looking inside files for a match.".to_string(),
+        ),
+        // A search the time limit ended hasn't looked inside every file, so
+        // it can't say that none has the words.
+        None if stopped => (
+            "Nothing Found Before the Time Limit".to_string(),
+            "The search stopped before it had looked inside every file. Search a smaller \
+             folder, or raise the time limit in Settings › Search engine."
+                .to_string(),
+        ),
+        None => (
+            "No Results".to_string(),
+            "Try a different name, kind, or search location.".to_string(),
+        ),
+    }
+}
+
 /// 1234567 → "1,234,567".
 pub fn group_digits(n: usize) -> String {
     let s = n.to_string();
@@ -3775,7 +3817,7 @@ pub fn group_digits(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's `test` attribute would replace the standard one.
-    use super::{AbortOnDrop, IndexActivity, ListingError, content_search};
+    use super::{AbortOnDrop, IndexActivity, ListingError, content_search, empty_search_message};
     use crate::trash_bin::TrashError;
     use fffinder_core::{Engine, EngineOptions, RootStatus};
     use std::path::PathBuf;
@@ -3835,6 +3877,103 @@ mod tests {
         let (rows, _) = content_search(&engine, "needle", None, 500, &abort);
         assert!(rows.len() < 50, "{} rows", rows.len());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_content_search_says_when_one_file_didnt_fit() {
+        let dir =
+            std::env::temp_dir().join(format!("fffinder-content-limit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in 0..11 {
+            std::fs::write(dir.join(format!("{n}.txt")), "needle\nneedle\n").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let abort = Arc::new(AtomicBool::new(false));
+        let (rows, stats) = content_search(&engine, "needle", None, 11, &abort);
+        assert_eq!(rows.len(), 11);
+        assert!(!stats.truncated, "all eleven are listed");
+
+        // The file that doesn't fit is the last one there is. The engine has
+        // then looked inside every file, and only the file itself tells.
+        let (rows, stats) = content_search(&engine, "needle", None, 10, &abort);
+        assert_eq!(rows.len(), 10);
+        assert!(stats.truncated);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_content_search_that_lists_fewer_files_than_match_says_so() {
+        let dir =
+            std::env::temp_dir().join(format!("fffinder-content-more-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The engine looks inside newer files first. It searches a folder
+        // with a space in its name along with everything around it, for a
+        // while past its limit, and drops what it found elsewhere. So the
+        // files it stops at for a limit of two are all outside the folder.
+        let folder = dir.join("my folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
+        let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        for n in 0..3 {
+            let path = folder.join(format!("{n}.txt"));
+            std::fs::write(&path, "needle\n").unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(hour_ago).unwrap();
+        }
+        for n in 0..20 {
+            std::fs::write(dir.join(format!("elsewhere/{n}.txt")), "needle\n").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let abort = Arc::new(AtomicBool::new(false));
+        let (rows, stats) = content_search(&engine, "needle", Some(folder.clone()), 2, &abort);
+        assert!(rows.len() <= 2);
+        assert!(
+            stats.truncated,
+            "{} of the folder's 3 files and no word of more",
+            rows.len()
+        );
+
+        // With room for them, the folder's files are all found behind the
+        // twenty that come first.
+        let (rows, stats) = content_search(&engine, "needle", Some(folder), 10, &abort);
+        assert_eq!(rows.len(), 3);
+        assert!(!stats.truncated);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_search_the_time_limit_ended_doesnt_say_no_results() {
+        let title = |indexed, partial, looking, stopped| {
+            empty_search_message(indexed, partial, looking, stopped).0
+        };
+        assert_eq!(title(None, false, false, false), "No Results");
+        assert_eq!(
+            title(None, false, false, true),
+            "Nothing Found Before the Time Limit"
+        );
+        let (_, detail) = empty_search_message(None, false, false, true);
+        assert!(detail.contains("time limit"), "{detail}");
+
+        // While the search runs again, or an index is being built, the
+        // message is about that.
+        assert_eq!(title(None, false, true, true), "Searching…");
+        assert_eq!(title(None, true, false, true), "Indexing…");
+        assert_eq!(title(Some(12), false, false, true), "Indexing…");
     }
 
     fn root(scanning: bool, finishing: bool, files: usize) -> RootStatus {

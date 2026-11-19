@@ -13,12 +13,22 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::slider::Slider;
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::PathBuf;
+
+/// What the `+` after a search's item count means and what to do about it,
+/// for the count's tooltip.
+const MORE_ITEMS_MATCH: &str =
+    "More items match. Narrow the search, or raise Results shown in Settings › Search engine.";
+
+/// The same for a filtered search. A filter is given more results than
+/// Results shown allows, so raising that wouldn't bring in any more.
+const MORE_THAN_FILTERED: &str = "More items match than the filter was given. Narrow the search.";
 
 impl Finder {
     pub(super) fn render_scope_bar(
@@ -339,7 +349,7 @@ impl Finder {
         let filtered = !self.filter_text().is_empty() && self.filter_error().is_none();
         // Searches stop at the result limit; say so rather than imply a total.
         let before = self.unfiltered_len;
-        let capped = self.is_searching() && before >= self.search_limit.max(1);
+        let capped = self.is_searching() && self.search_stats.as_ref().is_some_and(|s| s.truncated);
         let plus = if capped { "+" } else { "" };
         let text = if selected > 0 {
             let of = format!("{selected} of {} selected", group_digits(count));
@@ -353,11 +363,18 @@ impl Finder {
                 group_digits(count),
                 group_digits(before)
             )
-        } else if count == 1 {
+        } else if count == 1 && !capped {
             "1 item".to_string()
         } else {
             format!("{}{plus} items", group_digits(count))
         };
+        // What the mark means, for a tooltip. A selection's count takes the
+        // place of the count that has the mark.
+        let more = (capped && selected == 0).then_some(if filtered {
+            MORE_THAN_FILTERED
+        } else {
+            MORE_ITEMS_MATCH
+        });
         // Finder's "12 items, 214 GB available", for a folder.
         let text = match self.free_space.filter(|_| !self.is_searching()) {
             Some(free) if self.current_folder().is_some() => {
@@ -403,6 +420,20 @@ impl Finder {
                     .id("status-text")
                     .aria_label(SharedString::from(text.clone()))
                     .child(text)
+                    .when_some(more, |this, more| {
+                        this.tooltip(move |window, cx| {
+                            Tooltip::element(move |_, _| {
+                                div()
+                                    .id("status-more")
+                                    .aria_label(more)
+                                    // Two lines, which fit a narrow pane.
+                                    .max_w(ui(340.))
+                                    .child(more)
+                                    .test_support()
+                            })
+                            .build(window, cx)
+                        })
+                    })
                     .test_support(),
             )
             .when_some(timing, |this, timing| {

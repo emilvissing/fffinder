@@ -128,6 +128,7 @@ The file area shows a message when there is nothing to list:
 | Can't open this folder | The folder can't be read. The reason is shown. |
 | Indexing… | A search ran before the index was ready. It runs again as soon as a search location finishes indexing, and again as the rest finish. A folder outside the search locations says the same while its temporary index is built. |
 | Searching… | A contents search is still looking inside files, after the search before it found nothing. |
+| Nothing Found Before the Time Limit | A contents search reached its time limit before it had looked inside every file, and had found nothing by then. |
 | No Results | The search found nothing. |
 | No Recent Files | Recents is empty. |
 | No Items | The folder is empty. |
@@ -150,7 +151,7 @@ The status bar shows:
 
 - How many items are shown, or "N of M selected" with what they add up to, and in a folder how much space is left on its volume: "12 items, 214 GB available", or "2 of 12 selected (1.4 MB), 214 GB available". Folders count when their sizes are known.
 - With a filter on, "N of M items pass the filter".
-- A `+` after the count when a search stopped at the result limit.
+- A `+` after the count, as in "500+ items", when a search stopped at the result limit and more items match than it lists. A search that found exactly as many as the limit has no `+`. Rest the mouse on the count to read what to do about it.
 - The time the search took, in milliseconds.
 - A spinner while a search or filter runs.
 - "Indexing N files…" while the index is being built, when the sidebar is hidden. The sidebar footer shows it otherwise.
@@ -368,7 +369,7 @@ Unquoted words ignore letter case, so `README` also finds `readme.md`. Quoted wo
 
 fff-search ranks results, and fffinder re-ranks them so name matches come first, shallow paths come before deep ones, and nothing inside `.app` or `.framework` bundles shows. A capital letter in a word is a preference: names that fit the capitals rank higher, so `README` lists `README.md` ahead of `readme.md`, and the initials `TEC` favor `TaxExemptionController.java`. When a word matches files exactly, typo-only matches are dropped. With **Allow typos** off in [Settings › Search engine](#search-engine), they're always dropped. Apps from the app folders rank as one item wherever their folder is, so "safari" or "term" puts Safari or Terminal ahead of a file with the same words in its name.
 
-A search shows at most `result_limit` items (500 by default; **Results shown** in [Settings › Search engine](#search-engine)). With a filter on, it fetches up to 5,000 so the filter has enough to work with. Opening a file from search results records it, so files you open often rank higher for the same search later.
+A search shows at most `result_limit` items (500 by default; **Results shown** in [Settings › Search engine](#search-engine)). A contents search counts files, each listed once however many of its lines match. Hidden files that aren't shown don't count. When more items match than are shown, the status bar says so with a `+` after the count. With a filter on, a search fetches up to 5,000 so the filter has enough to work with. Opening a file from search results records it, so files you open often rank higher for the same search later.
 
 Search results always show where each item is. Searches can't filter by size or date themselves; use a [Nushell filter](#filters-and-smart-folders).
 
@@ -1010,7 +1011,7 @@ These are fff-search's options. Each change applies and saves right away.
 | Letter case in searches | For content searches, quoted words, and globs. **Smart** ignores case unless the text has a capital letter; **Match Case**; **Ignore Case**. | `search.case` |
 | Results shown | The most items a search lists: 100, 200, 500, 1000, 2000, or 5000. | `result_limit` |
 | Content search skips files over | 1 MB to 1000 MB (10 MB by default). | `search.max_file_size_mb` |
-| Content search time limit | After this long a content search stops and shows what it found so far, even when that is nothing: None, or 1 to 60 seconds (5 by default). The status bar then says "stopped at the time limit". Whatever the limit, a content search that is still running stops as soon as you change the search or end it. | `search.time_limit_secs` |
+| Content search time limit | After this long a content search stops and shows what it found so far, even when that is nothing: None, or 1 to 60 seconds (5 by default). The status bar then says "stopped at the time limit", and with nothing found the file area says Nothing Found Before the Time Limit. The limit is for the whole search, however many search locations it looks in. Whatever the limit, a content search that is still running stops as soon as you change the search or end it. | `search.time_limit_secs` |
 | Search threads | Threads for name searches; Auto uses one per processor core. Content search always uses fff-search's own threads, one per performance core on macOS and one per core elsewhere. | `search.threads` |
 
 Changing one of the first five switches rebuilds every index, so the file counts under Search locations start over. The other controls apply to the next search, and a search on screen runs again.

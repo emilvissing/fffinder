@@ -522,6 +522,87 @@ fn closing_a_tab_stops_its_contents_search(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_contents_search_lists_every_file_up_to_the_result_limit(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-contents-limit");
+    // The word is on twenty lines of each file, and a row is a file.
+    for n in 0..30 {
+        let lines = "zebraneedle here\n".repeat(20);
+        std::fs::write(fx.path(&format!("hay-{n:02}.txt")), lines).unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    let status = |ui: &mut Ui| ui.snapshot("status-text").label().unwrap().to_string();
+    ui.update(|f, _, cx| {
+        f.set_result_limit(60, cx);
+        f.set_search_contents(true, cx);
+        f.set_query("zebraneedle".into(), true, cx);
+    });
+    assert_eq!(ui.names().len(), 30, "every file with the word in it");
+    assert_eq!(status(&mut ui), "30 items", "and that's all of them");
+
+    ui.update(|f, _, cx| f.set_result_limit(10, cx));
+    assert_eq!(ui.names().len(), 10);
+    assert_eq!(status(&mut ui), "10+ items", "twenty more have it");
+
+    // Thirty fit a limit of thirty exactly: nothing was left out. A limit
+    // of one fewer leaves one out.
+    ui.update(|f, _, cx| f.set_result_limit(30, cx));
+    assert_eq!(ui.names().len(), 30);
+    assert_eq!(status(&mut ui), "30 items");
+    ui.update(|f, _, cx| f.set_result_limit(29, cx));
+    assert_eq!(ui.names().len(), 29);
+    assert_eq!(status(&mut ui), "29+ items");
+}
+
+#[gpui_kit::test]
+fn a_search_is_marked_only_when_the_result_limit_left_items_out(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-name-limit");
+    for n in 1..=5 {
+        std::fs::write(fx.path(&format!("zlog{n}.txt")), "x").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    let status = |ui: &mut Ui| ui.snapshot("status-text").label().unwrap().to_string();
+    ui.update(|f, _, cx| {
+        f.set_result_limit(3, cx);
+        f.set_query("zlog".into(), true, cx);
+    });
+    assert_eq!(ui.names().len(), 3);
+    assert_eq!(status(&mut ui), "3+ items");
+
+    // Resting the mouse on the count says what the mark means.
+    ui.hover("status-text");
+    assert_eq!(
+        ui.snapshot("status-more").label(),
+        Some(
+            "More items match. Narrow the search, or raise Results shown in Settings › Search \
+             engine."
+        )
+    );
+    ui.hover_point(at(0., 0.));
+
+    // One item of several is no "1 item".
+    ui.update(|f, _, cx| f.set_result_limit(1, cx));
+    assert_eq!(status(&mut ui), "1+ items");
+
+    // Five results fit a limit of five: nothing was left out.
+    ui.update(|f, _, cx| f.set_result_limit(5, cx));
+    assert_eq!(ui.names().len(), 5);
+    assert_eq!(status(&mut ui), "5 items");
+    ui.hover("status-text");
+    assert!(!ui.exists("status-more"));
+    ui.hover_point(at(0., 0.));
+
+    // A selection's count takes the place of the one with the mark, which
+    // leaves nothing to explain.
+    ui.update(|f, _, cx| f.set_result_limit(3, cx));
+    let first = ui.names()[0].clone();
+    ui.select(&first);
+    let selected = status(&mut ui);
+    assert!(selected.starts_with("1 of 3 selected"), "{selected}");
+    ui.hover("status-text");
+    assert!(!ui.exists("status-more"));
+}
+
+#[gpui_kit::test]
 fn scope_bar_controls(cx: &mut TestAppContext) {
     let fx = Fixture::new("scope-bar");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -2155,6 +2236,41 @@ fn a_filter_waits_for_the_rows_a_search_has_yet_to_find(cx: &mut TestAppContext)
 
     ui.settle();
     assert_eq!(ui.names(), ["big.log"]);
+}
+
+#[gpui_kit::test]
+fn a_filtered_search_is_marked_when_more_match_than_the_filter_was_given(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-search-limit");
+    // A filter is given 5,000 of a search's results, whatever the result
+    // limit is, and ten more than that match here.
+    for n in 0..5010 {
+        std::fs::write(fx.path(&format!("zlog{n:04}.txt")), "").unwrap();
+    }
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    let status = |ui: &mut Ui| ui.snapshot("status-text").label().unwrap().to_string();
+    ui.update(|f, _, cx| f.set_query("zlog".into(), true, cx));
+    assert_eq!(status(&mut ui), "500+ items");
+
+    ui.update(|f, _, cx| f.set_filter("size < 10kb".into(), cx));
+    assert_eq!(status(&mut ui), "5,000 of 5,000+ items pass the filter");
+
+    // Results shown is 500 here, and raising it wouldn't give the filter more.
+    ui.hover("status-text");
+    assert_eq!(
+        ui.snapshot("status-more").label(),
+        Some("More items match than the filter was given. Narrow the search.")
+    );
 }
 
 #[gpui_kit::test]

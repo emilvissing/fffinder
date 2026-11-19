@@ -190,6 +190,8 @@ pub struct SearchResponse {
     pub elapsed: Duration,
     /// True when some searched index was still scanning (results incomplete).
     pub indexing: bool,
+    /// More items matched than the limit let into `hits`.
+    pub truncated: bool,
 }
 
 /// How `GrepRequest::patterns` match.
@@ -209,6 +211,8 @@ pub struct GrepRequest {
     pub patterns: Vec<String>,
     pub mode: GrepModeKind,
     pub scope: Option<PathBuf>,
+    /// The most matching lines to return, however few files they are in;
+    /// 0 for 200.
     pub limit: usize,
     /// Context lines to include around each match.
     pub before: usize,
@@ -254,6 +258,9 @@ pub struct GrepResponse {
     /// The time limit (Settings › Search engine) ended the search before
     /// every file was searched.
     pub stopped: bool,
+    /// More may match than `hits` holds: the search ended at its `limit`, or
+    /// was told to stop, with matches left out or files left unsearched.
+    pub more: bool,
 }
 
 /// A change subscription from [`Engine::watch`]; dropping it unsubscribes.
@@ -610,19 +617,16 @@ impl Engine {
         raw.sort_by_key(|h| std::cmp::Reverse(h.score));
         let mut seen = HashSet::new();
         raw.retain(|h| seen.insert(h.path.clone()));
-        raw.truncate(limit);
 
         let needle = fuzzy_text(&req.query);
-        let hits = raw
-            .into_iter()
-            .filter_map(|h| h.into_hit(&needle, req.show_hidden))
-            .collect();
+        let (hits, truncated) = cut_to_limit(raw, limit, &needle, req.show_hidden);
         SearchResponse {
             hits,
             total_matched,
             total_indexed,
             elapsed: started.elapsed(),
             indexing,
+            truncated,
         }
     }
 
@@ -936,30 +940,51 @@ impl Engine {
             patterns = vec![joined];
         }
         let patterns: Vec<&str> = patterns.iter().map(String::as_str).collect();
-        for root in &indexes {
+        for (ix, root) in indexes.iter().enumerate() {
             let Ok(guard) = root.picker.read() else {
                 continue;
             };
             let Some(picker) = guard.as_ref() else {
                 continue;
             };
+            // The time limit is for the whole search. fff-search counts from
+            // zero each time it is called, so a root gets what the roots
+            // before it left, and none is searched once the time is up.
+            let Some(budget_ms) = root_budget_ms(settings.time_limit_secs, started.elapsed())
+            else {
+                response.stopped = true;
+                break;
+            };
+            let root_started = Instant::now();
             let base = picker.base_path().to_path_buf();
             let scope = req.scope.as_deref().map(|s| root.in_base(s, &base));
-            // A scope inside this root narrows the search with a glob.
-            let scope_glob = scope
+            let scope_rel = scope
                 .as_deref()
                 .filter(|s| *s != base.as_path())
                 .and_then(|s| s.strip_prefix(&base).ok())
-                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"));
+            // A scope inside this root narrows the search with a glob.
+            let scope_glob = scope_rel
+                .as_deref()
                 .filter(|rel| !rel.contains(char::is_whitespace))
                 .map(|rel| format!(" {rel}/**"));
+            // No glob is made for a folder with a space in its path: the
+            // whole root is searched, and the hits outside the folder are
+            // dropped below. fff-search ends at a full page wherever its
+            // matches are, so the page is larger than `limit`, to hold
+            // enough of the folder's own.
+            let page_limit = if scope_rel.is_some() && scope_glob.is_none() {
+                limit.saturating_mul(4)
+            } else {
+                limit
+            };
             let options = GrepSearchOptions {
                 mode: match req.mode {
                     GrepModeKind::Plain => GrepMode::PlainText,
                     GrepModeKind::Regex => GrepMode::Regex,
                     GrepModeKind::Fuzzy => GrepMode::Fuzzy,
                 },
-                page_limit: limit,
+                page_limit,
                 max_matches_per_file: if req.per_file == 0 {
                     limit
                 } else {
@@ -971,7 +996,7 @@ impl Engine {
                     SearchCase::Sensitive => Casing::Sensitive,
                     SearchCase::Insensitive => Casing::Insensitive,
                 }),
-                time_budget_ms: settings.time_limit_secs * 1000,
+                time_budget_ms: budget_ms,
                 // fff-search otherwise waits for a first match before
                 // counting, so a search that finds nothing ran to the end.
                 enforce_time_budget: true,
@@ -1011,12 +1036,22 @@ impl Engine {
             // An abort has cut this root short, which isn't the time limit's
             // doing, and the roots after it aren't searched.
             let aborted = abort.is_some_and(|flag| flag.load(Ordering::Relaxed));
-            let limit_reached = settings.time_limit_secs > 0
-                && started.elapsed() >= Duration::from_secs(settings.time_limit_secs);
-            response.stopped |= limit_reached && result.next_file_offset > 0 && !aborted;
+            let out_of_time = !aborted
+                && budget_ms > 0
+                && root_started.elapsed() >= Duration::from_millis(budget_ms);
+            match page_end(
+                result.matches.len(),
+                page_limit,
+                result.next_file_offset,
+                out_of_time,
+            ) {
+                PageEnd::Complete => {}
+                PageEnd::Full => response.more = true,
+                PageEnd::Stopped => response.stopped = true,
+            }
             response.files_with_matches += result.files_with_matches;
             response.files_searched += result.total_files_searched;
-            for m in &result.matches {
+            for (n, m) in result.matches.iter().enumerate() {
                 let Some(file) = result.files.get(m.file_index) else {
                     continue;
                 };
@@ -1041,10 +1076,14 @@ impl Engine {
                     context_after: m.context_after.clone(),
                 });
                 if response.hits.len() >= limit {
+                    // The rest of this root's matches are left out.
+                    response.more |= n + 1 < result.matches.len();
                     break;
                 }
             }
             if response.hits.len() >= limit || aborted {
+                // So is whatever the roots after it hold.
+                response.more |= ix + 1 < indexes.len();
                 break;
             }
         }
@@ -1480,6 +1519,96 @@ impl RawHit {
                 .filter(|s| *s != "clean" && *s != "unknown")
                 .map(str::to_owned),
         })
+    }
+}
+
+/// The first `limit` of a search's hits that can be shown, and whether that
+/// left any out. A hit that can't be shown takes no place among them: a
+/// hidden file while hidden files are off, or a folder that is gone. Were
+/// the list cut before those are known, it would come out short of `limit`
+/// with items left over that should have been in it.
+///
+/// # Arguments
+///
+/// * `raw` - The hits, best first
+/// * `limit` - The most to return
+/// * `needle` - The search's fuzzy words, for the highlights
+/// * `show_hidden` - Whether hidden files are shown
+///
+/// # Returns
+///
+/// The hits to show, and whether more could have been
+fn cut_to_limit(
+    raw: Vec<RawHit>,
+    limit: usize,
+    needle: &str,
+    show_hidden: bool,
+) -> (Vec<SearchHit>, bool) {
+    let mut shown = raw
+        .into_iter()
+        .filter_map(|hit| hit.into_hit(needle, show_hidden));
+    let hits: Vec<SearchHit> = shown.by_ref().take(limit).collect();
+    let truncated = shown.next().is_some();
+    (hits, truncated)
+}
+
+/// What is left of a content search's time limit for the root it searches
+/// next, in milliseconds, the way fff-search takes it.
+///
+/// # Arguments
+///
+/// * `limit_secs` - The time limit from the settings; 0 for none
+/// * `elapsed` - How long the search has run
+///
+/// # Returns
+///
+/// `Some(0)` when there is no limit, which is what 0 means to fff-search as
+/// well; `None` once the limit has passed; otherwise at least 1
+fn root_budget_ms(limit_secs: u64, elapsed: Duration) -> Option<u64> {
+    if limit_secs == 0 {
+        return Some(0);
+    }
+    let left = Duration::from_secs(limit_secs).saturating_sub(elapsed);
+    (!left.is_zero()).then(|| u64::try_from(left.as_millis()).map_or(u64::MAX, |ms| ms.max(1)))
+}
+
+/// How fff-search's search of one root ended.
+#[derive(Debug, PartialEq, Eq)]
+enum PageEnd {
+    /// Every file was searched.
+    Complete,
+    /// It had the matches it was asked for with files left to search, or it
+    /// was told to stop.
+    Full,
+    /// The time ran out with files left to search.
+    Stopped,
+}
+
+/// Tell why fff-search left files of a root unsearched. It only says that it
+/// did, by naming the file the next page would start at, and it does that
+/// for a full page, for the time limit and for an abort alike.
+///
+/// # Arguments
+///
+/// * `matches` - How many matches it returned
+/// * `page_limit` - How many it was asked for
+/// * `next_file_offset` - The file the next page starts at; 0 when every
+///   file was searched
+/// * `out_of_time` - Whether the root's time was up when it returned
+fn page_end(
+    matches: usize,
+    page_limit: usize,
+    next_file_offset: usize,
+    out_of_time: bool,
+) -> PageEnd {
+    if next_file_offset == 0 {
+        PageEnd::Complete
+    } else if matches < page_limit && out_of_time {
+        PageEnd::Stopped
+    } else {
+        // A full page. Or, short of one with time left, it was told to stop:
+        // by the caller, or because the index is being dropped.
+        PageEnd::Full
     }
 }
 
@@ -2806,6 +2935,36 @@ mod tests {
     }
 
     #[test]
+    fn a_hit_that_isnt_shown_takes_no_place_under_the_limit() {
+        let hits = || -> Vec<RawHit> {
+            [".env", ".envrc", "env.txt", "environment.md"]
+                .into_iter()
+                .map(|name| RawHit::file(Path::new("/r").join(name), 1, 0, None, 0))
+                .collect()
+        };
+        let names = |hits: &[SearchHit]| -> Vec<String> {
+            hits.iter().map(|hit| hit.entry.name.clone()).collect()
+        };
+
+        // With hidden files off, the two that rank first aren't shown, and
+        // the two after them are the two the limit has room for.
+        let (found, truncated) = cut_to_limit(hits(), 2, "env", false);
+        assert_eq!(names(&found), ["env.txt", "environment.md"]);
+        assert!(!truncated, "nothing that can be shown was left out");
+        let (found, truncated) = cut_to_limit(hits(), 1, "env", false);
+        assert_eq!(names(&found), ["env.txt"]);
+        assert!(truncated);
+
+        // As many hits as the limit is all of them.
+        let (found, truncated) = cut_to_limit(hits(), 4, "env", true);
+        assert_eq!(found.len(), 4);
+        assert!(!truncated);
+        let (found, truncated) = cut_to_limit(hits(), 3, "env", true);
+        assert_eq!(names(&found), [".env", ".envrc", "env.txt"]);
+        assert!(truncated);
+    }
+
+    #[test]
     fn a_content_search_told_to_stop_reads_no_more_than_a_few_files() {
         let dir = std::env::temp_dir().join(format!("fff-grep-stop-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2850,6 +3009,181 @@ mod tests {
         );
         assert!(!cut.stopped, "it wasn't the time limit that ended it");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_content_search_says_when_its_limit_left_matches_out() {
+        let dir = std::env::temp_dir().join(format!("fff-grep-more-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in 0..30 {
+            std::fs::write(dir.join(format!("{n:02}.txt")), "needle\n".repeat(25)).unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let grep = |limit: usize, per_file: usize| {
+            engine.grep(&GrepRequest {
+                patterns: vec!["needle".into()],
+                limit,
+                per_file,
+                ..Default::default()
+            })
+        };
+        let files = |response: &GrepResponse| {
+            let paths: HashSet<&PathBuf> = response.hits.iter().map(|hit| &hit.path).collect();
+            paths.len()
+        };
+
+        // With one match kept for a file, the limit counts files.
+        let ten = grep(10, 1);
+        assert_eq!((ten.hits.len(), files(&ten)), (10, 10));
+        assert!(ten.more, "twenty more files have the word");
+        assert!(!ten.stopped);
+
+        let all = grep(100, 1);
+        assert_eq!((all.hits.len(), files(&all)), (30, 30));
+        assert!(!all.more);
+        assert!(!all.stopped);
+
+        // A limit met by the last file there is left nothing out.
+        let exact = grep(30, 1);
+        assert_eq!(files(&exact), 30);
+        assert!(!exact.more);
+
+        // The limit is in matches: twenty for a file reach 240 in twelve files.
+        let lines = grep(240, 20);
+        assert_eq!((lines.hits.len(), files(&lines)), (240, 12));
+        assert!(lines.more);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_content_search_says_when_its_limit_left_out_part_of_a_later_root() {
+        let dir = std::env::temp_dir().join(format!("fff-grep-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let roots = vec![dir.join("one"), dir.join("two")];
+        for (root, count) in roots.iter().zip([5, 18]) {
+            std::fs::create_dir_all(root).unwrap();
+            for n in 0..count {
+                std::fs::write(root.join(format!("{n}.txt")), "needle\n").unwrap();
+            }
+        }
+        let engine = Engine::new(EngineOptions {
+            roots,
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let grep = |limit: usize| {
+            engine.grep(&GrepRequest {
+                patterns: vec!["needle".into()],
+                limit,
+                per_file: 1,
+                ..Default::default()
+            })
+        };
+        let in_one = |response: &GrepResponse| {
+            let one = |hit: &&GrepHit| hit.path.parent().is_some_and(|p| p.ends_with("one"));
+            response.hits.iter().filter(one).count()
+        };
+
+        // The first root has just the five, and the second isn't searched.
+        let first = grep(5);
+        assert_eq!((first.hits.len(), in_one(&first)), (5, 5));
+        assert!(first.more, "the second root may have the word too");
+
+        // The second root has eighteen, and fifteen of them fit.
+        let most = grep(20);
+        assert_eq!((most.hits.len(), in_one(&most)), (20, 5));
+        assert!(most.more, "three matches of the second root were left out");
+
+        let all = grep(23);
+        assert_eq!((all.hits.len(), in_one(&all)), (23, 5));
+        assert!(!all.more, "the limit was met by the last match there is");
+        assert!(!all.stopped);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_with_a_space_in_its_name_isnt_crowded_out_of_a_content_search() {
+        let dir = std::env::temp_dir().join(format!("fff-grep-space-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Such a folder is searched along with everything around it, newer
+        // files first, and what was found elsewhere is dropped afterwards.
+        let folder = dir.join("my folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
+        let hour_ago = SystemTime::now() - Duration::from_secs(3600);
+        for n in 0..3 {
+            let path = folder.join(format!("{n}.txt"));
+            std::fs::write(&path, "needle\n").unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(hour_ago).unwrap();
+        }
+        for n in 0..20 {
+            std::fs::write(dir.join(format!("elsewhere/{n}.txt")), "needle\n").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let grep = |limit: usize| {
+            engine.grep(&GrepRequest {
+                patterns: vec!["needle".into()],
+                scope: Some(folder.clone()),
+                limit,
+                per_file: 1,
+                ..Default::default()
+            })
+        };
+
+        // Ten matches are found elsewhere before the folder's first. The
+        // search goes on past them, and so gets to every file there is.
+        let found = grep(10);
+        assert_eq!(found.hits.len(), 3);
+        assert!(!found.more);
+
+        // It doesn't go on for ever. Where it ends before the folder's
+        // files are all found, it says that more may match.
+        let cut = grep(2);
+        assert!(cut.hits.len() <= 2);
+        assert!(cut.more);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_full_page_isnt_taken_for_the_time_limit() {
+        // A page of ten with the next page's first file, and the time up.
+        assert_eq!(page_end(10, 10, 5, true), PageEnd::Full);
+        assert_eq!(page_end(3, 10, 5, true), PageEnd::Stopped);
+        assert_eq!(page_end(3, 10, 0, true), PageEnd::Complete);
+        // Short of a page with time left: the search was told to stop.
+        assert_eq!(page_end(3, 10, 5, false), PageEnd::Full);
+        assert_eq!(page_end(10, 10, 0, false), PageEnd::Complete);
+    }
+
+    #[test]
+    fn the_roots_of_a_content_search_share_one_time_limit() {
+        let secs = Duration::from_secs;
+        assert_eq!(root_budget_ms(5, secs(0)), Some(5000));
+        assert_eq!(root_budget_ms(5, secs(2)), Some(3000));
+        assert_eq!(root_budget_ms(5, secs(5)), None);
+        assert_eq!(root_budget_ms(5, secs(6)), None);
+        // A last moment isn't rounded down to 0, which would be no limit.
+        assert_eq!(root_budget_ms(5, Duration::from_micros(4_999_600)), Some(1));
+        assert_eq!(root_budget_ms(0, secs(600)), Some(0));
     }
 
     #[test]
