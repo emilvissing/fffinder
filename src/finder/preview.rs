@@ -1060,6 +1060,12 @@ fn preview_body(
                     div()
                         .flex_1()
                         .min_h_0()
+                        // The wrapper that scrolls both ways lays this out in
+                        // a row, which stretches it to the scroll area's
+                        // height with the table spilling out of it, and an
+                        // area scrolls no further than its own children
+                        // reach. Aligned to the top, it's as tall as the table.
+                        .self_start()
                         .overflow_scrollbar()
                         // The wrapper's ID, so that each file has its own
                         // scroll position.
@@ -1088,6 +1094,8 @@ fn preview_body(
                 .when_some(footer, |this, footer| {
                     this.child(
                         h_flex()
+                            .id("preview-table-footer")
+                            .test_support()
                             .px(ui(10.))
                             .py(ui(4.))
                             .border_t_1()

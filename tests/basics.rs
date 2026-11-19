@@ -1317,6 +1317,179 @@ fn a_table_preview_starts_at_its_left_edge_however_far_the_last_one_was_scrolled
     );
 }
 
+/// Zip archives of a folder of 150 files, each of them listed as a table of
+/// more rows than a preview has room for.
+fn long_archives(fx: &Fixture, names: &[&str]) {
+    std::fs::create_dir_all(fx.path("Many")).unwrap();
+    for ix in 0..150 {
+        std::fs::write(fx.path(&format!("Many/file {ix:03}.txt")), "x").unwrap();
+    }
+    for name in names {
+        let progress = fffinder_core::ops::Progress::default();
+        fffinder_core::archive::compress(&[fx.path("Many")], &fx.path(name), &progress).unwrap();
+    }
+}
+
+/// The room between the last row of the table preview and the line under
+/// the table, the one with the count: none when the table is scrolled to
+/// its end, and less than none while rows are out of view below.
+fn room_under_the_rows(ui: &mut Ui) -> Pixels {
+    let rows_end = ui.snapshot("preview-table").bounds().bottom();
+    ui.snapshot("preview-table-footer").bounds().top() - rows_end
+}
+
+#[gpui_kit::test]
+fn a_table_preview_scrolls_down_to_its_last_row(cx: &mut TestAppContext) {
+    let fx = Fixture::new("pane-table-rows");
+    long_archives(&fx, &["a.zip", "b.zip"]);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("shift-p"));
+    let table_top = |ui: &mut Ui| ui.snapshot("preview-table").bounds().origin;
+
+    ui.select("a.zip");
+    let top = table_top(&mut ui);
+    assert!(
+        room_under_the_rows(&mut ui) < px(-1000.),
+        "most rows don't fit"
+    );
+    ui.select("b.zip");
+    assert_eq!(table_top(&mut ui), top);
+
+    let over_rows = top + point(px(20.), px(40.));
+    ui.scroll_point(over_rows, point(px(0.), px(-100.)));
+    assert_eq!(
+        table_top(&mut ui),
+        top - point(px(0.), px(100.)),
+        "b.zip scrolled down"
+    );
+    // Much further than it has rows: it stops with the last one in view.
+    ui.scroll_point(over_rows, point(px(0.), px(-100_000.)));
+    let room = room_under_the_rows(&mut ui);
+    assert!(
+        room.abs() < px(1.),
+        "the last row ends {room:?} above the count"
+    );
+
+    ui.select("a.zip");
+    assert_eq!(table_top(&mut ui), top, "a.zip is not where b.zip was left");
+}
+
+#[gpui_kit::test]
+fn a_long_table_wider_than_the_pane_scrolls_both_ways(cx: &mut TestAppContext) {
+    let fx = Fixture::new("pane-table-both-ways");
+    long_archives(&fx, &["a.zip"]);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("shift-p"));
+    // As narrow as it goes, so that the table is wider than the pane too.
+    ui.drag_by("resize-preview", 200.);
+    ui.select("a.zip");
+    let table_top = |ui: &mut Ui| ui.snapshot("preview-table").bounds().origin;
+    let top = table_top(&mut ui);
+    let over_rows = top + point(px(20.), px(40.));
+
+    ui.scroll_point(over_rows, point(px(0.), px(-100.)));
+    ui.scroll_point(over_rows, point(px(-40.), px(0.)));
+    assert_eq!(
+        table_top(&mut ui),
+        top - point(px(40.), px(100.)),
+        "down, then sideways"
+    );
+    ui.scroll_point(over_rows, point(px(0.), px(-100.)));
+    assert_eq!(
+        table_top(&mut ui),
+        top - point(px(40.), px(200.)),
+        "and further down from there"
+    );
+}
+
+#[gpui_kit::test]
+fn a_table_scrolls_down_in_the_gallery_and_in_quick_look(cx: &mut TestAppContext) {
+    let fx = Fixture::new("gallery-table-rows");
+    long_archives(&fx, &["a.zip"]);
+    let mut ui = Ui::open(cx, &fx.dir);
+    let table_top = |ui: &mut Ui| ui.snapshot("preview-table").bounds().origin;
+    // Turns the wheel over the table's first rows, and says where that left it.
+    let scroll_down = |ui: &mut Ui, what: &str| {
+        let top = table_top(ui);
+        let over_rows = top + point(px(20.), px(40.));
+        ui.scroll_point(over_rows, point(px(0.), px(-100.)));
+        let scrolled = table_top(ui);
+        assert_eq!(scrolled, top - point(px(0.), px(100.)), "{what} scrolled");
+        (over_rows, scrolled)
+    };
+    let scroll_to_the_end = |ui: &mut Ui, over_rows, what: &str| {
+        ui.scroll_point(over_rows, point(px(0.), px(-100_000.)));
+        let room = room_under_the_rows(ui);
+        assert!(
+            room.abs() < px(1.),
+            "{what}: the last row ends {room:?} above the count"
+        );
+    };
+
+    ui.click("view-gallery");
+    ui.select("a.zip");
+    let (over_rows, _) = scroll_down(&mut ui, "the gallery");
+    scroll_to_the_end(&mut ui, over_rows, "the gallery");
+
+    ui.click("view-list");
+    ui.select("a.zip");
+    ui.press("space");
+    ui.in_quick_look(|ui| {
+        let (over_rows, scrolled) = scroll_down(ui, "Quick Look");
+        // Bigger text is still a.zip, so it stays where it was being read.
+        ui.click("ql-text-bigger");
+        assert_eq!(table_top(ui), scrolled, "a.zip kept its place");
+        scroll_to_the_end(ui, over_rows, "Quick Look");
+    });
+}
+
+/// The column view scrolls sideways for a wheel that nothing in it takes, so
+/// a table in its card takes the wheel while rows of it are out of view, at
+/// its end too, and leaves it alone when all of them show.
+#[gpui_kit::test]
+fn a_table_in_the_column_views_card_takes_the_wheel_only_when_it_scrolls(cx: &mut TestAppContext) {
+    let fx = Fixture::new("card-table-rows");
+    long_archives(&fx, &["long.zip"]);
+    let progress = fffinder_core::ops::Progress::default();
+    fffinder_core::archive::compress(&[fx.path("Projects")], &fx.path("short.zip"), &progress)
+        .unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    // Too narrow for the column and the card beside it.
+    ui.resize(560., 600.);
+    let table_top = |ui: &mut Ui| ui.snapshot("preview-table").bounds().origin;
+    let column_left = |ui: &mut Ui| ui.snapshot(("column-pane", 0usize)).bounds().left();
+
+    ui.click(item_id("crow", &fx.path("long.zip")));
+    let (top, left) = (table_top(&mut ui), column_left(&mut ui));
+    let over_rows = top + point(px(20.), px(40.));
+    ui.scroll_point(over_rows, point(px(0.), px(-60.)));
+    assert_eq!(
+        table_top(&mut ui),
+        top - point(px(0.), px(60.)),
+        "the table scrolled down"
+    );
+    assert_eq!(column_left(&mut ui), left, "and the columns stayed");
+    // Much further than it has rows: it stops with the last one in view, and
+    // what is left of the wheel's turn isn't handed on to the columns.
+    ui.scroll_point(over_rows, point(px(0.), px(-100_000.)));
+    let room = room_under_the_rows(&mut ui);
+    assert!(
+        room.abs() < px(1.),
+        "the last row ends {room:?} above the count"
+    );
+    assert_eq!(column_left(&mut ui), left, "the columns stayed there too");
+
+    ui.click(item_id("crow", &fx.path("short.zip")));
+    let top = table_top(&mut ui);
+    assert!(room_under_the_rows(&mut ui) > px(0.), "every row shows");
+    ui.scroll_point(top + point(px(20.), px(40.)), point(px(0.), px(-60.)));
+    assert_eq!(table_top(&mut ui).y, top.y);
+    assert!(column_left(&mut ui) < left, "the columns scrolled instead");
+}
+
 #[gpui_kit::test]
 fn the_preview_pane_resizes_from_its_left_edge(cx: &mut TestAppContext) {
     let fx = Fixture::new("pane-width");

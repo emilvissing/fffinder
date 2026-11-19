@@ -7,7 +7,7 @@ mod common;
 
 use common::{Fixture, Open, Ui, cmd};
 use fffinder::finder::QuickLookMode;
-use gpui_kit::{TestAppContext, px};
+use gpui_kit::{TestAppContext, point, px};
 
 /// A browser in term mode on `fx`, with `nu` for explore mode.
 fn open_term<'a>(cx: &'a mut TestAppContext, fx: &Fixture) -> Option<Ui<'a>> {
@@ -139,6 +139,38 @@ fn the_dialog_opens_at_the_line_a_contents_search_found(cx: &mut TestAppContext)
     assert!(
         around.visible() && top <= first_line && top > first_line - px(40.),
         "the lines around the match are at the top of the preview: {top:?}, not {first_line:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_dialog_scrolls_a_table_down_to_its_last_row(cx: &mut TestAppContext) {
+    let fx = Fixture::new("term-table");
+    // An archive of more files than the dialog has rows for.
+    std::fs::create_dir_all(fx.path("Many")).unwrap();
+    for ix in 0..150 {
+        std::fs::write(fx.path(&format!("Many/file {ix:03}.txt")), "x").unwrap();
+    }
+    let progress = fffinder_core::ops::Progress::default();
+    fffinder_core::archive::compress(&[fx.path("Many")], &fx.path("many.zip"), &progress).unwrap();
+    fffinder::term::pretend_active_for_tests();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.select("many.zip");
+    ui.press("space");
+    assert!(ui.dialog_open());
+    let table = |ui: &mut Ui| ui.snapshot("preview-table").bounds();
+
+    let top = table(&mut ui).origin;
+    let over_rows = top + point(px(20.), px(40.));
+    ui.scroll_point(over_rows, point(px(0.), px(-100.)));
+    assert_eq!(table(&mut ui).origin, top - point(px(0.), px(100.)));
+    // Much further than it has rows: it stops with the last one in view,
+    // above the line with the count.
+    ui.scroll_point(over_rows, point(px(0.), px(-100_000.)));
+    let room = ui.snapshot("preview-table-footer").bounds().top() - table(&mut ui).bottom();
+    assert!(
+        room.abs() < px(1.),
+        "the last row ends {room:?} above the count"
     );
 }
 
