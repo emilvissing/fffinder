@@ -11,6 +11,7 @@ use gpui_kit::component::ElementExt as _;
 use gpui_kit::component::button::{Button, ButtonRounded, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, h_flex,
 };
@@ -151,6 +152,26 @@ pub fn menu_button(id: impl Into<ElementId>, icon: impl Into<Icon>, cx: &App) ->
         .w(ui(MENU_BUTTON_WIDTH))
         .px(ui(8.))
         .dropdown_caret(true)
+}
+
+/// A tooltip with `label` and the keys that send `action`, for a control
+/// that isn't a [`Button`]; those have `tooltip_with_action` for this.
+pub(super) fn shortcut_tooltip(
+    label: &'static str,
+    action: &dyn Action,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let action = action.boxed_clone();
+    move |window, cx| {
+        Tooltip::element(move |_, _| {
+            div()
+                .id("shortcut-tip")
+                .aria_label(label)
+                .child(label)
+                .test_support()
+        })
+        .action(action.as_ref(), Some(FINDER))
+        .build(window, cx)
+    }
 }
 
 thread_local! {
@@ -315,7 +336,7 @@ impl Finder {
         let nav = pill(cx)
             .child(
                 pill_button("back", IconName::ChevronLeft, cx)
-                    .tooltip("Back")
+                    .tooltip_with_action("Back", &GoBack, Some(FINDER))
                     .disabled(!can_back)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.go_back(&GoBack, window, cx)
@@ -323,7 +344,7 @@ impl Finder {
             )
             .child(
                 pill_button("forward", IconName::ChevronRight, cx)
-                    .tooltip("Forward")
+                    .tooltip_with_action("Forward", &GoForward, Some(FINDER))
                     .disabled(!can_forward)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.go_forward(&GoForward, window, cx)
@@ -334,9 +355,10 @@ impl Finder {
                            icon: Lucide,
                            tip: &'static str,
                            m: ViewMode,
+                           action: &dyn Action,
                            cx: &mut Context<Self>| {
             pill_button(id, icon, cx)
-                .tooltip(tip)
+                .tooltip_with_action(tip, action, Some(FINDER))
                 .selected(mode == m)
                 .when(mode == m, |b| b.bg(pal.pill_selected))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_view_mode(m, cx)))
@@ -347,6 +369,7 @@ impl Finder {
                 Lucide::LayoutGrid,
                 "as Icons",
                 ViewMode::Icons,
+                &ViewIcons,
                 cx,
             ))
             .child(view_button(
@@ -354,6 +377,7 @@ impl Finder {
                 Lucide::List,
                 "as List",
                 ViewMode::List,
+                &ViewList,
                 cx,
             ))
             .child(view_button(
@@ -361,6 +385,7 @@ impl Finder {
                 Lucide::Columns3,
                 "as Columns",
                 ViewMode::Columns,
+                &ViewColumns,
                 cx,
             ))
             .child(view_button(
@@ -368,6 +393,7 @@ impl Finder {
                 Lucide::GalleryHorizontalEnd,
                 "as Gallery",
                 ViewMode::Gallery,
+                &ViewGallery,
                 cx,
             ));
 
@@ -500,7 +526,7 @@ impl Finder {
                     this.child(
                         pill(cx).child(
                             pill_button("show-sidebar", IconName::PanelLeft, cx)
-                                .tooltip("Show Sidebar")
+                                .tooltip_with_action("Show Sidebar", &ToggleSidebar, Some(FINDER))
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.toggle_sidebar(&ToggleSidebar, window, cx)
                                 })),

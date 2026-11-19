@@ -19,7 +19,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{AppState, Finder, Row, SearchScope};
-use crate::actions::ToggleFilter;
+use crate::actions::{FINDER, ToggleFilter};
 use crate::model::Location;
 use crate::nushell;
 
@@ -299,7 +299,7 @@ impl Finder {
                             .small()
                             .ghost()
                             .icon(IconName::Close)
-                            .tooltip("Remove the filter")
+                            .tooltip_with_action("Remove the filter", &ToggleFilter, Some(FINDER))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.close_filter(window, cx)
                             })),

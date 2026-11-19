@@ -1,5 +1,6 @@
 //! Search scope bar, path bar, status bar, and the picker's choose bar.
 
+use super::toolbar::shortcut_tooltip;
 use super::{Finder, IndexActivity, SearchScope, group_digits};
 use crate::actions::*;
 use crate::model::Location;
@@ -127,10 +128,7 @@ impl Finder {
                             muted
                         },
                     ))
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Filter with Nushell")
-                            .build(window, cx)
-                    })
+                    .tooltip(shortcut_tooltip("Filter with Nushell", &ToggleFilter))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_filter(&crate::actions::ToggleFilter, window, cx)
                     }))
@@ -147,10 +145,7 @@ impl Finder {
                             .with_size(ui(14.))
                             .text_color(muted),
                     )
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Search Syntax")
-                            .build(window, cx)
-                    })
+                    .tooltip(shortcut_tooltip("Search Syntax", &SearchHelp))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.search_help(&SearchHelp, window, cx)
                     }))

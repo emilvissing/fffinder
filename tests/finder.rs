@@ -54,6 +54,41 @@ fn lists_navigates_and_goes_back(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn alt_up_goes_to_the_enclosing_folder_too(cx: &mut TestAppContext) {
+    let fx = Fixture::new("nav-alt-up");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Projects"));
+    ui.press("alt-up");
+    assert_eq!(ui.folder().as_deref(), Some(fx.dir.as_path()));
+    assert_eq!(ui.selected(), ["Projects"], "as Cmd-Up does");
+}
+
+#[gpui_kit::test]
+fn a_key_bound_twice_acts_once(cx: &mut TestAppContext) {
+    let fx = Fixture::new("nav-keys-twice");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // A Mac has Finder's keys for Back, Forward, Enclosing Folder, and Move
+    // to Trash bound twice. Binding the keys again does that to all of them.
+    ui.cx.update(fffinder::actions::bind_keys);
+
+    ui.select("notes.txt");
+    ui.press(&cmd("backspace"));
+    assert_eq!(ui.names(), ["Budget.csv", "Projects", "Roadmap.md"]);
+    assert_eq!(ui.notification_count(), 0, "nothing was trashed twice");
+
+    ui.go_to(&fx.path("Projects"));
+    ui.go_to(&fx.path("Projects/atlas"));
+    ui.press(&cmd("["));
+    assert_eq!(ui.folder(), Some(fx.path("Projects")), "one step back");
+    ui.press(&cmd("["));
+    ui.press(&cmd("]"));
+    assert_eq!(ui.folder(), Some(fx.path("Projects")), "one step forward");
+    ui.press(&cmd("]"));
+    ui.press(&cmd("up"));
+    assert_eq!(ui.folder(), Some(fx.path("Projects")), "one folder up");
+}
+
+#[gpui_kit::test]
 fn go_shortcuts(cx: &mut TestAppContext) {
     let fx = Fixture::new("go-keys");
     let mut ui = Ui::open(cx, &fx.dir);

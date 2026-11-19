@@ -3,6 +3,7 @@
 //! [`Workspace`]), and F5 and F6 between the two panes.
 
 use super::Finder;
+use super::toolbar::shortcut_tooltip;
 use crate::actions::*;
 use crate::model::Location;
 use crate::theme::ui;
@@ -12,6 +13,7 @@ use gpui_kit::TestSupportExt as _;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::notification::NotificationType;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -346,9 +348,12 @@ impl Finder {
                                 .with_size(ui(11.))
                                 .text_color(muted),
                         )
-                        .tooltip(|window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new("Close Tab")
-                                .build(window, cx)
+                        // Cmd+W closes the tab that shows, so only its button
+                        // names the keys.
+                        .map(|close| match on {
+                            true => close.tooltip(shortcut_tooltip("Close Tab", &CloseWindow)),
+                            false => close
+                                .tooltip(|window, cx| Tooltip::new("Close Tab").build(window, cx)),
                         })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(move |_, window, cx| {
@@ -419,6 +424,7 @@ impl Finder {
                         .rounded(ui(5.))
                         .hover(|s| s.bg(hover))
                         .child(Icon::new(Lucide::Plus).with_size(ui(14.)).text_color(muted))
+                        .tooltip(shortcut_tooltip("New Tab", &NewTab))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.new_tab(&NewTab, window, cx)
                         }))

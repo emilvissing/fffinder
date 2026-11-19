@@ -2,7 +2,7 @@
 //! everything shown) and see the result as a table.
 
 use super::Finder;
-use crate::actions::ToggleNuPanel;
+use crate::actions::{FINDER, ToggleNuPanel};
 use crate::nushell::NuOutput;
 use crate::theme::palette;
 use crate::theme::ui;
@@ -97,7 +97,7 @@ impl Finder {
                     .small()
                     .ghost()
                     .icon(IconName::Close)
-                    .tooltip("Close (Ctrl-`)")
+                    .tooltip_with_action("Close", &ToggleNuPanel, Some(FINDER))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_nu_panel(&ToggleNuPanel, window, cx)
                     })),

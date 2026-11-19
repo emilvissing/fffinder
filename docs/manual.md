@@ -119,6 +119,8 @@ A new window opens where the last one was, at the same size, on the same display
 
 Text that doesn't fit is cut short with an ellipsis. Rest the mouse on it to see all of it in a tooltip. This works for names and every other cell in the list, list headers, names in the other views, sidebar rows, path bar crumbs, and tab titles. File names and folder paths lose their middle, so the start and the extension both stay visible.
 
+A button's tooltip says what the button does. When a keyboard shortcut does the same, the tooltip shows the keys after the name. That goes for Back, Forward, the four view buttons, Show Sidebar and Hide Sidebar, the tab bar's + and the × of the tab that is showing, Filter with Nushell and Search Syntax in the scope bar, the close buttons of the filter bar and the Nushell panel, the sidebar's gear, and Quick Look's buttons.
+
 The file area shows a message when there is nothing to list:
 
 | Message | When |
@@ -645,7 +647,7 @@ Or start with `|` to use a whole pipeline, which must keep the `path` column:
 | sort-by size --reverse | first 20
 ```
 
-The filter runs 400 ms after you stop typing, or right away when you press Return. The status bar counts how many items pass. Errors show in red below the bar. The close button removes the filter.
+The filter runs 400 ms after you stop typing, or right away when you press Return. The status bar counts how many items pass. Errors show in red below the bar. The close button removes the filter, and so does Cmd+Alt+F.
 
 While searching, the filter bar's **Save** button opens "Save Smart Folder". Name it, and the search, its scope folder, the kind, Name or Contents, and the filter are saved in the sidebar under Smart Folders. Clicking a Smart Folder runs the search again with the filter, so it stays up to date.
 
@@ -766,7 +768,7 @@ VS Code's terminal measures character cells in points, so on a high-DPI screen t
 
 What's different from the window:
 
-- The terminal keeps most Cmd shortcuts for itself, so each Cmd shortcut also works with Ctrl: Ctrl+Q quits, Ctrl+F searches, and Ctrl+1 to Ctrl+4 switch views. Menus show the Ctrl form. Ctrl+C copies the selected paths, like Cmd+C; it doesn't stop fffinder.
+- The terminal keeps most Cmd shortcuts for itself, so each Cmd shortcut also works with Ctrl: Ctrl+Q quits, Ctrl+F searches, and Ctrl+1 to Ctrl+4 switch views. Menus and tooltips show the Ctrl form. Ctrl+C copies the selected paths, like Cmd+C; it doesn't stop fffinder.
 - There's no menu bar. The item menu and the toolbar menus work as usual.
 - Pasting (Cmd+V in most terminals) types into the focused text field.
 - There's one window. Ctrl+Q, or closing it, quits and puts the terminal back.
@@ -857,6 +859,8 @@ Your actions, then **Edit Actions…** and **Reload Actions**. See [Nushell acti
 ## Keyboard shortcuts
 
 Cmd on macOS, Ctrl elsewhere.
+
+Back, Forward, Enclosing Folder, and Move to Trash each have two shortcuts, Finder's and the one Explorer and the Linux file managers use. Both work on every system. Menus and tooltips have room for one, so they show Finder's on macOS, such as Cmd+[ and Cmd+Backspace, and the other on Linux and Windows, such as Alt+Left and Delete.
 
 ### Anywhere
 

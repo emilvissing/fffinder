@@ -116,13 +116,17 @@ pub const TREE: &str = "FolderTree";
 /// The folder tree while a name is being edited in it.
 pub const TREE_RENAMING: &str = "FolderTreeRenaming";
 
-pub fn bind_keys(cx: &mut App) {
+/// The key bindings, in the order they're bound. Where an action has more
+/// than one key, the order decides which is shown beside it: the macOS menu
+/// bar shows the first, and the window's own menus and tooltips the last.
+/// `mac` is whether the keys are for macOS.
+fn key_table(mac: bool, cx: &App) -> Vec<KeyBinding> {
     let finder = context(FINDER);
     let files = context(FILES);
     let quick_look = context(QUICK_LOOK);
     let tree = context(TREE);
     let one_pane = context("FinderFiles && OnePane");
-    let bindings = [
+    let mut bindings = vec![
         key("secondary-q", Quit, &None, cx),
         key("secondary-,", ShowSettings, &None, cx),
         key("secondary-n", NewWindow, &None, cx),
@@ -134,13 +138,13 @@ pub fn bind_keys(cx: &mut App) {
         key("secondary-shift-[", ShowPreviousTab, &finder, cx),
         key("secondary-\\", ToggleSplitView, &finder, cx),
         key("secondary-f", FocusSearch, &finder, cx),
+        // Finder's key for each of these goes first, for the menu bar.
         key("secondary-[", GoBack, &finder, cx),
         key("secondary-]", GoForward, &finder, cx),
         key("alt-left", GoBack, &finder, cx),
         key("alt-right", GoForward, &finder, cx),
-        // The menu bar shows an action's last binding, so these two go first.
-        key("alt-up", GoUp, &finder, cx),
         key("secondary-up", GoUp, &finder, cx),
+        key("alt-up", GoUp, &finder, cx),
         key("secondary-shift-h", GoHome, &finder, cx),
         key("secondary-shift-f", GoRecents, &finder, cx),
         key("secondary-shift-g", GoToFolder, &finder, cx),
@@ -244,8 +248,28 @@ pub fn bind_keys(cx: &mut App) {
         key("secondary-z", input::Undo, &tree, cx),
         key("secondary-shift-z", input::Redo, &tree, cx),
     ];
+    // The last key bound to Back, Forward, Enclosing Folder, and Move to Trash
+    // is the one Explorer and the Linux file managers use, which suits their
+    // menus and tooltips. A Mac's should show Finder's, so those are bound
+    // again here, last. A key bound twice still acts once, as long as its
+    // handler doesn't pass it on with `cx.propagate()`.
+    if mac {
+        bindings.extend([
+            key("secondary-[", GoBack, &finder, cx),
+            key("secondary-]", GoForward, &finder, cx),
+            key("secondary-up", GoUp, &finder, cx),
+            key("secondary-backspace", MoveToTrash, &files, cx),
+            key("secondary-backspace", MoveToTrash, &tree, cx),
+        ]);
+    }
+    bindings
+}
+
+pub fn bind_keys(cx: &mut App) {
+    let bindings = key_table(cfg!(target_os = "macos"), cx);
     // Terminals keep most Cmd shortcuts for themselves, so in one every Cmd
-    // binding also works with Ctrl. Added last, menus show the Ctrl form.
+    // binding also works with Ctrl. Added last, menus and tooltips show the
+    // Ctrl form.
     let aliases: Vec<KeyBinding> = if crate::term::active() {
         bindings
             .iter()
@@ -258,6 +282,8 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(aliases);
     // What Explorer and the Linux file managers use for these.
     if !cfg!(target_os = "macos") {
+        let finder = context(FINDER);
+        let files = context(FILES);
         cx.bind_keys([
             key("ctrl-l", GoToFolder, &finder, cx),
             key("alt-enter", GetInfo, &finder, cx),
@@ -443,6 +469,62 @@ mod tests {
             assert_eq!(keystroke.modifiers, Modifiers::secondary_key(cx));
             assert_eq!(keystroke.key, "n");
             assert_eq!(binding.predicate(), context(FINDER));
+        });
+    }
+
+    /// The actions with a key from Finder and one from the other file
+    /// managers: the action, its context, Finder's key, and the others'.
+    const TWO_KEY_ACTIONS: [(&dyn Action, &str, &str, &str); 5] = [
+        (&GoBack, FINDER, "secondary-[", "alt-left"),
+        (&GoForward, FINDER, "secondary-]", "alt-right"),
+        (&GoUp, FINDER, "secondary-up", "alt-up"),
+        (&MoveToTrash, FILES, "secondary-backspace", "delete"),
+        (&MoveToTrash, TREE, "secondary-backspace", "delete"),
+    ];
+
+    /// The keys `table` has for `action` in `context`, in the order it binds them.
+    fn keys_for(table: &[KeyBinding], action: &dyn Action, context: &str, cx: &App) -> Vec<String> {
+        let (context, os) = (super::context(context), cx.platform_info().os);
+        table
+            .iter()
+            .filter(|binding| binding.action().partial_eq(action) && binding.predicate() == context)
+            .map(|binding| binding.keystrokes()[0].inner().unparse(os))
+            .collect()
+    }
+
+    /// `keys` as [`keys_for`] spells them: `secondary` is Cmd or Ctrl here.
+    fn spelled(keys: &str, cx: &App) -> String {
+        let (binding, os) = (key(keys, Quit, &None, cx), cx.platform_info().os);
+        binding.keystrokes()[0].inner().unparse(os)
+    }
+
+    #[gpui_kit::test]
+    fn finders_keys_are_bound_first_and_last_on_a_mac(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let table = key_table(true, cx);
+            for (action, context, finders, others) in TWO_KEY_ACTIONS {
+                assert_eq!(
+                    keys_for(&table, action, context, cx),
+                    [finders, others, finders].map(|keys| spelled(keys, cx)),
+                    "{} in {context}",
+                    action.name()
+                );
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    fn the_other_file_managers_keys_are_bound_last_off_a_mac(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let table = key_table(false, cx);
+            for (action, context, finders, others) in TWO_KEY_ACTIONS {
+                assert_eq!(
+                    keys_for(&table, action, context, cx),
+                    [finders, others].map(|keys| spelled(keys, cx)),
+                    "{} in {context}",
+                    action.name()
+                );
+            }
         });
     }
 

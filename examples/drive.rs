@@ -9,8 +9,8 @@
 //! ```
 //!
 //! Steps: `key:<keys>` presses keys (`cmd-shift-g`, `enter`), `click:<id>`
-//! clicks an element by ID, `type:<text>` types into the focused field, and
-//! `wait:<ms>` pauses.
+//! clicks an element by ID, `hover:<id>` rests the mouse on one, `type:<text>`
+//! types into the focused field, and `wait:<ms>` pauses.
 
 use fffinder::finder::AppState;
 use fffinder::model::Location;
@@ -60,6 +60,7 @@ fn main() {
                     cx.update_window(handle, |_, window, cx| match kind {
                         "key" => window.press(&arg, cx),
                         "click" => window.click(SharedString::from(arg), cx),
+                        "hover" => window.hover(SharedString::from(arg), cx),
                         "type" => window.input(&arg, cx),
                         other => eprintln!("unknown step kind {other:?}"),
                     })

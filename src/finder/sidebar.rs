@@ -7,7 +7,7 @@
 use super::fit::with_cut_off_text;
 use super::folder_tree::{Disclosure, NodeKey, Section};
 use super::list::ResizeEdge;
-use super::toolbar::{TOOLBAR_HEIGHT, pill, pill_button, window_drag_area};
+use super::toolbar::{TOOLBAR_HEIGHT, pill, pill_button, shortcut_tooltip, window_drag_area};
 use super::views::{DragPreview, DragSource, DraggedFiles};
 use super::{Finder, IndexActivity, group_digits};
 use crate::actions::*;
@@ -473,7 +473,11 @@ impl Finder {
                                     .border_color(gpui_kit::transparent_black())
                                     .child(
                                         pill_button("hide-sidebar", IconName::PanelLeft, cx)
-                                            .tooltip("Hide Sidebar")
+                                            .tooltip_with_action(
+                                                "Hide Sidebar",
+                                                &ToggleSidebar,
+                                                Some(FINDER),
+                                            )
                                             .on_click(cx.listener(
                                                 |this, _: &ClickEvent, window, cx| {
                                                     this.toggle_sidebar(&ToggleSidebar, window, cx)
@@ -1014,7 +1018,7 @@ impl Finder {
                             .with_size(ui(14.))
                             .text_color(muted),
                     )
-                    .tooltip(|window, cx| Tooltip::new("Settings").build(window, cx))
+                    .tooltip(shortcut_tooltip("Settings", &ShowSettings))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.show_settings(&ShowSettings, window, cx)
                     }))

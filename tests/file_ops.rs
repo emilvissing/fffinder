@@ -706,6 +706,16 @@ fn trash_puts_back_and_empties(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_delete_key_moves_items_to_the_trash_too(cx: &mut TestAppContext) {
+    let fx = Fixture::new("trash-delete-key");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.select("notes.txt");
+    ui.press("delete");
+    assert!(!fx.path("notes.txt").exists());
+    assert!(common::trash_dir(&fx.dir).join("notes.txt").exists());
+}
+
+#[gpui_kit::test]
 fn delete_immediately_asks_first(cx: &mut TestAppContext) {
     let fx = Fixture::new("delete-now");
     let mut ui = Ui::open(cx, &fx.dir);

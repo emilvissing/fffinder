@@ -12,8 +12,9 @@ use fffinder::system::SystemCall;
 use fffinder_core::terminals::{Launch, Terminal};
 use fffinder_core::{Appearance, GroupKey, KindFilter, SortKey, ViewMode};
 use gpui_kit::Action as _;
-use gpui_kit::TestAppContext;
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::kbd::Kbd;
+use gpui_kit::{KeyContext, TestAppContext};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -70,6 +71,92 @@ fn sidebar_hide_and_show_buttons(cx: &mut TestAppContext) {
     assert!(!ui.exists("hide-sidebar"));
     ui.click("show-sidebar");
     assert!(ui.read(|f| f.config().show_sidebar));
+}
+
+#[gpui_kit::test]
+fn every_command_a_tooltip_names_has_keys_to_show(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tooltip-keys");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let named: Vec<Box<dyn gpui_kit::Action>> = vec![
+        GoBack.boxed_clone(),
+        GoForward.boxed_clone(),
+        ViewIcons.boxed_clone(),
+        ViewList.boxed_clone(),
+        ViewColumns.boxed_clone(),
+        ViewGallery.boxed_clone(),
+        ToggleSidebar.boxed_clone(),
+        NewTab.boxed_clone(),
+        CloseWindow.boxed_clone(),
+        ToggleFilter.boxed_clone(),
+        SearchHelp.boxed_clone(),
+        ShowSettings.boxed_clone(),
+        ToggleNuPanel.boxed_clone(),
+    ];
+    // A tooltip asks for its keys this way, and shows none when there are none.
+    let without: Vec<&str> = ui.window(|window, _| {
+        named
+            .iter()
+            .filter(|action| {
+                Kbd::binding_for_action(action.as_ref(), Some(FINDER), window).is_none()
+            })
+            .map(|action| action.name())
+            .collect()
+    });
+    assert!(without.is_empty(), "no keys for {without:?}");
+}
+
+#[gpui_kit::test]
+fn the_keys_shown_for_going_back_forward_and_up_are_this_systems(cx: &mut TestAppContext) {
+    let fx = Fixture::new("usual-keys");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // Each has Finder's keys and the other file managers'. Both work, and a
+    // tooltip or a menu shows the ones bound last.
+    let two_keys: [(Box<dyn gpui_kit::Action>, &str, &str); 3] = [
+        (GoBack.boxed_clone(), "cmd-[", "alt-left"),
+        (GoForward.boxed_clone(), "cmd-]", "alt-right"),
+        (GoUp.boxed_clone(), "cmd-up", "alt-up"),
+    ];
+    for (action, finders, others) in two_keys {
+        let shown = ui.window(|window, cx| {
+            let finder = KeyContext::parse(FINDER).unwrap();
+            let binding = window
+                .highest_precedence_binding_for_action_in_context(action.as_ref(), finder)
+                .unwrap_or_else(|| panic!("no keys for {}", action.name()));
+            let os = cx.platform_info().os;
+            binding.keystrokes()[0].inner().unparse(os)
+        });
+        let usual = if cfg!(target_os = "macos") {
+            finders
+        } else {
+            others
+        };
+        assert_eq!(shown, usual, "{}", action.name());
+    }
+}
+
+#[gpui_kit::test]
+fn tab_bar_tooltips_name_their_shortcuts(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tab-tips");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            workspace: true,
+            ..Default::default()
+        },
+    );
+    ui.press(&cmd("t"));
+
+    ui.hover("new-tab");
+    assert_eq!(ui.snapshot("shortcut-tip").label(), Some("New Tab"));
+
+    // Cmd-W closes the tab that shows, so only its close button names keys.
+    ui.hover_point(at(0., 0.));
+    ui.hover(("close-tab", 1usize));
+    assert_eq!(ui.snapshot("shortcut-tip").label(), Some("Close Tab"));
+    ui.hover_point(at(0., 0.));
+    ui.hover(("close-tab", 0usize));
+    assert!(!ui.exists("shortcut-tip"));
 }
 
 #[gpui_kit::test]
@@ -472,6 +559,22 @@ fn scope_bar_controls(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn scope_bar_tooltips_name_their_shortcuts(cx: &mut TestAppContext) {
+    let fx = Fixture::new("scope-tips");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.update(|f, _, cx| f.set_query("atlas".into(), true, cx));
+
+    ui.hover("filter-toggle");
+    assert_eq!(
+        ui.snapshot("shortcut-tip").label(),
+        Some("Filter with Nushell")
+    );
+    ui.hover_point(at(0., 0.));
+    ui.hover("search-help");
+    assert_eq!(ui.snapshot("shortcut-tip").label(), Some("Search Syntax"));
+}
+
+#[gpui_kit::test]
 fn typing_on_after_no_results_keeps_the_message(cx: &mut TestAppContext) {
     let fx = Fixture::new("search-nothing-typing");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -696,6 +799,14 @@ fn sidebar_rows_and_menus(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_settings_tooltip_names_its_shortcut(cx: &mut TestAppContext) {
+    let fx = Fixture::new("settings-tip");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.hover("index-settings");
+    assert_eq!(ui.snapshot("shortcut-tip").label(), Some("Settings"));
+}
+
+#[gpui_kit::test]
 fn the_index_status_is_read_in_the_background(cx: &mut TestAppContext) {
     let fx = Fixture::new("index-status");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -901,6 +1012,32 @@ fn context_menus_on_items_and_empty_space(cx: &mut TestAppContext) {
     ui.click_menu_item("New Folder");
     assert!(fx.path("untitled folder").is_dir());
     ui.press("escape");
+}
+
+#[gpui_kit::test]
+fn the_item_menu_shows_this_systems_keys_for_move_to_trash(cx: &mut TestAppContext) {
+    // The kit says which key hints it drew only in a debug build.
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let fx = Fixture::new("trash-keys");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.right_click(item_id("row", &fx.path("notes.txt")));
+    assert!(ui.menu_labels().contains(&"Move to Trash".to_string()));
+
+    // Both keys move items to the Trash everywhere; a menu shows one of them.
+    let (usual, other) = if cfg!(target_os = "macos") {
+        ("kbd:cmd-backspace", "kbd:delete")
+    } else {
+        ("kbd:delete", "kbd:ctrl-backspace")
+    };
+    let mut window = gpui_kit::VisualTestContext::from_window(ui.handle, ui.cx);
+    assert!(
+        window.debug_bounds(usual).is_some(),
+        "no {usual} in the menu"
+    );
+    assert!(window.debug_bounds(other).is_none(), "{other} in the menu");
 }
 
 // ----- dialogs ---------------------------------------------------------------------
@@ -1773,6 +1910,22 @@ fn nushell_filter_and_smart_folders(cx: &mut TestAppContext) {
     ui.right_click(("smart", 0usize));
     ui.click_menu_item("Remove from Sidebar");
     assert!(ui.read(|f| f.smart_folders().is_empty()));
+}
+
+#[gpui_kit::test]
+fn the_keys_on_the_filter_bars_close_button_remove_the_filter(cx: &mut TestAppContext) {
+    let fx = Fixture::new("filter-keys");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("alt-f"));
+    ui.type_text("size > 1kb");
+    ui.press("enter");
+    assert_eq!(ui.read(|f| f.filter_text().to_string()), "size > 1kb");
+
+    // The keyboard is in the filter's field, where the bar leaves it.
+    ui.press(&cmd("alt-f"));
+    assert!(!ui.exists("filter-input"));
+    assert_eq!(ui.read(|f| f.filter_text().to_string()), "");
+    assert!(ui.files_focused());
 }
 
 #[gpui_kit::test]
