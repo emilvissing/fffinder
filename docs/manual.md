@@ -1298,7 +1298,13 @@ A step that runs longer than 20 seconds fails the run and names the step, so a h
 cargo run --example drive -- key:cmd-, click:show-hidden key:escape key:cmd-shift-g 'type:~/src' key:enter
 ```
 
-`examples/screenshot.rs` renders the window to a PNG with Metal, so a UI change can be checked without opening it. `--tabs N` opens N tabs, `--split` turns on split view, and `--info` opens Get Info. `examples/macos_colors.rs` prints the macOS colors the themes are based on, in light and dark.
+`examples/screenshot.rs` renders the window to a PNG, so a UI change can be checked without opening it. It draws with Metal on macOS and with wgpu on Linux, where Mesa's software drivers will do (`FFFINDER_SOFTWARE_RENDERING=1`). `--tabs N` opens N tabs, `--split` turns on split view, and `--info` opens Get Info. `--do STEP`, given as many times as you like, replays `drive.rs` steps in the window before the picture is taken:
+
+```nu
+cargo run --example screenshot -- search.png --view list --do key:cmd-f --do type:readme
+```
+
+`examples/macos_colors.rs` prints the macOS colors the themes are based on, in light and dark.
 
 `examples/terminals.rs` lists the terminals found and what Automatic picks. With `--verify` it opens each one with a short script in place of `nu` that records the folder it started in, then closes it. Terminal and iTerm2 keep their windows open, so it checks them only when you name them.
 

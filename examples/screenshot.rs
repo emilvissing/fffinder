@@ -1,10 +1,21 @@
-//! Render the fffinder window headlessly (Metal, macOS) and save a PNG.
+//! Render the fffinder window headlessly and save a PNG. It draws with Metal on
+//! macOS and with wgpu on Linux, where a software driver such as lavapipe will
+//! do (`FFFINDER_SOFTWARE_RENDERING=1`).
 //!
 //! ```text
 //! cargo run --example screenshot -- out.png [--dir PATH] [--view icons|list|columns|gallery]
 //!     [--light|--dark] [--query TEXT] [--scope-folder] [--select N] [--quicklook] [--explore]
 //!     [--nu PIPELINE] [--size 1100x700] [--no-sidebar] [--settings] [--info]
-//!     [--tabs N] [--split] [--disk-access]
+//!     [--tabs N] [--split] [--disk-access] [--do STEP]...
+//! ```
+//!
+//! `--do` replays a step in the window before the picture is taken, and can be
+//! given many times. The steps are the ones `examples/drive.rs` takes:
+//! `key:<keys>` presses keys (`cmd-f`, `enter`), `click:<id>` clicks an element
+//! by ID, `type:<text>` types into the focused field, and `wait:<ms>` pauses.
+//!
+//! ```text
+//! cargo run --example screenshot -- out.png --view list --do key:cmd-f --do type:readme
 //! ```
 
 use fffinder::finder::AppState;
@@ -41,6 +52,8 @@ struct Options {
     width: f32,
     height: f32,
     sidebar: bool,
+    /// Steps replayed in the window, in order, before the picture is taken.
+    steps: Vec<String>,
 }
 
 fn parse() -> Options {
@@ -64,6 +77,7 @@ fn parse() -> Options {
         width: 1100.,
         height: 700.,
         sidebar: true,
+        steps: Vec::new(),
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -90,6 +104,7 @@ fn parse() -> Options {
             "--tabs" => o.tabs = args.next().and_then(|n| n.parse().ok()).unwrap_or(1),
             "--split" => o.split = true,
             "--scope-folder" => o.scope_folder = true,
+            "--do" => o.steps.push(args.next().expect("--do STEP")),
             "--size" => {
                 let s = args.next().expect("--size WxH");
                 let (w, h) = s.split_once('x').expect("WxH");
@@ -112,7 +127,8 @@ fn main() {
         watch: false,
         search: Default::default(),
     });
-    if o.query.is_some() {
+    // A step may type a search, so the index has to be ready for those too.
+    if o.query.is_some() || !o.steps.is_empty() {
         engine.wait_ready(Duration::from_secs(120));
     }
     let nu = nushell::find_nu(config.nu_path.as_deref());
@@ -261,6 +277,31 @@ fn main() {
             }
         }
     }
+    if !o.steps.is_empty() {
+        // Keys go to whatever has the focus, and a window opened without it
+        // has nothing focused.
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |finder, cx| finder.focus_files(window, cx));
+        })
+        .ok();
+    }
+    for step in &o.steps {
+        let (kind, arg) = step.split_once(':').unwrap_or((step.as_str(), ""));
+        if kind == "wait" {
+            let ms: u64 = arg.parse().unwrap_or(1000);
+            cx.advance_clock(Duration::from_millis(ms));
+            std::thread::sleep(Duration::from_millis(ms));
+        } else {
+            cx.update_window(handle, |_, window, cx| match kind {
+                "key" => window.press(arg, cx),
+                "click" => window.click(gpui_kit::SharedString::from(arg.to_string()), cx),
+                "type" => window.input(arg, cx),
+                other => eprintln!("unknown step kind {other:?}"),
+            })
+            .ok();
+        }
+        settle(&mut cx);
+    }
     settle(&mut cx);
 
     let shown = match o.quick_look {
@@ -269,7 +310,7 @@ fn main() {
             .expect("Quick Look opened its window"),
         false => handle,
     };
-    let image = cx.capture_screenshot(shown).expect("Metal rendering");
+    let image = cx.capture_screenshot(shown).expect("rendering");
     image.save(&o.out).expect("save png");
     println!("{}", o.out.display());
 }
