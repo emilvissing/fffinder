@@ -7,8 +7,8 @@ use common::{Fixture, Open, Ui, cmd};
 use fffinder::finder::QuickLookMode;
 use fffinder::model::Location;
 use fffinder_core::ViewMode;
-use gpui_kit::TestAppContext;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
+use gpui_kit::{Keystroke, TestAppContext};
 
 #[gpui_kit::test]
 fn lists_navigates_and_goes_back(cx: &mut TestAppContext) {
@@ -260,6 +260,272 @@ fn type_into_the_search_field_and_down_arrow(cx: &mut TestAppContext) {
     ui.press("left");
     ui.press("backspace");
     assert_eq!(ui.read(|f| f.query().to_string()), "roadmp");
+}
+
+#[gpui_kit::test]
+fn return_before_the_results_are_in_waits_for_them(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-early-return");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_without_settling("roadmap");
+    ui.press_without_settling("enter");
+    assert!(
+        !ui.files_focused(),
+        "the rows are still the folder's, so the keyboard stays in the field"
+    );
+    assert!(ui.selected().is_empty());
+
+    // Return doesn't sit out the pause a search waits for after a key, so
+    // the answer comes without any time passing.
+    ui.cx.run_until_parked();
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert!(ui.files_focused(), "the results came in");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn down_arrow_before_the_results_are_in_waits_for_them(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-early-down");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_without_settling("atlas");
+    ui.press_without_settling("down");
+    assert!(!ui.files_focused());
+    assert!(ui.selected().is_empty());
+
+    ui.settle();
+    let found = ui.names();
+    assert!(found.len() > 1, "{found:?}");
+    assert!(ui.files_focused());
+    assert_eq!(ui.selected(), [found[0].clone()], "the first of {found:?}");
+}
+
+#[gpui_kit::test]
+fn return_before_the_results_are_in_waits_in_an_empty_folder_too(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-early-return-empty");
+    std::fs::create_dir(fx.path("Empty")).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Empty"));
+    assert!(ui.names().is_empty());
+    ui.click("search");
+    ui.type_without_settling("roadmap");
+    ui.press_without_settling("enter");
+    ui.settle();
+    assert!(ui.files_focused(), "the folder had nothing to move into");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn a_second_return_before_the_results_are_in_opens_nothing(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-return-twice");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_without_settling("roadmap");
+    ui.press_without_settling("enter");
+    ui.press_without_settling("enter");
+    ui.settle();
+    assert!(
+        ui.system_calls().is_empty(),
+        "nothing from the folder was opened: {:?}",
+        ui.system_calls()
+    );
+    assert_eq!(ui.folder().as_deref(), Some(fx.dir.as_path()));
+    assert!(ui.files_focused());
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn return_on_a_search_that_finds_nothing_stays_in_the_field(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-return-nothing");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_without_settling("zzqq-nothing");
+    ui.press_without_settling("enter");
+    ui.settle();
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(!ui.files_focused(), "there is nothing to move into");
+    assert!(
+        ui.window(|window, cx| window.has_focused_input(cx)),
+        "the search field keeps the keyboard"
+    );
+}
+
+#[gpui_kit::test]
+fn typing_on_after_return_calls_off_the_move_into_the_results(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-return-then-type");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_without_settling("road");
+    ui.press_without_settling("enter");
+    ui.type_without_settling("map");
+    ui.settle();
+    assert_eq!(ui.read(|f| f.query().to_string()), "roadmap");
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert!(!ui.files_focused(), "typing went on in the field");
+    assert!(ui.selected().is_empty());
+
+    // The same when the words and the caret end up as they were at Return.
+    ui.press_without_settling("backspace");
+    ui.press_without_settling("enter");
+    ui.press_without_settling("backspace");
+    ui.type_without_settling("a");
+    ui.settle();
+    assert_eq!(ui.read(|f| f.query().to_string()), "roadma");
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert!(!ui.files_focused(), "the words were edited in between");
+
+    // And when a space is typed and deleted, which the words never show.
+    ui.type_without_settling("p");
+    ui.press_without_settling("enter");
+    ui.type_without_settling(" ");
+    ui.press_without_settling("backspace");
+    ui.settle();
+    assert_eq!(ui.read(|f| f.query().to_string()), "roadmap");
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert!(!ui.files_focused(), "a space came and went in between");
+}
+
+#[gpui_kit::test]
+fn a_newline_the_search_field_drops_leaves_return_waiting(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-return-newline");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_without_settling("roadmap");
+    // Return from a system that also sends its newline as typed text. The
+    // field has one line and drops it, and still says its text changed.
+    ui.window(|window, cx| {
+        window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx);
+    });
+    ui.settle();
+    assert_eq!(ui.read(|f| f.query().to_string()), "roadmap");
+    assert!(ui.files_focused(), "nothing was edited, so Return stands");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn moving_the_caret_after_return_calls_off_the_move_into_the_results(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-return-then-left");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_without_settling("roadmap");
+    ui.press_without_settling("enter");
+    // The words are the same, but they're being edited again.
+    ui.press_without_settling("left");
+    ui.settle();
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert!(!ui.files_focused(), "the keyboard stays where the caret is");
+    assert!(ui.selected().is_empty());
+}
+
+#[gpui_kit::test]
+fn other_words_from_a_second_launch_call_off_the_move_into_the_results(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-return-then-sent");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_without_settling("road");
+    ui.press_without_settling("enter");
+    // `fff gui` and a second launch put their own words in the field, and
+    // these leave the caret where it was.
+    let view = ui.view.clone();
+    ui.window(|window, cx| view.update(cx, |f, cx| f.open_request(None, Some("note"), window, cx)));
+    ui.settle();
+    let found = ui.names();
+    assert!(found.contains(&"notes.txt".to_string()), "{found:?}");
+    assert!(!ui.files_focused(), "Return was pressed for other words");
+    assert!(ui.selected().is_empty());
+}
+
+#[gpui_kit::test]
+fn results_that_come_in_leave_the_keyboard_where_it_has_gone_since(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-return-then-filter");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_without_settling("roadmap");
+    ui.press_without_settling("enter");
+    // The filter bar opens with the keyboard in its field.
+    ui.press_without_settling(&cmd("alt-f"));
+    ui.settle();
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert!(!ui.files_focused());
+    let typing_in = ui.window(|window, cx| window.focused_input(cx).map(|field| field.value(cx)));
+    assert_eq!(
+        typing_in.as_deref(),
+        Some(""),
+        "the filter field, which is empty, has the keyboard"
+    );
+}
+
+#[gpui_kit::test]
+fn return_before_the_results_are_in_waits_for_the_filter_too(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("search-early-return-filter");
+    std::fs::write(fx.path("Projects/atlas/huge.log"), "x".repeat(20_000)).unwrap();
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    ui.press(&cmd("alt-f"));
+    ui.type_text("size > 10kb");
+    ui.press("enter");
+    let kept = ui.names();
+    assert!(!kept.contains(&"notes.txt".to_string()), "{kept:?}");
+
+    // The search answers before the filter has looked at its results.
+    ui.click("search");
+    ui.type_without_settling("huge");
+    ui.press_without_settling("enter");
+    ui.settle();
+    assert_eq!(ui.names(), ["huge.log"]);
+    assert!(ui.files_focused());
+    assert_eq!(ui.selected(), ["huge.log"]);
+}
+
+#[gpui_kit::test]
+fn going_to_another_folder_calls_off_a_key_that_waits_for_the_filter(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("search-down-then-go-up");
+    std::fs::write(fx.path("Projects/atlas/huge.log"), "x".repeat(20_000)).unwrap();
+    std::fs::write(fx.path("Projects/big.log"), "x".repeat(20_000)).unwrap();
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    ui.go_to(&fx.path("Projects/atlas"));
+    ui.press(&cmd("alt-f"));
+    ui.type_without_settling("size > 10kb");
+    ui.press_without_settling("enter");
+    // The filter hasn't looked at the folder's items yet.
+    ui.click_without_settling("search");
+    ui.press_without_settling("down");
+    assert!(!ui.files_focused());
+
+    // Alt-Up goes to the enclosing folder, and the keyboard stays put.
+    ui.press_without_settling("alt-up");
+    ui.settle();
+    assert_eq!(ui.folder(), Some(fx.path("Projects")));
+    assert_eq!(ui.names(), ["big.log"]);
+    assert!(
+        !ui.files_focused(),
+        "Down Arrow was pressed for the folder the window left"
+    );
+    assert!(
+        ui.window(|window, cx| window.has_focused_input(cx)),
+        "the search field keeps the keyboard"
+    );
 }
 
 #[gpui_kit::test]

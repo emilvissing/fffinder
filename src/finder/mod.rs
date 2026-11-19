@@ -301,8 +301,15 @@ pub struct Finder {
     results: Vec<Row>,
     search_stats: Option<SearchStats>,
     searching: bool,
+    /// The search hasn't started yet: it's waiting for a pause in typing.
+    search_waiting: bool,
     search_task: Task<()>,
     search_gen: u64,
+    /// Return or Down Arrow was pressed in the search field before the rows
+    /// were the results for what's typed, and moves into them once they are.
+    /// Holds the window that happens in, and the field's selection when the
+    /// key was pressed: a caret that has moved since is back to editing.
+    enter_results: Option<(AnyWindowHandle, std::ops::Range<usize>)>,
 
     rows: Vec<Row>,
     /// The groups `rows` are in, when the view uses groups.
@@ -551,8 +558,10 @@ impl Finder {
             results: Vec::new(),
             search_stats: None,
             searching: false,
+            search_waiting: false,
             search_task: Task::ready(()),
             search_gen: 0,
+            enter_results: None,
             rows: Vec::new(),
             groups: Vec::new(),
             collapsed_groups: HashSet::new(),
@@ -907,6 +916,9 @@ impl Finder {
         self.marquee = None;
         self.renaming = None;
         self.spring_folder = None;
+        // A Return or Down Arrow still waiting to move into the items, say
+        // for a filter to finish, was pressed for the place the window left.
+        self.enter_results = None;
         self.show_folder_view(cx);
         self.columns.clear();
         self.active_column = 0;
@@ -1275,6 +1287,7 @@ impl Finder {
             self.sync_root_column();
         }
         self.select_first_for_gallery(cx);
+        self.enter_awaited_results(cx);
         cx.notify();
     }
 
@@ -1302,21 +1315,110 @@ impl Finder {
     ) {
         match event {
             InputEvent::Change => {
-                let value = state.read(cx).value().to_string();
+                let field = state.read(cx);
+                let (value, selection) = (field.value().to_string(), field.selected_range());
+                // An edit calls off a key that waits to move into the
+                // results, even one that leaves the words as they were, as a
+                // space typed and deleted does. Edits move the caret; a
+                // newline, which the field drops and still reports, doesn't.
+                if matches!(&self.enter_results, Some((_, at_key)) if *at_key != selection) {
+                    self.enter_results = None;
+                }
                 self.set_query(value, false, cx);
             }
             InputEvent::PressEnter { .. } => {
-                // Return runs the search now and moves into the results.
-                self.run_search(false, cx);
-                if !self.rows.is_empty() {
-                    self.focus_files(window, cx);
-                    if self.selection.is_empty() {
-                        self.selection.select_only(0);
-                        self.selection_changed(cx);
-                    }
-                }
+                self.move_into_results(window, cx);
             }
             InputEvent::Focus | InputEvent::Blur => {}
+        }
+    }
+
+    /// Return and Down Arrow in the search field: give the files the
+    /// keyboard, with the first one selected unless something already is.
+    /// While the rows aren't yet the results for what's typed, the key waits
+    /// for them instead of acting on a folder's rows or an earlier search's.
+    /// False when there's nothing to move into and nothing on its way.
+    pub(super) fn move_into_results(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.results_pending() {
+            let selection = self.search_input.read(cx).selected_range();
+            self.enter_results = Some((window.window_handle(), selection));
+            // The results are wanted now, so a search still waiting for a
+            // pause in typing starts. One that's running is left to finish:
+            // starting it over would only take longer.
+            if self.search_waiting {
+                self.run_search(false, cx);
+            }
+            return true;
+        }
+        self.enter_results = None;
+        if self.rows.is_empty() {
+            return false;
+        }
+        self.enter_rows(window, cx);
+        true
+    }
+
+    /// More rows are on their way for what's typed: a search or a filter is
+    /// running, or the index is still being built and has found nothing yet.
+    fn results_pending(&self) -> bool {
+        let indexing = self.search_stats.as_ref().is_some_and(|s| s.indexing);
+        self.searching || self.filtering || (indexing && self.rows.is_empty())
+    }
+
+    /// Give the files the keyboard, with the first one selected unless
+    /// something already is.
+    fn enter_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_files(window, cx);
+        if self.selection.is_empty() {
+            self.selection.select_only(0);
+            self.scroll_to(0);
+            self.selection_changed(cx);
+        }
+        cx.notify();
+    }
+
+    /// The rows were rebuilt. A Return or Down Arrow that was waiting for
+    /// the results moves into them, unless more are still on their way.
+    fn enter_awaited_results(&mut self, cx: &mut Context<Self>) {
+        let Some((window, _)) = self.enter_results.clone() else {
+            return;
+        };
+        if self.results_pending() {
+            return;
+        }
+        // The keyboard moves in a window, and rows are rebuilt where there
+        // is none at hand, as when a search answers.
+        let finder = cx.entity();
+        cx.defer(move |cx| {
+            window
+                .update(cx, |_, window, cx| {
+                    finder.update(cx, |this, cx| this.finish_enter(window, cx))
+                })
+                .ok();
+        });
+    }
+
+    /// Move into the results for a Return or Down Arrow that waited for them.
+    fn finish_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // More may have been asked for since the rows were rebuilt.
+        if self.results_pending() {
+            return;
+        }
+        let Some((_, selection)) = self.enter_results.take() else {
+            return;
+        };
+        // The key was pressed in the search field. If the keyboard has gone
+        // elsewhere since (a clicked row, a dialog, another tab) it stays
+        // there, and so it does in the field when the caret has moved.
+        let field = self.search_input.read(cx);
+        let waiting =
+            field.focus_handle(cx).is_focused(window) && field.selected_range() == selection;
+        if waiting && !self.rows.is_empty() {
+            self.enter_rows(window, cx);
         }
     }
 
@@ -1325,6 +1427,9 @@ impl Finder {
         if query == self.query {
             return;
         }
+        // A key waiting to move into the results was pressed for the words
+        // as they were.
+        self.enter_results = None;
         let was_searching = self.is_searching();
         self.query = query;
         if self.query.is_empty() {
@@ -1333,6 +1438,7 @@ impl Finder {
             self.results.clear();
             self.search_stats = None;
             self.searching = false;
+            self.search_waiting = false;
             self.selection.clear();
             self.rebuild_rows(cx);
             return;
@@ -1386,12 +1492,19 @@ impl Finder {
             files_only: false,
         };
         self.searching = true;
+        self.search_waiting = debounce;
         cx.notify();
         self.search_task = cx.spawn(async move |this, cx| {
             if debounce {
                 cx.background_executor()
                     .timer(Duration::from_millis(50))
                     .await;
+                this.update(cx, |this, _| {
+                    if this.search_gen == generation {
+                        this.search_waiting = false;
+                    }
+                })
+                .ok();
             }
             let (rows, stats) = cx
                 .background_spawn(async move {

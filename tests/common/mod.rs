@@ -433,6 +433,20 @@ impl<'a> Ui<'a> {
         });
     }
 
+    /// Press `key` without letting spawned work run afterwards, as when the
+    /// key comes before a search has answered.
+    pub fn press_without_settling(&mut self, key: &str) {
+        let _guard = StepGuard::new(format!("press {key}"));
+        self.window(|window, cx| window.press(key, cx));
+    }
+
+    /// Type `text` without letting spawned work run afterwards, so a search
+    /// it starts has not answered by the next step.
+    pub fn type_without_settling(&mut self, text: &str) {
+        let _guard = StepGuard::new(format!("type {text:?}"));
+        self.window(|window, cx| window.input(text, cx));
+    }
+
     pub fn dispatch(&mut self, action: impl gpui_kit::Action) {
         let label = format!("dispatch {}", action.name());
         let _guard = StepGuard::new(label);

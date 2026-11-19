@@ -321,7 +321,7 @@ Each group has a header with its name and how many items it holds. Click the hea
 
 ## Searching
 
-Type in the search field (Cmd+F) to search. Searches start 50 ms after you stop typing. Return searches right away and moves into the results, selecting the first one. Down Arrow in the search field also moves into the results.
+Type in the search field (Cmd+F) to search. Searches start 50 ms after you stop typing. Return searches right away and moves into the results, selecting the first one. Down Arrow in the search field also moves into the results. If the results aren't in yet, both keys wait for them and then move in. Typing on, or moving the caret, calls that off, and when nothing is found the keyboard stays in the search field. Return doesn't run a search again when its results are already in; Refresh (Cmd+R) does.
 
 To search one part of the tree, open its folder and turn on **Search Only in "Folder name"**, the folder button left of the search field, before or while you search.
 

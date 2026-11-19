@@ -447,15 +447,8 @@ impl Finder {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             // Down arrow moves from the search field into the results.
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "down" && !this.rows.is_empty() {
-                    this.focus_files(window, cx);
-                    if this.selection.is_empty() {
-                        this.selection.select_only(0);
-                        this.scroll_to(0);
-                        this.selection_changed(cx);
-                    }
+                if event.keystroke.key == "down" && this.move_into_results(window, cx) {
                     cx.stop_propagation();
-                    cx.notify();
                 }
             }))
             .child(
