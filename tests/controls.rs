@@ -2070,6 +2070,25 @@ fn an_empty_folder_says_so_and_offers_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn sent_results_with_no_item_left_arent_called_an_empty_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("empty-results");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let sent = vec![fx.path("notes.txt")];
+    ui.update(|f, window, cx| f.show_results("Sent".into(), sent, window, cx));
+    assert_eq!(ui.names(), ["notes.txt"]);
+
+    // In the Trash, the one item is no longer where the list has it.
+    ui.select("notes.txt");
+    ui.press(&cmd("backspace"));
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Items"));
+    assert_eq!(
+        message_detail(&mut ui),
+        "The items listed here can no longer be found."
+    );
+}
+
+#[gpui_kit::test]
 fn a_folder_whose_index_is_still_being_built_doesnt_say_no_results(cx: &mut TestAppContext) {
     let fx = Fixture::new("search-outside");
     // A folder outside the search locations gets an index of its own the
@@ -2544,6 +2563,107 @@ fn context_menus_on_items_and_empty_space(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn an_empty_folder_has_the_empty_space_menu(cx: &mut TestAppContext) {
+    let fx = Fixture::new("context-menu-empty");
+    std::fs::create_dir(fx.path("Empty")).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.select("notes.txt");
+    ui.press(&cmd("c"));
+    ui.go_to(&fx.path("Empty"));
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Items"));
+
+    // All of an empty folder is empty space: where it is blank, and on the
+    // message too.
+    ui.right_click_at("content", at(120., 120.));
+    assert!(ui.menu_open(), "the background menu opens");
+    let labels = ui.menu_labels();
+    for item in ["New Folder", "Paste Item", "Show Hidden Files"] {
+        assert!(labels.contains(&item.to_string()), "{item} in {labels:?}");
+    }
+    ui.press("escape");
+    assert!(!ui.menu_open());
+
+    ui.right_click("message-title");
+    ui.click_menu_item("New Folder");
+    assert!(fx.path("Empty/untitled folder").is_dir());
+    ui.press("escape");
+    assert_eq!(ui.names(), ["untitled folder"]);
+}
+
+#[gpui_kit::test]
+fn the_empty_space_menu_opens_where_an_items_menu_did_before(cx: &mut TestAppContext) {
+    let fx = Fixture::new("context-menu-same-spot");
+    std::fs::create_dir(fx.path("Empty")).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    let item_menu = |ui: &mut Ui| ui.menu_labels().contains(&"Copy Path".to_string());
+
+    // The list's last row goes to the Trash by its key, with the pointer
+    // still where the row's menu was opened. That point is empty space now.
+    let spot = ui
+        .snapshot(item_id("row", &fx.path("Roadmap.md")))
+        .bounds()
+        .center();
+    ui.right_click_point(spot);
+    assert!(item_menu(&mut ui));
+    ui.press("escape");
+    ui.press(&cmd("backspace"));
+    assert!(!ui.names().contains(&"Roadmap.md".to_string()));
+    ui.right_click_point(spot);
+    assert!(ui.menu_open(), "this press is on no item");
+    assert!(!item_menu(&mut ui));
+    ui.press("escape");
+    assert!(ui.files_focused());
+
+    // A folder opened by its key leaves the pointer where its row was, over
+    // the message of the empty folder.
+    let spot = ui
+        .snapshot(item_id("row", &fx.path("Empty")))
+        .bounds()
+        .center();
+    ui.right_click_point(spot);
+    assert!(item_menu(&mut ui));
+    ui.press("escape");
+    ui.press("enter");
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Items"));
+    ui.right_click_point(spot);
+    ui.click_menu_item("New Folder");
+    assert!(fx.path("Empty/untitled folder").is_dir());
+
+    // The new folder is named where it shows, and the keys are the files'
+    // again after it.
+    ui.type_text("Reports");
+    ui.press("enter");
+    assert!(fx.path("Empty/Reports").is_dir());
+    assert_eq!(ui.selected(), ["Reports"]);
+    assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn no_results_has_the_empty_space_menu_except_on_its_buttons(cx: &mut TestAppContext) {
+    let fx = Fixture::new("context-menu-no-results");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Projects"));
+    ui.click("search-scope");
+    ui.click("search");
+    ui.type_text("budget");
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Results"));
+
+    // The menu takes the keyboard while it is open, and gives it back to
+    // the search field.
+    ui.right_click("message-detail");
+    assert!(ui.menu_open());
+    ui.press("escape");
+    assert!(!ui.menu_open());
+    ui.type_text("s");
+    assert_eq!(ui.read(|f| f.query().to_string()), "budgets");
+
+    // A button is no empty space.
+    ui.right_click("empty-widen-scope");
+    assert!(!ui.menu_open());
+}
+
+#[gpui_kit::test]
 fn the_item_menu_shows_a_result_in_its_enclosing_folder(cx: &mut TestAppContext) {
     let fx = Fixture::new("item-menu-enclosing");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -2602,6 +2722,27 @@ fn the_keys_work_on_when_an_items_menu_loses_its_item(cx: &mut TestAppContext) {
     );
     ui.press("down");
     assert_eq!(ui.selected(), ["Projects"], "and so do the arrow keys");
+}
+
+#[gpui_kit::test]
+fn the_keys_work_on_when_the_messages_menu_loses_its_message(cx: &mut TestAppContext) {
+    let fx = Fixture::new("context-menu-message-gone");
+    std::fs::create_dir(fx.path("Empty")).unwrap();
+    std::fs::write(fx.path("Empty/.draft"), "").unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.go_to(&fx.path("Empty"));
+    ui.right_click("message-title");
+    assert!(ui.menu_open());
+
+    // An item that shows up while the menu is open takes the message away,
+    // and with it the menu, which had the keyboard.
+    ui.update(|f, _, cx| f.set_show_hidden(true, cx));
+    assert_eq!(ui.names(), [".draft"]);
+    assert!(!ui.menu_open());
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(ui.selected(), [".draft"]);
 }
 
 #[gpui_kit::test]
@@ -4652,6 +4793,117 @@ fn nushell_colors_and_editor(cx: &mut TestAppContext) {
     ui.click("use-nu-env");
     assert!(!ui.read(|f| f.config().use_nu_environment));
     assert_eq!(color(&ui, "Projects"), None);
+}
+
+#[gpui_kit::test]
+fn collapsing_every_group_keeps_its_headers(cx: &mut TestAppContext) {
+    let fx = Fixture::new("groups-all");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let header = |label: &str| gpui_kit::SharedString::from(format!("group-{label}"));
+
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::Kind), cx));
+    let labels = ui.read(|f| f.group_headers());
+    assert_eq!(labels.len(), 4);
+    for label in &labels {
+        ui.click(header(label));
+    }
+    // Nothing is listed, and the folder is no emptier than it was: the
+    // headers stay, each to open its group again.
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(!ui.exists("message-title"), "the folder has items");
+    for label in &labels {
+        assert!(ui.exists(header(label)), "{label}");
+    }
+
+    // A box dragged over the headers has no item to select, and the keys
+    // have none to go to.
+    let area = ui.snapshot("content").bounds();
+    let under_the_headers = area.origin + at(40., f32::from(area.size.height) - 30.);
+    let first_header = ui.snapshot(header(&labels[0])).bounds().center();
+    ui.drag_points(under_the_headers, first_header, Default::default());
+    assert!(ui.files_focused());
+    assert!(ui.selected().is_empty());
+    for key in ["down", "up", "end", "shift-pagedown", &cmd("a")] {
+        ui.press(key);
+        assert!(ui.selected().is_empty(), "after {key}");
+    }
+    ui.type_text("p");
+    assert!(ui.selected().is_empty(), "no name to jump to");
+
+    // The icon view keeps the headers too. Its keys find no item either,
+    // and a header opens its group as before.
+    ui.click("view-icons");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(!ui.exists("message-title"));
+    ui.drag_points(under_the_headers, first_header, Default::default());
+    assert!(ui.files_focused());
+    for key in ["down", "right", "end"] {
+        ui.press(key);
+        assert!(ui.selected().is_empty(), "after {key}");
+    }
+    ui.click(header("Folder"));
+    assert_eq!(ui.names(), ["Projects"]);
+}
+
+#[gpui_kit::test]
+fn a_place_whose_groups_are_all_collapsed_isnt_empty(cx: &mut TestAppContext) {
+    let fx = Fixture::new("groups-elsewhere");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let header = |label: &str| gpui_kit::SharedString::from(format!("group-{label}"));
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::Kind), cx));
+
+    // A tab remembers its collapsed groups from folder to folder, and
+    // Projects holds nothing but a folder.
+    ui.click(header("Folder"));
+    ui.go_to(&fx.path("Projects"));
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(!ui.exists("message-title"), "Projects has a folder in it");
+    ui.click(header("Folder"));
+    assert_eq!(ui.names(), ["atlas"]);
+
+    // Nor is a search without results when every group of them is collapsed.
+    ui.click("search");
+    ui.type_text("atlas");
+    assert_eq!(ui.names(), ["atlas", "Project Atlas.txt"]);
+    for label in ["Folder", "Plain Text"] {
+        ui.click(header(label));
+    }
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(!ui.exists("message-title"), "the search found two items");
+    ui.click(header("Plain Text"));
+    assert_eq!(ui.names(), ["Project Atlas.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_gallery_shows_placeholders_while_it_is_read_after_collapsed_groups(cx: &mut TestAppContext) {
+    let fx = Fixture::new("groups-then-gallery");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // Projects opens as a gallery from here on, and the folder it is in as
+    // a list.
+    ui.go_to(&fx.path("Projects"));
+    ui.click("view-gallery");
+    ui.go_to(&fx.dir);
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::Kind), cx));
+    for label in ui.read(|f| f.group_headers()) {
+        ui.click(gpui_kit::SharedString::from(format!("group-{label}")));
+    }
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+
+    // A gallery has no groups, so the headers the list is left with are
+    // nothing for it to show until Projects has been read.
+    let (view, projects) = (ui.view.clone(), fx.path("Projects"));
+    ui.window(|window, cx| {
+        view.update(cx, |f, cx| {
+            f.navigate(Location::Folder(projects), window, cx)
+        })
+    });
+    assert_eq!(ui.read(|f| f.effective_view()), ViewMode::Gallery);
+    assert!(ui.exists("skeleton"), "placeholders, not an empty gallery");
+    ui.settle();
+    assert_eq!(ui.names(), ["atlas"]);
 }
 
 #[gpui_kit::test]

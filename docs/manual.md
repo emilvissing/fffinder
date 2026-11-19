@@ -134,7 +134,7 @@ The file area shows a message when there is nothing to list:
 | No Results | The search found nothing. When it looked only in one folder, or only for one kind, the message says so, and **Search This Computer** or **Search Any Kind** under it searches again without that limit. For a contents search it adds that files over the size set in [Settings › Search engine](#search-engine) aren't looked inside. |
 | No Recent Files | Recents is empty. |
 | The Trash Is Empty | The Trash is empty. |
-| No Items | The folder is empty. |
+| No Items | The folder is empty, or none of the items in results sent from Nushell can be found any longer. |
 
 Open folders refresh on their own. Every two seconds fffinder checks each folder on screen: the one the window shows, folders opened in place in the list, and the column view's panes. It quietly reads again any that gained, lost, or renamed an item. The check happens off the window's thread, so a slow network volume can't freeze it. A file whose contents change in place keeps its old size and date until something in its folder changes or you refresh. Search results and Recents keep up through the index instead, which watches the search locations. When it sees a file added, removed, or renamed, a search by name that lists the file, or could list it, runs again a few seconds later, once files have stopped coming, and shows its results if the file made a difference to them. While files keep coming, it runs again every half minute or so. Nothing says that it's running, and what's selected stays selected. Files that come and go without changing the results make it run again less and less often, down to once in about four minutes, so a busy disk doesn't keep a search going. After a minute without such files, it keeps up closely again. Recents is read again the same way: a few seconds after the files it would show have stopped being added, removed, renamed, or written to, and every half minute or so while they haven't. A single file that is written to on and on, as a download is, isn't waited for: it goes first, and stays there however often it's written to, with the size and date it showed. Changes that keep leaving Recents as it was make it read less often too, until they have stopped for a while. A search by contents can take seconds, so it waits for Refresh (Cmd+R), and so does a new near miss with a typo.
 
@@ -326,7 +326,7 @@ The list and icon views can show items in groups, as Finder's Use Groups does. C
 
 Items keep the current sort within their group. In the list view, an open folder's items stay under it, in its group.
 
-Each group has a header with its name and how many items it holds. Click the header to collapse the group, and click it again to expand it. A collapsed group's items are hidden: the arrow keys, Shift+click ranges, and Select All skip them. Each tab remembers which groups are collapsed until you choose another key. In the icon view, each group starts a new row, and Up and Down move to the same column in the next group.
+Each group has a header with its name and how many items it holds. Click the header to collapse the group, and click it again to expand it. A collapsed group's items are hidden: the arrow keys, Shift+click ranges, and Select All skip them. Each tab remembers which groups are collapsed until you choose another key, so a group collapsed in one folder is collapsed in the next. When every group is collapsed, only the headers show. In the icon view, each group starts a new row, and Up and Down move to the same column in the next group.
 
 ## Searching
 
@@ -594,7 +594,7 @@ The Trash row at the end of the sidebar's Locations shows what is in the Trash, 
 
 - **Put Back** (Cmd+Backspace, the item menu, or File › Put Back) moves the selected items back where they came from. It stops with a notification when the folder is gone or another item has the name.
 - **Delete Immediately…** (Cmd+Alt+Backspace, or the item menu) deletes the selected items for good.
-- **Empty…** in the bar above the items, Empty Trash… in the empty-space menu or the fffinder menu, or Cmd+Shift+Backspace, asks, then deletes everything in the Trash for good.
+- **Empty…** in the bar above the items, Empty Trash… in the empty-space menu or the fffinder menu, or Cmd+Shift+Backspace, asks, then deletes everything in the Trash for good, including items that a filter or a collapsed group hides.
 
 On macOS, fffinder moves items to the Trash itself, as most Mac apps do, so macOS never asks to let it control Finder. It remembers where each one came from in `trash.json` in the data folder. fffinder can put back only items it trashed itself; for others, Put Back is unavailable. Finder's own Put Back doesn't work for items fffinder trashed, and still works for items Finder trashed. The Trash view lists your home folder's Trash, `~/.Trash`, which macOS shows only to apps with Full Disk Access. Without it, the view says so. On Linux and Windows, fffinder uses the system trash (the freedesktop.org Trash, or the Recycle Bin), which records where every item came from, so Put Back works for all of them.
 
@@ -856,6 +856,8 @@ Right-click empty space in a view:
 - Sort By: Relevance (only while searching), Name, Date Modified, Date Created, Size, Kind, Ascending, Descending
 - Show Hidden Files
 - Refresh
+
+Where the file area has a message in place of items, as in an empty folder or after a search that found nothing, all of it but the buttons under the message is empty space, and a right-click there opens this menu. A folder or a Trash that can't be read has no menu.
 
 In the Trash, the empty-space menu has Empty Trash….
 

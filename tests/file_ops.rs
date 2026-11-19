@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{Fixture, Ui, at, cmd, item_id};
+use common::{Fixture, Open, Ui, at, cmd, item_id};
 use fffinder::actions::*;
 use gpui_kit::Action as _;
 use gpui_kit::{Modifiers, TestAppContext};
@@ -703,6 +703,74 @@ fn trash_puts_back_and_empties(cx: &mut TestAppContext) {
         !common::trash_dir(&fx.dir).join("Roadmap.md").exists(),
         "emptied for good"
     );
+}
+
+#[gpui_kit::test]
+fn the_trash_empties_with_its_groups_collapsed(cx: &mut TestAppContext) {
+    let fx = Fixture::new("trash-collapsed");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let in_trash = common::trash_dir(&fx.dir).join("notes.txt");
+    ui.click("view-list");
+    ui.select("notes.txt");
+    ui.press(&cmd("backspace"));
+    ui.click("trash");
+    assert_eq!(ui.names(), ["notes.txt"]);
+
+    // A collapsed group's items are out of sight, and still in the Trash.
+    ui.update(|f, _, cx| f.set_group_by(Some(fffinder_core::GroupKey::Kind), cx));
+    ui.click(gpui_kit::SharedString::from("group-Plain Text"));
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    ui.right_click_at("content", at(120., 120.));
+    ui.click_menu_item("Empty Trash…");
+    assert!(ui.dialog_open(), "the menu's item asks");
+    ui.click("cancel");
+    assert!(in_trash.exists());
+
+    ui.click("empty-trash");
+    assert!(ui.dialog_open(), "the bar's button asks");
+    ui.click("ok");
+    assert!(!in_trash.exists(), "emptied for good");
+
+    // With nothing in the Trash there is nothing to empty.
+    assert_eq!(ui.snapshot("empty-trash").disabled(), Some(true));
+    ui.click("empty-trash");
+    assert!(!ui.dialog_open());
+}
+
+#[gpui_kit::test]
+fn the_trash_empties_with_a_filter_that_hides_its_items(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("trash-filtered");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    let in_trash = common::trash_dir(&fx.dir).join("notes.txt");
+    ui.select("notes.txt");
+    ui.press(&cmd("backspace"));
+    ui.click("trash");
+    assert_eq!(ui.names(), ["notes.txt"]);
+
+    // The filter hides the one item, which Empty erases all the same.
+    ui.update(|f, _, cx| f.set_filter("size > 1gb".into(), cx));
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    ui.right_click_at("content", at(120., 120.));
+    ui.click_menu_item("Empty Trash…");
+    assert!(ui.dialog_open(), "the menu's item asks");
+    ui.click("cancel");
+    assert!(in_trash.exists());
+
+    ui.click("empty-trash");
+    assert!(ui.dialog_open(), "the bar's button asks");
+    ui.click("ok");
+    assert!(!in_trash.exists(), "emptied for good");
 }
 
 #[gpui_kit::test]

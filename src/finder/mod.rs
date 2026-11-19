@@ -46,6 +46,7 @@ use fffinder_core::{
 };
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::scroll::ScrollbarHandle as _;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::{
@@ -4301,7 +4302,7 @@ impl Finder {
                     )
                 })
                 .into_any_element()
-        } else if self.rows.is_empty()
+        } else if self.shows_nothing()
             && !self.loading
             && !self.awaits_first_results()
             // A filter that is still running may keep some of the items it
@@ -4325,10 +4326,7 @@ impl Finder {
                 // With rows a filter hides, the search did find something.
                 stopped: stats.is_some_and(|s| s.stopped) && self.results.is_empty(),
                 capped: stats.is_some_and(|s| s.truncated),
-                // The items of a collapsed group passed the filter.
-                filtered: !self.filter.is_empty()
-                    && self.filter_error.is_none()
-                    && self.groups.is_empty(),
+                filtered: !self.filter.is_empty() && self.filter_error.is_none(),
                 unfiltered: self.unfiltered_len,
             });
             let buttons: Vec<_> = message
@@ -4347,13 +4345,22 @@ impl Finder {
                             .max_w_full()
                             .gap(ui(8.))
                             .mt(ui(10.))
+                            // The buttons aren't empty space: a right-click
+                            // on one opens no menu.
+                            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                             .children(buttons),
                     )
+                })
+                // With nothing listed, the rest of the file area is empty
+                // space.
+                .context_menu({
+                    let view = cx.entity();
+                    move |menu, window, cx| menus::background_menu(&view, menu, window, cx)
                 })
                 .into_any_element()
         } else if view == ViewMode::Columns {
             self.render_columns(window, cx).into_any_element()
-        } else if self.rows.is_empty() {
+        } else if self.shows_nothing() {
             self.render_skeleton(view, cx).into_any_element()
         } else {
             match view {
@@ -4380,6 +4387,16 @@ impl Finder {
             .min_h_0()
             .w_full()
             .relative()
+            // An item marks the right press that opens its menu, and the
+            // empty-space menu stays closed for a press with that mark. A
+            // mark left by an earlier press says nothing of this one, which
+            // may be on empty space at the same point: the item was opened
+            // or removed since, or the list has moved under the pointer.
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, _| {
+                if event.button == MouseButton::Right {
+                    this.item_menu_at = None;
+                }
+            }))
             // A double-click on a button under the message presses it once.
             // The second press is no click on the item that is now where
             // the button was, which it would open, or on the next button.
@@ -4666,7 +4683,12 @@ fn empty_message(input: &EmptyInput) -> EmptyMessage {
                 "The Trash Is Empty",
                 "Items you move to the Trash appear here.",
             ),
-            _ => plain("No Items", "This folder is empty."),
+            // What was sent to the window is no folder. It lists each item
+            // for as long as the item is where it was.
+            Location::Results { .. } => {
+                plain("No Items", "The items listed here can no longer be found.")
+            }
+            Location::Folder(_) => plain("No Items", "This folder is empty."),
         };
     }
     // What an index held while it was still being built is no "No Results":
@@ -5058,8 +5080,17 @@ mod tests {
     #[test]
     fn an_empty_place_says_which_it_is_and_offers_nothing() {
         let folder = Location::Folder(PathBuf::from("/r"));
+        let sent = Location::Results {
+            title: "Sent".into(),
+            paths: Arc::new(vec![PathBuf::from("/r/gone.txt")]),
+        };
         for (location, title, detail) in [
             (&folder, "No Items", "This folder is empty."),
+            (
+                &sent,
+                "No Items",
+                "The items listed here can no longer be found.",
+            ),
             (
                 &Location::Recents,
                 "No Recent Files",

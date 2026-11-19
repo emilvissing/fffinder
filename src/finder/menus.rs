@@ -383,7 +383,7 @@ pub fn background_menu(
             .item(
                 PopupMenuItem::new("Empty Trash…")
                     .icon(Lucide::Trash)
-                    .disabled(finder.rows_for_test().is_empty())
+                    .disabled(finder.trash_is_empty())
                     .action(Box::new(EmptyTrash)),
             )
             .min_w(ui(220.));

@@ -148,6 +148,16 @@ impl Finder {
         self.groups.iter().map(|g| g.label.clone()).collect()
     }
 
+    /// Whether the view has nothing to draw: no items, and no group header
+    /// either. A collapsed group keeps its header, so a place whose groups
+    /// are all collapsed lists no item and still isn't empty.
+    pub(super) fn shows_nothing(&self) -> bool {
+        // Until a folder that opens in a view of its own has been read, the
+        // groups are still those of the view the window left, and a view
+        // without groups draws none of their headers.
+        self.rows.is_empty() && (self.groups.is_empty() || !self.grouping_active())
+    }
+
     /// Group the views by `key`, or stop grouping them.
     pub fn set_group_by(&mut self, key: Option<GroupKey>, cx: &mut Context<Self>) {
         let had_last_opened = self.wants_last_opened();

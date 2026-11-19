@@ -48,6 +48,13 @@ impl Finder {
         !self.is_searching() && matches!(self.location(), Location::Trash)
     }
 
+    /// In the Trash, whether there is nothing for Empty to erase. Empty
+    /// erases what a filter or a collapsed group keeps out of sight too, so
+    /// those items count.
+    pub(super) fn trash_is_empty(&self) -> bool {
+        self.unfiltered_len == 0
+    }
+
     /// Move items to the Trash now; Undo puts them back. An item inside
     /// another one being trashed goes with it.
     pub fn trash_now(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
@@ -392,7 +399,7 @@ impl Finder {
                 Button::new("empty-trash")
                     .small()
                     .label("Empty…")
-                    .disabled(self.rows.is_empty())
+                    .disabled(self.trash_is_empty())
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.empty_trash(&EmptyTrash, window, cx)
                     })),
