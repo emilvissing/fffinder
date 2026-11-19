@@ -134,7 +134,7 @@ Cmd on macOS, Ctrl elsewhere. The manual lists [every shortcut](docs/manual.md#k
 
 ### Settings
 
-In Settings you choose the search locations (or the entire disk), fff-search's options, the appearance, text sizes, and the terminal for Open Nushell Here. Everything saves to `settings.json` in `~/Library/Application Support/fffinder` on macOS, `~/.config/fffinder` on Linux, or `%APPDATA%\fffinder` on Windows. The manual covers [each setting](docs/manual.md#settings) and [every field](docs/manual.md#settingsjson).
+In Settings you choose the search locations (or the entire disk), fff-search's options, the appearance, text sizes, the `nu` to use, and the terminal for Open Nushell Here. Everything saves to `settings.json` in `~/Library/Application Support/fffinder` on macOS, `~/.config/fffinder` on Linux, or `%APPDATA%\fffinder` on Windows. The manual covers [each setting](docs/manual.md#settings) and [every field](docs/manual.md#settingsjson).
 
 ## How it's built
 

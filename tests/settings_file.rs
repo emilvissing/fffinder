@@ -6,7 +6,7 @@
 mod common;
 
 use common::{Fixture, Open, Ui, cmd};
-use fffinder::finder::PickerOptions;
+use fffinder::finder::{AppState, PickerOptions};
 use fffinder::model::Location;
 use fffinder::settings;
 use fffinder_core::Config;
@@ -94,6 +94,38 @@ fn a_new_tab_picks_up_a_hand_edit(cx: &mut TestAppContext) {
         19.,
         "and in the tabs already open"
     );
+}
+
+#[gpui_kit::test]
+fn a_new_tab_picks_up_a_hand_edited_nu_path(cx: &mut TestAppContext) {
+    let _turn = take_turn();
+    let fx = Fixture::new("hand-edit-nu");
+    // An empty file can't be run, and what goes wrong names it.
+    let fake = fx.path("fake-nu");
+    std::fs::write(&fake, "").unwrap();
+    let mut ui = open_writing(cx, &fx.dir);
+
+    let edited = Config {
+        nu_path: Some(fake.clone()),
+        ..settings_file()
+    };
+    edited.save_to(&config_path()).unwrap();
+    ui.press(&cmd("t"));
+
+    let in_use = ui.window(|_, cx| cx.global::<AppState>().nu.clone());
+    assert_eq!(in_use, Some(fake));
+    let error = ui.read(|f| f.user_actions_error().map(str::to_string));
+    assert!(
+        error.as_deref().is_some_and(|e| e.contains("fake-nu")),
+        "the tabs already open read their actions again with it: {error:?}"
+    );
+
+    // The file is the next test's too.
+    let restored = Config {
+        nu_path: None,
+        ..settings_file()
+    };
+    restored.save_to(&config_path()).unwrap();
 }
 
 #[gpui_kit::test]

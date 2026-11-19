@@ -75,6 +75,16 @@ pub struct AppState {
 
 impl Global for AppState {}
 
+/// Look for `nu` again, at `configured` first, and use what's found. Every
+/// browser observes [`AppState`] for it, so it's only written when another
+/// `nu` was found than the one in use.
+fn look_for_nu(configured: Option<&Path>, cx: &mut App) {
+    let nu = nushell::find_nu(configured);
+    if cx.global::<AppState>().nu != nu {
+        cx.global_mut::<AppState>().nu = nu;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchScope {
     Computer,
@@ -696,8 +706,15 @@ impl Finder {
     ) -> Self {
         let engine = cx.global::<AppState>().engine.clone();
         let settings = crate::settings::entity(cx);
+        let nu_path = settings.read(cx).config().nu_path.clone();
         settings.update(cx, |settings, cx| settings.reread_file(cx));
         let config = settings.read(cx).config().clone();
+        // A `nu_path` edited into the file by hand counts from here on, like
+        // the rest of the file. `nu` is looked for again only then, because
+        // tests and tools choose the one to use themselves.
+        if config.nu_path != nu_path {
+            look_for_nu(config.nu_path.as_deref(), cx);
+        }
         crate::theme::set_ui_scale(config.ui_scale(), cx);
         let search_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -751,6 +768,9 @@ impl Finder {
             }),
             // Every browser dims what's cut, wherever the cut was made or ended.
             cx.observe_global::<crate::system::FileClipboard>(|_, cx| cx.notify()),
+            // And every browser goes on with another `nu`, wherever it was
+            // chosen.
+            cx.observe_global::<AppState>(|this, cx| this.nu_changed(cx)),
         ];
         let favorites = config
             .favorites
@@ -3534,6 +3554,47 @@ impl Finder {
     /// The terminal setting for this system.
     pub fn terminal_setting(&self) -> TerminalSetting {
         self.config.terminal_setting()
+    }
+
+    /// Choose the `nu` to use by its path, or with `None` have it looked
+    /// for. Every browser uses what's found at once.
+    pub fn set_nu_path(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.config.nu_path = path;
+        self.settings_changed(cx);
+        look_for_nu(self.config.nu_path.as_deref(), cx);
+        // Settings says which `nu` is in use, in every window it's open in.
+        cx.refresh_windows();
+    }
+
+    /// Another `nu` is in use, or none is any more: read again what was read
+    /// with the old one, and take away what can't be.
+    fn nu_changed(&mut self, cx: &mut Context<Self>) {
+        self.user_actions.clear();
+        self.user_actions_error = None;
+        self.user_actions_stamp = None;
+        self.user_actions_task = Task::ready(());
+        self.load_user_actions(cx);
+        if self.config.use_nu_environment {
+            self.nu_env = None;
+            self.ls_colors = None;
+            self.nu_env_loading = false;
+            self.nu_env_task = Task::ready(());
+            self.load_nu_env(cx);
+        }
+        // Scripts and structured files are previewed and explored with `nu`.
+        // A preview still being read with the old one would be kept as that
+        // one made it, so it's dropped too.
+        self.previews.clear();
+        self.preview_tasks.clear();
+        self.explore = None;
+        self.selection_changed(cx);
+        // A filter runs again, as if it had just been typed.
+        self.filter_keep = None;
+        self.filter_source = None;
+        self.filter_error = None;
+        self.filtering = false;
+        self.filter_task = Task::ready(());
+        self.rebuild_rows(cx);
     }
 
     pub(super) fn toggle_nu_panel(

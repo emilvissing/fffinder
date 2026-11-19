@@ -70,7 +70,8 @@ impl Finder {
             window.push_notification(
                 (
                     NotificationType::Warning,
-                    "Renaming several items uses Nushell, and nu was not found.",
+                    "Renaming several items uses Nushell, and nu was not found. Set its path \
+                     in Settings.",
                 ),
                 cx,
             );

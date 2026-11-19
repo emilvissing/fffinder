@@ -783,7 +783,7 @@ What's different from the window:
 - There's no menu bar. The item menu and the toolbar menus work as usual.
 - Pasting (Cmd+V in most terminals) types into the focused text field.
 - There's one window. Ctrl+Q, or closing it, quits and puts the terminal back.
-- Files can't be dragged out to other apps, and Settings can't open a folder dialog. Add search locations to [settings.json](#settingsjson) instead.
+- Files can't be dragged out to other apps, and Settings can't open a file or folder dialog. Add search locations and the path of `nu` (`nu_path`) to [settings.json](#settingsjson) instead.
 - It keeps its own index, and doesn't hand off to a running fffinder or answer the [control socket](#the-control-socket).
 - `fffinder --term --pick` prints the chosen paths after the terminal is put back, so `fffinder --term --pick | from json` works.
 
@@ -1038,7 +1038,9 @@ Changing one of the first five switches rebuilds every index, so the file counts
 
 ### Nushell
 
-- The path of the `nu` in use, or a note that it wasn't found. fffinder looks at the `nu_path` setting, `PATH`, and the usual install folders (`~/.cargo/bin`, `~/.local/bin`, Homebrew, `/usr/local/bin`, `/usr/bin`, and on Windows `Programs\nu\bin`).
+- The path of the `nu` in use, or a note that it wasn't found. fffinder looks at the `nu_path` setting, `PATH`, and the usual install folders (`~/.cargo/bin`, `~/.local/bin`, Homebrew, `/usr/local/bin`, `/usr/bin`, and on Windows `Programs\nu\bin`). An app opened from the Dock or a desktop menu doesn't get the `PATH` your shell sets up, so a `nu` installed with nix, mise, or asdf may not be found. When the line is too long for its space, a tooltip shows all of it.
+- **Choose…** picks the `nu` to use with the file chooser and saves its path as `nu_path`. It is used at once, in every tab and window, with no restart: Nushell actions, filters, previews, Quick Look's explore mode, and Nushell's file colors and editor are read again with it. File choosers hide the folders nix, mise, and asdf install into, so run `which nu` in your shell and paste the path into the chooser (Cmd+Shift+G on macOS, Ctrl+L in a GTK chooser). The path is kept as chosen, so a link goes on working after an upgrade points it at a new `nu`. The file isn't checked to be `nu`: if it isn't, whatever uses Nushell fails with an error. If no file is at the chosen path, the line names it and the `nu` that is used instead.
+- **Find Automatically**, shown while a `nu` is chosen, forgets the choice and looks for `nu` again. **Look Again**, shown when none is chosen and none was found, looks again, for a `nu` installed since fffinder started.
 - **Open Nushell Here in**: the terminal menu. It lists Automatic (with the terminal it picks), each terminal found, **Custom Command**, and **Detect Again**, which looks for terminals again. The line below explains the choice and says it is saved for this operating system.
 - **Try It** opens Nushell in the current folder with the chosen terminal.
 - The custom command field, when Custom Command is chosen.
@@ -1109,7 +1111,7 @@ Every tab and window shows a change to a setting at once, with these exceptions,
 | `ui_scale` | `1.0` | Text size for the whole window, 0.8 to 2.0 in steps of 0.1. It also multiplies `preview_font_size` and `nu_font_size`. |
 | `search` | see below | fff-search's options from [Settings › Search engine](#search-engine). |
 | `terminal` | none | The old single terminal command. It moves into `terminals` when the file is read. |
-| `nu_path` | none | Path to `nu`. When unset, fffinder searches `PATH` and the usual install folders. |
+| `nu_path` | none | Path to `nu`, which **Choose…** in Settings sets. When unset, or when no file is there, fffinder searches `PATH` and the usual install folders. |
 | `last_folder` | none | The folder the next window opens at. |
 | `settings_version` | `1` | The one-time upgrades made to the file. A file without it gets them when read: version 1 removes `/Applications` from `search_roots` on macOS, since apps come from `search_apps` now. Adding it back afterwards keeps it. |
 

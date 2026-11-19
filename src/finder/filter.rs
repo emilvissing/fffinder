@@ -140,8 +140,10 @@ impl Finder {
 
     fn start_filter(&mut self, entries: Vec<FileEntry>, cx: &mut Context<Self>) {
         let Some(nu) = cx.global::<AppState>().nu.clone() else {
-            self.filter_error =
-                Some("Nushell (nu) was not found, so filters can't run.".to_string());
+            self.filter_error = Some(
+                "Nushell (nu) was not found, so filters can't run. Set its path in Settings."
+                    .to_string(),
+            );
             return;
         };
         let filter = self.filter.clone();

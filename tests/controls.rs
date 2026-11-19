@@ -6,7 +6,7 @@ mod common;
 
 use common::{Fixture, Open, Ui, at, cmd, item_id};
 use fffinder::actions::*;
-use fffinder::finder::{AppState, PickerOptions, SearchScope};
+use fffinder::finder::{AppState, PickerOptions, Preview, SearchScope, tildify};
 use fffinder::model::Location;
 use fffinder::system::SystemCall;
 use fffinder_core::terminals::{Launch, Terminal};
@@ -2524,6 +2524,169 @@ fn settings_terminal_choice(cx: &mut TestAppContext) {
     assert_eq!(last_launch(&ui).1[1], dir);
     let calls = ui.system_calls().len();
     assert_eq!(calls, 6, "one launch per request: {:?}", ui.system_calls());
+}
+
+#[gpui_kit::test]
+fn settings_nu_choice(cx: &mut TestAppContext) {
+    let fx = Fixture::new("nu-choice");
+    // Any file can be chosen. An empty one can't be run, and what goes wrong
+    // names it, which shows what was run.
+    let fake = fx.path("fake-nu");
+    std::fs::write(&fake, "").unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    let in_use = |ui: &mut Ui| ui.window(|_, cx| cx.global::<AppState>().nu.clone());
+    let chosen = |ui: &Ui| ui.read(|f| f.config().nu_path.clone());
+    let status = |ui: &mut Ui| ui.snapshot("nu-path").label().unwrap().to_string();
+    let choose = |ui: &mut Ui, file: Option<&PathBuf>| {
+        ui.click("choose-nu");
+        assert!(ui.cx.did_prompt_for_paths());
+        ui.cx.simulate_path_prompt_response(|options| {
+            assert!(options.files && !options.directories && !options.multiple);
+            file.map(|file| vec![file.clone()])
+        });
+        ui.settle();
+    };
+
+    // The window opened without a `nu`.
+    ui.press(&cmd(","));
+    assert!(status(&mut ui).contains("not found"), "{}", status(&mut ui));
+    assert_eq!(ui.snapshot("nu-auto").label(), Some("Look Again"));
+
+    // Choose… asks for a file, which is in use at once.
+    choose(&mut ui, Some(&fake));
+    assert_eq!(chosen(&ui), Some(fake.clone()));
+    assert_eq!(in_use(&mut ui), Some(fake.clone()));
+    assert_eq!(status(&mut ui), format!("Using {}", tildify(&fake)));
+    let error = ui.read(|f| f.user_actions_error().map(str::to_string));
+    assert!(
+        error.as_deref().is_some_and(|e| e.contains("fake-nu")),
+        "the actions are read again with it: {error:?}"
+    );
+
+    // Find Automatically goes back to looking for one.
+    assert_eq!(ui.snapshot("nu-auto").label(), Some("Find Automatically"));
+    ui.click("nu-auto");
+    let found = fffinder::nushell::find_nu(None);
+    assert_eq!(chosen(&ui), None);
+    assert_eq!(in_use(&mut ui), found);
+    assert_eq!(
+        ui.read(|f| f.user_actions_error().map(str::to_string)),
+        None
+    );
+    assert_eq!(
+        ui.exists("nu-auto"),
+        found.is_none(),
+        "with one found there's nothing to go back to"
+    );
+
+    // Leaving the chooser without a file changes nothing.
+    choose(&mut ui, None);
+    assert_eq!(chosen(&ui), None);
+    assert_eq!(in_use(&mut ui), found);
+
+    // A chosen file that isn't there is named, with what's used instead.
+    let gone = fx.path("gone");
+    choose(&mut ui, Some(&gone));
+    assert_eq!(chosen(&ui), Some(gone.clone()));
+    assert_eq!(in_use(&mut ui), found);
+    let gone = tildify(&gone);
+    let says = match &found {
+        Some(found) => format!("{gone} wasn’t found, so {} is used.", tildify(found)),
+        None => format!("{gone} wasn’t found, and no other nu was found."),
+    };
+    assert_eq!(status(&mut ui), says);
+    assert_eq!(ui.snapshot("nu-auto").label(), Some("Find Automatically"));
+}
+
+#[gpui_kit::test]
+fn what_waited_for_a_nu_runs_with_the_one_chosen_in_settings(cx: &mut TestAppContext) {
+    let fx = Fixture::new("nu-waited");
+    // An empty file can't be run, and what goes wrong names it.
+    let fake = fx.path("fake-nu");
+    std::fs::write(&fake, "").unwrap();
+    std::fs::write(fx.path("greet.nu"), "# Say hi\ndef greet [] { 'hi' }\n").unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+
+    // A script in the preview pane, a filter, and Nushell's colors, with no
+    // `nu` to run any of them.
+    ui.click("view-list");
+    ui.dispatch(TogglePreviewPane);
+    ui.select("greet.nu");
+    ui.update(|f, _, cx| {
+        f.set_filter("size > 0b".into(), cx);
+        f.set_use_nu_environment(true, cx);
+    });
+    let script = ui.read(|f| f.primary_entry()).expect("the script");
+    let filter = |ui: &Ui| ui.read(|f| f.filter_error().unwrap_or_default().to_string());
+    let colors = |ui: &Ui| ui.read(|f| f.nu_env_summary());
+    // Nushell's own coloring finds the comment, which no other does.
+    let colored_by_nu = |ui: &Ui| {
+        ui.read(|f| match f.preview_of(&script) {
+            Preview::Code { comments, .. } => !comments.is_empty(),
+            _ => false,
+        })
+    };
+    assert!(filter(&ui).contains("not found"), "{}", filter(&ui));
+    assert!(colors(&ui).contains("not found"), "{}", colors(&ui));
+    assert!(!colored_by_nu(&ui));
+
+    // Each runs with the file chosen in Settings.
+    ui.press(&cmd(","));
+    ui.click("choose-nu");
+    ui.cx
+        .simulate_path_prompt_response(|_| Some(vec![fake.clone()]));
+    ui.settle();
+    assert!(filter(&ui).contains("fake-nu"), "{}", filter(&ui));
+    assert!(colors(&ui).contains("fake-nu"), "{}", colors(&ui));
+    assert!(!colored_by_nu(&ui));
+
+    // And with a real one, where there is one. Its login files aren't a
+    // test's to run, so the colors go off first.
+    ui.click("use-nu-env");
+    ui.click("nu-auto");
+    if fffinder::nushell::find_nu(None).is_some() {
+        assert_eq!(filter(&ui), "");
+        let names = ui.names();
+        assert!(
+            !names.contains(&"fake-nu".to_string()),
+            "the filter left the empty file out: {names:?}"
+        );
+        assert!(colored_by_nu(&ui), "the script is previewed again");
+    }
+}
+
+#[gpui_kit::test]
+fn a_preview_still_being_read_is_read_again_with_the_nu_found(cx: &mut TestAppContext) {
+    if fffinder::nushell::find_nu(None).is_none() {
+        eprintln!("nu not installed; skipping");
+        return;
+    }
+    let fx = Fixture::new("nu-preview-waited");
+    std::fs::write(fx.path("greet.nu"), "# Say hi\ndef greet [] { 'hi' }\n").unwrap();
+    // The window opens without a `nu`, as if it were installed afterwards.
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.dispatch(TogglePreviewPane);
+    let names = ui.names();
+    let script = names.iter().position(|name| name == "greet.nu").unwrap();
+
+    // The script is selected, and its preview is still being read without a
+    // `nu` when Look Again in Settings finds one.
+    ui.update(|f, window, cx| {
+        f.click_row(script, Default::default(), 1, window, cx);
+        f.set_nu_path(None, cx);
+    });
+
+    let script = ui.read(|f| f.primary_entry()).expect("the script");
+    // Nushell's own coloring finds the comment, which no other does.
+    let colored_by_nu = ui.read(|f| match f.preview_of(&script) {
+        Preview::Code { comments, .. } => !comments.is_empty(),
+        _ => false,
+    });
+    assert!(
+        colored_by_nu,
+        "the preview is read again with the `nu` found"
+    );
 }
 
 #[gpui_kit::test]

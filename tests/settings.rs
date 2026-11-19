@@ -140,6 +140,56 @@ fn a_column_another_tab_adds_is_filled_in_for_this_tabs_results(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+fn the_nu_chosen_in_one_tab_is_the_one_every_tab_uses(cx: &mut TestAppContext) {
+    let fx = Fixture::new("shared-nu");
+    // An empty file can't be run, and what goes wrong names it.
+    let fake = fx.path("fake-nu");
+    std::fs::write(&fake, "").unwrap();
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.press(&cmd("t"));
+    let first = tabs(&ui)[0].clone();
+
+    // Chosen in the Settings of the second tab, the one that shows.
+    ui.press(&cmd(","));
+    ui.click("choose-nu");
+    ui.cx
+        .simulate_path_prompt_response(|_| Some(vec![fake.clone()]));
+    ui.settle();
+
+    let (chosen, error) = first.read_with(ui.cx, |f, _| {
+        (
+            f.config().nu_path.clone(),
+            f.user_actions_error().map(str::to_string),
+        )
+    });
+    assert_eq!(chosen, Some(fake));
+    assert!(
+        error.as_deref().is_some_and(|e| e.contains("fake-nu")),
+        "the first tab read its actions again with it: {error:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_nu_found_by_looking_again_is_the_one_every_tab_uses(cx: &mut TestAppContext) {
+    if fffinder::nushell::find_nu(None).is_none() {
+        eprintln!("nu not installed; skipping");
+        return;
+    }
+    let fx = Fixture::new("found-nu");
+    // The window opens without a `nu`, as if it were installed afterwards.
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.press(&cmd("t"));
+    let first = tabs(&ui)[0].clone();
+    assert!(first.read_with(ui.cx, |f, _| f.user_actions().is_empty()));
+
+    ui.press(&cmd(","));
+    ui.click("nu-auto");
+
+    let actions = first.read_with(ui.cx, |f, _| f.user_actions().len());
+    assert!(actions > 0, "the first tab has read its actions with it");
+}
+
+#[gpui_kit::test]
 fn each_tab_keeps_its_own_view(cx: &mut TestAppContext) {
     let fx = Fixture::new("own-view");
     let mut ui = with_tabs(cx, &fx.dir);

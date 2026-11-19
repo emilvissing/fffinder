@@ -2036,6 +2036,44 @@ fn quick_look_explores_structured_files(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn quick_look_explores_with_a_nu_chosen_while_it_is_open(cx: &mut TestAppContext) {
+    let fx = Fixture::new("explore-chosen");
+    // An empty file can't be run, which Quick Look then says.
+    let fake = fx.path("fake-nu");
+    std::fs::write(&fake, "").unwrap();
+    std::fs::write(fx.path("app.json"), r#"{"deps": {"serde": "1"}}"#).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    let crumb = |depth: usize| ("explore-crumb", depth);
+
+    // Without a `nu` there's no data to explore, only the file's text.
+    ui.select("app.json");
+    ui.press(&cmd("space"));
+    ui.in_quick_look(|ui| {
+        assert!(!ui.exists(crumb(0)));
+        assert!(!ui.exists("explore-failure"));
+    });
+
+    // One chosen in Settings is asked for the data at once.
+    ui.press(&cmd(","));
+    ui.click("choose-nu");
+    ui.cx
+        .simulate_path_prompt_response(|_| Some(vec![fake.clone()]));
+    ui.settle();
+    ui.in_quick_look(|ui| assert!(ui.exists("explore-failure")));
+
+    // And so is a real one, where there is one, in place of the one that
+    // couldn't open the file.
+    ui.click("nu-auto");
+    if fffinder::nushell::find_nu(None).is_some() {
+        ui.in_quick_look(|ui| {
+            assert!(!ui.exists("explore-failure"));
+            ui.press("enter");
+            assert!(ui.exists(crumb(1)), "Return goes into deps");
+        });
+    }
+}
+
+#[gpui_kit::test]
 fn pdfs_scroll_and_zoom(cx: &mut TestAppContext) {
     use gpui_kit::{
         InputEvent as _, Modifiers, PinchEvent, ScrollDelta, ScrollEvent, ScrollSource, TouchPhase,

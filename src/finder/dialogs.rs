@@ -349,7 +349,6 @@ impl Finder {
             let hidden = finder.config.show_hidden;
             let remember_views = finder.config.remember_folder_views;
             let sidebar_mode = finder.config.sidebar_mode;
-            let nu = cx.global::<AppState>().nu.clone();
 
             let mut root_list = v_flex()
                 .border_1()
@@ -533,12 +532,7 @@ impl Finder {
                             muted,
                         ))
                         .child(section("NUSHELL", cx))
-                        .child(
-                            div().text_size(ui(12.)).child(match &nu {
-                                Some(path) => format!("Using {}", path.display()),
-                                None => "nu was not found on PATH or in the usual install locations.".to_string(),
-                            }),
-                        )
+                        .child(nu_controls(finder, &view, window, cx))
                         .child(terminal_controls(finder, &view, &terminal, window, cx))
                         .child(
                             v_flex()
@@ -634,6 +628,43 @@ impl Finder {
                 })
                 .ok();
             }
+        })
+        .detach();
+    }
+
+    /// Settings › Nushell › Choose…: ask for the `nu` to use.
+    fn prompt_choose_nu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| match picked.await {
+            // The path is kept as it was chosen. Where it's a link, as with
+            // nix and mise, the link is what still leads to `nu` after an
+            // upgrade.
+            Ok(Ok(Some(mut paths))) => {
+                if let Some(path) = paths.pop() {
+                    this.update(cx, |this, cx| this.set_nu_path(Some(path), cx))
+                        .ok();
+                }
+            }
+            // A terminal has no file chooser, and neither has Linux without
+            // a desktop portal.
+            Ok(Err(err)) => {
+                cx.update(|window, cx| {
+                    window.push_notification(
+                        (
+                            gpui_kit::component::notification::NotificationType::Warning,
+                            format!("Couldn’t open the file chooser: {err}"),
+                        ),
+                        cx,
+                    )
+                })
+                .ok();
+            }
+            _ => {}
         })
         .detach();
     }
@@ -1121,6 +1152,72 @@ impl Finder {
         });
         self.set_query(query, true, cx);
     }
+}
+
+/// What Settings says about `nu`: the one in use, and a chosen one that
+/// isn't in use because no file is there.
+fn nu_status(chosen: Option<&Path>, in_use: Option<&Path>) -> String {
+    let shown = super::tildify;
+    match (chosen, in_use) {
+        (Some(chosen), Some(nu)) if chosen != nu => {
+            format!("{} wasn’t found, so {} is used.", shown(chosen), shown(nu))
+        }
+        (Some(chosen), None) => {
+            format!("{} wasn’t found, and no other nu was found.", shown(chosen))
+        }
+        (_, Some(nu)) => format!("Using {}", shown(nu)),
+        (None, None) => "nu was not found on PATH or in the usual install locations.".into(),
+    }
+}
+
+/// Settings › Nushell's first line: the `nu` in use, a button to choose
+/// another, and one to have it looked for, unless that's how the one in use
+/// was found.
+fn nu_controls(
+    finder: &Finder,
+    view: &Entity<Finder>,
+    window: &mut Window,
+    cx: &App,
+) -> impl IntoElement {
+    let chosen = finder.config.nu_path.as_deref();
+    let in_use = cx.global::<AppState>().nu.as_deref();
+    let status = SharedString::from(nu_status(chosen, in_use));
+    let text = div()
+        .id("nu-path")
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .text_size(ui(12.))
+        .aria_label(status.clone());
+    let text =
+        super::fit::with_cut_off_text(text, StyledText::new(status.clone()), status, |shown| shown);
+    // The buttons are the size of the line of text they share, so Settings,
+    // tall as it is, doesn't grow by them.
+    h_flex()
+        .gap(ui(8.))
+        .child(text.test_support())
+        .child(Button::new("choose-nu").xsmall().label("Choose…").on_click(
+            window.listener_for(view, |this: &mut Finder, _: &ClickEvent, window, cx| {
+                this.prompt_choose_nu(window, cx)
+            }),
+        ))
+        .when(chosen.is_some() || in_use.is_none(), |row| {
+            let label = match chosen {
+                Some(_) => "Find Automatically",
+                None => "Look Again",
+            };
+            row.child(
+                Button::new("nu-auto")
+                    .xsmall()
+                    .ghost()
+                    .label(label)
+                    .on_click(
+                        window.listener_for(view, |this: &mut Finder, _: &ClickEvent, _, cx| {
+                            this.set_nu_path(None, cx)
+                        }),
+                    ),
+            )
+        })
 }
 
 fn custom_terminal_hint() -> &'static str {
