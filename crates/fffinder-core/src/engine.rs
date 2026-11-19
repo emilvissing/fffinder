@@ -12,8 +12,8 @@ use fff_search::file_picker::FilePicker;
 use fff_search::{
     Casing, Constraint, DirSearchConfig, FFFMode, FilePickerOptions, FrecencyTracker, FuzzyQuery,
     FuzzySearchOptions, GitRecencyConfig, GrepConfig, GrepMode, GrepSearchOptions, MixedItemRef,
-    PaginationArgs, ParserConfig, QueryParser, QueryTracker, SharedFilePicker, SharedFrecency,
-    SharedQueryTracker, WatchEvent, WatchEventKind, WatchId, WatchOptions,
+    PaginationArgs, ParserConfig, QueryParser, QueryTracker, Score, SearchResult, SharedFilePicker,
+    SharedFrecency, SharedQueryTracker, WatchEvent, WatchEventKind, WatchId, WatchOptions,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -990,7 +990,7 @@ impl Engine {
         for hit in &mut raw {
             hit.score = rerank(hit, &words);
         }
-        raw.sort_by_key(|h| std::cmp::Reverse(h.score));
+        raw.sort_by(by_rank);
         let mut seen = HashSet::new();
         raw.retain(|h| seen.insert(h.path.clone()));
 
@@ -1080,6 +1080,9 @@ impl Engine {
         } else {
             (limit * 4).max(2_000)
         };
+        // The hits that score the same as the last one fetched are kept with
+        // it, so fff-search is asked for more, to show where they end.
+        let asked = fetch.saturating_add(TIES_AHEAD);
         let qt_guard = self.queries.read().ok();
         let qt = qt_guard.as_ref().and_then(|g| g.as_ref());
         let options = FuzzySearchOptions {
@@ -1087,7 +1090,7 @@ impl Engine {
             project_path: Some(&base),
             pagination: PaginationArgs {
                 offset: 0,
-                limit: fetch,
+                limit: asked,
             },
             ..Default::default()
         };
@@ -1117,7 +1120,8 @@ impl Engine {
             parsed.constraints.extend(scope_filter);
             let result = picker.fuzzy_search_directories(&parsed, options);
             part.total_matched = result.total_matched;
-            for (item, score) in result.items.iter().zip(&result.scores) {
+            let kept = through_ties(&result.scores, fetch, result.total_matched);
+            for (item, score) in result.items.iter().zip(&result.scores).take(kept) {
                 let rel = item.relative_path(picker);
                 if rel.is_empty() {
                     continue;
@@ -1136,9 +1140,30 @@ impl Engine {
             let mut parsed = QueryParser::new(config).parse(&query);
             part.loose = loose_text(&parsed.fuzzy_query, user);
             parsed.constraints.extend(scope_filter);
-            let result = picker.fuzzy_search_mixed(&parsed, qt, options);
-            part.total_matched = result.total_matched;
-            for (item, score) in result.items.iter().zip(&result.scores) {
+            let folders = picker.fuzzy_search_directories(&parsed, options);
+            // As in fff-search's own search of both, one that ends in a
+            // slash is for folders alone.
+            let files = if parsed.raw_query.ends_with(['/', std::path::MAIN_SEPARATOR]) {
+                SearchResult::default()
+            } else {
+                picker.fuzzy_search(&parsed, qt, options)
+            };
+            part.total_matched = files.total_matched + folders.total_matched;
+            let (items, scores) = best_of_both(
+                files
+                    .items
+                    .into_iter()
+                    .map(MixedItemRef::File)
+                    .zip(files.scores),
+                folders
+                    .items
+                    .into_iter()
+                    .map(MixedItemRef::Dir)
+                    .zip(folders.scores),
+                asked,
+            );
+            let kept = through_ties(&scores, fetch, part.total_matched);
+            for (item, score) in items.iter().zip(&scores).take(kept) {
                 let hit = match item {
                     MixedItemRef::File(f) => {
                         let path = join_rel(&base, &f.relative_path(picker));
@@ -1168,7 +1193,8 @@ impl Engine {
             parsed.constraints.extend(scope_filter);
             let result = picker.fuzzy_search(&parsed, qt, options);
             part.total_matched = result.total_matched;
-            for (item, score) in result.items.iter().zip(&result.scores) {
+            let kept = through_ties(&result.scores, fetch, result.total_matched);
+            for (item, score) in result.items.iter().zip(&result.scores).take(kept) {
                 let path = join_rel(&base, &item.relative_path(picker));
                 if in_scope(&path) && req.kind.accepts(&path) && name_ok(&display_name(&path)) {
                     part.hits.push(RawHit::file(
@@ -2040,7 +2066,16 @@ fn cut_in_order(
     if set_aside && !truncated {
         return None;
     }
-    hits.sort_by_key(|hit| std::cmp::Reverse(hit.score));
+    // In the order of `by_rank`, like the hits of a search without a sort.
+    // A folder's entry has the date that was read from the disk for it,
+    // which the index doesn't hold and the ranking doesn't go by.
+    let changed = |hit: &SearchHit| hit.entry.modified.filter(|_| !hit.entry.is_dir);
+    hits.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| changed(b).cmp(&changed(a)))
+            .then_with(|| by_path(&a.entry.path, &b.entry.path))
+    });
     Some((hits, truncated))
 }
 
@@ -2423,9 +2458,147 @@ fn rerank(hit: &RawHit, words: &[String]) -> i32 {
     }
     if in_name == words.len() {
         bonus += 40;
+        // One word that is the whole name has an exact match's bonus above.
+        // Several words that are the whole name between them match it as
+        // exactly.
+        if words.len() > 1 && (spells(stem, words) || spells(&name, words)) {
+            bonus += WHOLE_NAME;
+        }
     }
     let depth = hit.path.components().count() as i32;
     hit.score + bonus - depth * DEPTH_PENALTY
+}
+
+/// What [`rerank`] adds to a name that a search's words spell out between
+/// them: what a name that is one word has over a name that starts with it.
+const WHOLE_NAME: i32 = 50;
+
+/// Whether `words` are all there is to `name` apart from what separates
+/// them: each is in it, and together they have as many letters and digits as
+/// it has. `tax` and `return` spell `tax return` and `tax_return`, and not
+/// `tax return 2024`.
+///
+/// # Arguments
+///
+/// * `name` - A name, or a name without its extension, in lowercase
+/// * `words` - The search's fuzzy words, in lowercase
+fn spells(name: &str, words: &[String]) -> bool {
+    let letters = |text: &str| text.chars().filter(|c| c.is_alphanumeric()).count();
+    words.iter().all(|word| name.contains(word.as_str()))
+        && letters(name) == words.iter().map(|word| letters(word)).sum::<usize>()
+}
+
+/// The order a search lists its hits in: the best score first. Hits with the
+/// same score match as well as each other, so the file that changed last
+/// comes first among them, as Finder lists them, and the path settles what
+/// is left ([`by_path`]), so that they come in the same order each time a
+/// search is made. The index holds no date for a folder or an app, which
+/// follow the files they tie with.
+fn by_rank(a: &RawHit, b: &RawHit) -> std::cmp::Ordering {
+    b.score
+        .cmp(&a.score)
+        .then(b.modified.cmp(&a.modified))
+        .then_with(|| by_path(&a.path, &b.path))
+}
+
+/// The order of two hits that nothing but their paths tells apart. The paths
+/// are compared as text, and not folder by folder as [`Path`] compares them.
+/// Thousands of a search's hits can have one score and one date, as the
+/// files of a folder that was unpacked or cloned do, and the sort comes here
+/// for every two of them it compares. As text that takes a fraction of the
+/// time, and the order only has to be the same each time.
+fn by_path(a: &Path, b: &Path) -> std::cmp::Ordering {
+    a.as_os_str().cmp(b.as_os_str())
+}
+
+/// How many hits past the ones a search keeps of a root fff-search is asked
+/// for, so that [`through_ties`] can see where a group of equal scores ends.
+/// The hits of such a group that are kept are ranked like any others, so
+/// this is also the most that a search takes on for one.
+const TIES_AHEAD: usize = 2_000;
+
+/// How many of the hits fff-search returned for a root a search keeps:
+/// `fetch` of them, and the ones after those that score the same as the last
+/// one. fff-search returns its best in order of their scores, and which hits
+/// of one score are among them changes from one search to the next. Cut
+/// among them, a list would hold some of the group by chance, and a search
+/// made again would list other items. Kept whole, the group is ranked by
+/// [`rerank`] and [`by_rank`] like any other hits.
+///
+/// A group that goes on past what fff-search returned can't be had whole,
+/// and is cut at `fetch`. Its files are then the ones that changed last,
+/// which fff-search returns first of the files with one score.
+///
+/// # Arguments
+///
+/// * `scores` - The scores of the hits fff-search returned, best first
+/// * `fetch` - How many the search keeps of them when none tie
+/// * `matched` - How many matched in all
+fn through_ties(scores: &[Score], fetch: usize, matched: usize) -> usize {
+    let Some(last) = fetch.checked_sub(1).and_then(|ix| scores.get(ix)) else {
+        return scores.len();
+    };
+    let tied = scores[fetch..]
+        .iter()
+        .take_while(|score| score.total == last.total)
+        .count();
+    let end = fetch + tied;
+    if end == scores.len() && matched > end {
+        fetch
+    } else {
+        end
+    }
+}
+
+/// The files and the folders fff-search found for a search of both, as one
+/// list, best first.
+///
+/// fff-search has a search of both. It sorts the two lists into one by
+/// their scores alone, with a sort that leaves hits of one score in any
+/// order, and cuts the result. The files come newest first where their
+/// scores are equal, and the sort undoes that: of more equal matches than
+/// the cut leaves room for, the ones that changed last can be the ones
+/// dropped. Here the two lists keep their order. A file and a folder with
+/// one score are taken in turn, so that when [`through_ties`] has to cut a
+/// group, many of one kind don't keep the other out.
+///
+/// # Arguments
+///
+/// * `files` - The files found and their scores, best first
+/// * `folders` - The folders found and theirs, best first
+/// * `most` - The most to return, which is how many of each were asked for:
+///   past that, the next best item can be one fff-search didn't return
+///
+/// # Returns
+///
+/// The items, and the score of each
+fn best_of_both<T>(
+    files: impl IntoIterator<Item = (T, Score)>,
+    folders: impl IntoIterator<Item = (T, Score)>,
+    most: usize,
+) -> (Vec<T>, Vec<Score>) {
+    let mut files = files.into_iter().peekable();
+    let mut folders = folders.into_iter().peekable();
+    let mut items = Vec::new();
+    let mut scores = Vec::new();
+    // Whether the one taken last was a folder.
+    let mut folder = false;
+    while items.len() < most {
+        folder = match (files.peek(), folders.peek()) {
+            (Some((_, file)), Some((_, other))) if file.total == other.total => !folder,
+            (Some((_, file)), Some((_, other))) => other.total > file.total,
+            (None, Some(_)) => true,
+            (Some(_), None) => false,
+            (None, None) => break,
+        };
+        let next = if folder { folders.next() } else { files.next() };
+        let Some((item, score)) = next else {
+            break;
+        };
+        items.push(item);
+        scores.push(score);
+    }
+    (items, scores)
 }
 
 /// Add what the same search found when it was made another way. An item
@@ -3005,6 +3178,132 @@ mod tests {
         let deep = RawHit::file("/a/b/c/d/e/projected.h".into(), 1, 1, None, 78);
         let good = RawHit::file("/a/Project Atlas.txt".into(), 1, 1, None, 70);
         assert!(rerank(&good, &words) > rerank(&deep, &words));
+    }
+
+    #[test]
+    fn words_that_spell_a_whole_name_rank_it_as_an_exact_match() {
+        let score = |path: &str, words: &[&str]| {
+            let words: Vec<String> = words.iter().map(|word| word.to_string()).collect();
+            rerank(&RawHit::file(path.into(), 1, 1, None, 70), &words)
+        };
+        let words = ["tax", "return"];
+        let whole = score("/a/Tax Return.pdf", &words);
+        assert_eq!(score("/a/tax_return.pdf", &words), whole);
+        assert_eq!(score("/a/Return-Tax.pdf", &words), whole, "in any order");
+        assert_eq!(whole - score("/a/Tax Return 2024.pdf", &words), WHOLE_NAME);
+        assert!(whole > score("/a/Tax Return amended draft.pdf", &words));
+        // As much as one word that is the whole name has over a longer one.
+        let exact = score("/a/tax.pdf", &["tax"]) - score("/a/taxes.pdf", &["tax"]);
+        assert_eq!(exact, WHOLE_NAME);
+
+        // The extension can be one of the words, as it can be part of one.
+        let typed = ["tax", "return", "pdf"];
+        let whole = score("/a/Tax Return.pdf", &typed);
+        assert_eq!(whole - score("/a/Tax Return 2.pdf", &typed), WHOLE_NAME);
+        let dotted = ["se", "cret"];
+        let whole = score("/a/.secret", &dotted);
+        assert_eq!(whole - score("/a/.secrets", &dotted), WHOLE_NAME);
+
+        // One word is in a longer name or it isn't, however long the name
+        // is: the names of a numbered series tie, and their dates tell them
+        // apart.
+        let series = ["invoice"];
+        assert_eq!(
+            score("/a/invoice-9.pdf", &series),
+            score("/a/invoice-100.pdf", &series)
+        );
+    }
+
+    #[test]
+    fn hits_that_score_the_same_go_by_date_and_then_by_path() {
+        let file =
+            |path: &str, modified, score| RawHit::file(path.into(), 1, modified, None, score);
+        let mut hits = [
+            file("/r/b/shot.png", 100, 50),
+            RawHit::dir("/r/shots".into(), 50),
+            file("/r/a/shot.png", 100, 50),
+            file("/r/newest/shot.png", 900, 40),
+            file("/r/a 2/shot.png", 100, 50),
+            file("/r/c/shot.png", 300, 50),
+        ];
+        hits.sort_by(by_rank);
+        let paths: Vec<&Path> = hits.iter().map(|hit| hit.path.as_path()).collect();
+        // The file that changed last, then the three that changed in the
+        // same second by their paths, then the folder, which has no date. A
+        // better score comes before any date. The paths go as text, where a
+        // space comes before a slash, so `a 2` is ahead of `a`.
+        assert_eq!(
+            paths,
+            [
+                Path::new("/r/c/shot.png"),
+                Path::new("/r/a 2/shot.png"),
+                Path::new("/r/a/shot.png"),
+                Path::new("/r/b/shot.png"),
+                Path::new("/r/shots"),
+                Path::new("/r/newest/shot.png"),
+            ]
+        );
+    }
+
+    #[test]
+    fn hits_that_score_what_the_last_one_kept_does_are_kept_too() {
+        let kept = |totals: &[i32], fetch, matched| {
+            let scores: Vec<Score> = totals
+                .iter()
+                .map(|&total| Score {
+                    total,
+                    ..Default::default()
+                })
+                .collect();
+            through_ties(&scores, fetch, matched)
+        };
+        // No more than are kept, and a cut between two scores.
+        assert_eq!(kept(&[9, 8], 3, 2), 2);
+        assert_eq!(kept(&[9, 8, 7, 6], 2, 4), 2);
+        // A cut inside a group, which ends before the hits do.
+        assert_eq!(kept(&[9, 7, 7, 7, 6], 2, 9), 4);
+        // It ends where the hits do, when those are every match.
+        assert_eq!(kept(&[9, 7, 7, 7], 2, 4), 4);
+        // When they aren't, more of the group may have matched.
+        assert_eq!(kept(&[9, 7, 7, 7], 2, 9), 2);
+    }
+
+    #[test]
+    fn files_and_folders_make_one_list_and_take_turns_where_they_score_the_same() {
+        let scored = |names: &[(&'static str, i32)]| -> Vec<(&'static str, Score)> {
+            names
+                .iter()
+                .map(|&(name, total)| {
+                    let score = Score {
+                        total,
+                        ..Default::default()
+                    };
+                    (name, score)
+                })
+                .collect()
+        };
+        let files = || {
+            scored(&[
+                ("new.txt", 7),
+                ("old.txt", 7),
+                ("older.txt", 7),
+                ("low.txt", 3),
+            ])
+        };
+        let folders = || scored(&[("best", 9), ("docs", 7), ("last", 1)]);
+        let (items, scores) = best_of_both(files(), folders(), 6);
+        // The files stay in the order they came in, newest first.
+        assert_eq!(
+            items,
+            ["best", "new.txt", "docs", "old.txt", "older.txt", "low.txt"]
+        );
+        let totals: Vec<i32> = scores.iter().map(|score| score.total).collect();
+        assert_eq!(totals, [9, 7, 7, 7, 7, 3]);
+
+        let (items, _) = best_of_both(files(), folders(), 20);
+        assert_eq!(items.len(), 7);
+        let (items, _) = best_of_both(files(), Vec::new(), 2);
+        assert_eq!(items, ["new.txt", "old.txt"]);
     }
 
     #[test]
@@ -4282,8 +4581,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fff-kinds-many-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // More text files than the 2,000 hits fff-search is asked for, each
-        // a better match for "logo" than the one image.
+        // More text files than the 2,000 of fff-search's hits a search
+        // keeps, each a better match for "logo" than the one image.
         for n in 0..2100 {
             std::fs::write(dir.join(format!("logo-{n:04}.txt")), "").unwrap();
         }
@@ -4446,9 +4745,170 @@ mod tests {
         for hit in &mut hits {
             hit.score = rerank(hit, &words);
         }
-        hits.sort_by_key(|h| std::cmp::Reverse(h.score));
+        hits.sort_by(by_rank);
         let names: Vec<String> = hits.iter().map(|h| display_name(&h.path)).collect();
         assert_eq!(names, ["s.txt", "Safari.app", "sketch.txt", "Notes.app"]);
+    }
+
+    #[test]
+    fn equal_matches_list_the_one_that_changed_last_first() {
+        let dir = std::env::temp_dir().join(format!("fff-ties-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Two search locations, and the first one's file changed longer ago.
+        let day = Duration::from_secs(24 * 3600);
+        let now = SystemTime::now();
+        for (file, days) in [("a/shot-a.png", 3), ("b/shot-b.png", 1)] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "x").unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(now - day * days).unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.join("a"), dir.join("b")],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let found = engine.search(&SearchRequest {
+            query: "shot".into(),
+            limit: 10,
+            ..Default::default()
+        });
+        let names: Vec<&str> = found.hits.iter().map(|h| h.entry.name.as_str()).collect();
+        assert_eq!(found.hits[0].score, found.hits[1].score);
+        assert_eq!(names, ["shot-b.png", "shot-a.png"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_match_isnt_left_out_for_others_that_match_no_better() {
+        let dir = std::env::temp_dir().join(format!("fff-ties-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // More files than a search ranks of a location, all matching alike.
+        let pile = dir.join("pile/deep");
+        std::fs::create_dir_all(&pile).unwrap();
+        for n in 0..2_050 {
+            std::fs::write(pile.join(format!("note-{n:04}.txt")), "x").unwrap();
+        }
+        // One more that matches like them. It changed before any of them,
+        // and fff-search returns such files newest first.
+        let old = dir.join("top/note-old.txt");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "x").unwrap();
+        let file = std::fs::File::options().write(true).open(&old).unwrap();
+        let day = Duration::from_secs(24 * 3600);
+        file.set_modified(SystemTime::now() - day).unwrap();
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(20)));
+
+        // It is ranked with the others, and first, being a folder higher up:
+        // in a search for files, and in one for files and folders, which is
+        // the one the window makes.
+        for files_only in [true, false] {
+            let found = engine.search(&SearchRequest {
+                query: "note".into(),
+                files_only,
+                limit: 3,
+                ..Default::default()
+            });
+            let names: Vec<&str> = found.hits.iter().map(|h| h.entry.name.as_str()).collect();
+            assert_eq!(names[0], "note-old.txt", "{files_only} {names:?}");
+            assert!(found.truncated);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_isnt_left_out_for_others_that_match_no_better() {
+        let dir = std::env::temp_dir().join(format!("fff-ties-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // More folders than a search ranks of a location, all matching
+        // alike, and one more, the last of them by its path. That is the
+        // order fff-search returns these in, having no date for a folder.
+        let folders = (0..2_050)
+            .map(|n| format!("pile/deep/note-{n:04}"))
+            .chain(["top/note-old".to_string()]);
+        for folder in folders {
+            let folder = dir.join(folder);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("in.txt"), "x").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(20)));
+
+        let found = engine.search(&SearchRequest {
+            query: "note".into(),
+            kind: KindFilter::Folder,
+            limit: 3,
+            ..Default::default()
+        });
+        // It is ranked with the others, and first, being a folder higher up.
+        let names: Vec<&str> = found.hits.iter().map(|h| h.entry.name.as_str()).collect();
+        assert_eq!(names[0], "note-old", "{names:?}");
+        assert!(found.truncated);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_newest_of_more_equal_matches_than_a_search_ranks_are_listed() {
+        let dir = std::env::temp_dir().join(format!("fff-ties-newest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // More files with one score than a search looks through, each a
+        // second newer than the one before it.
+        let pile = dir.join("pile");
+        std::fs::create_dir_all(&pile).unwrap();
+        let start = SystemTime::now() - Duration::from_secs(30 * 24 * 3600);
+        for n in 0..4_100 {
+            let file = std::fs::File::create(pile.join(format!("shot-{n:04}.png"))).unwrap();
+            file.set_modified(start + Duration::from_secs(n)).unwrap();
+        }
+        // A folder that matches too, so that the search has both kinds.
+        std::fs::create_dir_all(dir.join("shots")).unwrap();
+        std::fs::write(dir.join("shots/readme.txt"), "x").unwrap();
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(20)));
+
+        let found = engine.search(&SearchRequest {
+            query: "shot".into(),
+            limit: 12,
+            ..Default::default()
+        });
+        let names: Vec<&str> = found.hits.iter().map(|h| h.entry.name.as_str()).collect();
+        // The pictures it ranks are the ones that changed last, so the ten
+        // newest of them all are listed, newest first.
+        let newest: Vec<String> = (4_090..4_100)
+            .rev()
+            .map(|n| format!("shot-{n:04}.png"))
+            .collect();
+        let pictures: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| name.ends_with(".png"))
+            .take(10)
+            .collect();
+        assert_eq!(pictures, newest, "{names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4620,6 +5080,44 @@ mod tests {
         all.pop();
         let shown = chosen(all, &[], false).unwrap();
         assert_eq!(shown, (vec!["tax.txt".into()], false));
+    }
+
+    #[test]
+    fn a_list_a_sort_chose_is_in_the_order_of_a_list_without_one() {
+        let dir = std::env::temp_dir().join(format!("fff-sorted-ties-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Hits with one score. The folder is on the disk, where its entry
+        // is read from, and it changed after any of the files.
+        let hits = || -> Vec<RawHit> {
+            let mut hits = vec![RawHit::dir(dir.clone(), 0)];
+            for (name, size, modified) in [
+                ("a.log", 30, 100),
+                ("b.log", 20, 100),
+                ("c.log", 10, 200),
+                ("d.log", 40, 300),
+            ] {
+                hits.push(RawHit::file(dir.join(name), size, modified, None, 0));
+            }
+            hits
+        };
+        let smallest = SortOrder {
+            key: SortKey::Size,
+            ascending: true,
+        };
+        let (chosen, truncated) = cut_in_order(hits(), smallest, 4, &[], "", true).unwrap();
+        assert!(truncated);
+        let chosen: Vec<PathBuf> = chosen.into_iter().map(|hit| hit.entry.path).collect();
+        // The folder and the three smallest files, as a search without the
+        // sort lists those four.
+        let mut ranked = hits();
+        ranked.retain(|hit| !hit.path.ends_with("d.log"));
+        ranked.sort_by(by_rank);
+        let ranked: Vec<PathBuf> = ranked.into_iter().map(|hit| hit.path).collect();
+        assert_eq!(chosen, ranked);
+        let files = ["c.log", "a.log", "b.log"].map(|name| dir.join(name));
+        assert_eq!(ranked[..3], files);
+        assert_eq!(ranked[3], dir);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -4902,8 +5400,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fff-sorted-wide-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // A search for two items is handed the 2,000 that changed last.
-        for n in 0..2_050 {
+        // A search for two items is handed the 2,000 that changed last: the
+        // files score the same, and there are more of them than it looks
+        // through for where such a group ends.
+        for n in 0..4_050 {
             std::fs::write(dir.join(format!("new-{n:04}.log")), "x").unwrap();
         }
         // The largest of them all changed before any of those.
@@ -5238,8 +5738,9 @@ mod tests {
     fn a_folder_with_a_space_in_its_name_isnt_crowded_out_of_a_name_search() {
         let dir = std::env::temp_dir().join(format!("fff-find-space-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        // More names elsewhere match better than fff-search is ever asked
-        // for: 20,000 at the most. Were the folder searched along with
+        // More names elsewhere match better than a search ever keeps of
+        // fff-search's hits: 20,000 at the most, and the ones that match
+        // like the last of those. Were the folder searched along with
         // everything around it, its own file would not be among them.
         let folder = dir.join("my folder");
         std::fs::create_dir_all(&folder).unwrap();
