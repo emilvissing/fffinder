@@ -1040,16 +1040,34 @@ impl Finder {
     }
 
     pub fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
-        let from = self.current_folder().map(Path::to_path_buf);
-        self.end_search(window, cx);
-        if self.history.back() {
-            self.location_changed(from, window, cx);
-        }
+        self.go_back_by(1, window, cx);
     }
 
     pub fn go_forward(&mut self, _: &GoForward, window: &mut Window, cx: &mut Context<Self>) {
+        self.go_forward_by(1, window, cx);
+    }
+
+    /// Go back `steps` places at once, as the Back button's menu does.
+    pub(super) fn go_back_by(&mut self, steps: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.end_search(window, cx);
-        if self.history.forward() {
+        if self.history.back_by(steps) {
+            // The folder gone into from here is selected, which after one
+            // step is the folder the window just left.
+            let entered = self.history.forward_list().next();
+            let select = entered.and_then(Location::folder).map(Path::to_path_buf);
+            self.location_changed(select, window, cx);
+        }
+    }
+
+    /// Go forward `steps` places at once, as the Forward button's menu does.
+    pub(super) fn go_forward_by(
+        &mut self,
+        steps: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.end_search(window, cx);
+        if self.history.forward_by(steps) {
             self.location_changed(None, window, cx);
         }
     }

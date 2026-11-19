@@ -3,14 +3,16 @@
 
 use super::{Finder, SearchScope};
 use crate::actions::*;
+use crate::model::Location;
 use crate::theme::palette;
 use crate::theme::ui;
 use fffinder_core::{GroupKey, SortKey, ViewMode};
 use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::base::actions::Cancel;
 use gpui_kit::component::ElementExt as _;
 use gpui_kit::component::button::{Button, ButtonRounded, ButtonVariants as _};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, h_flex,
@@ -18,6 +20,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
+use std::path::{Component, Path, PathBuf};
 
 pub const TOOLBAR_HEIGHT: f32 = 52.;
 /// The narrowest the search field gets, in points.
@@ -297,6 +300,150 @@ pub(super) fn view_mode_items(
     })
 }
 
+/// How many places a Back or Forward menu lists.
+const HISTORY_MENU_LENGTH: usize = 12;
+
+/// What a Back or Forward button's tooltip says: where the button leads,
+/// when it leads somewhere.
+fn history_tip(name: &str, to: Option<&Location>) -> String {
+    match to {
+        Some(place) => format!("{name} to “{}”", place.title()),
+        None => name.to_string(),
+    }
+}
+
+/// The places a Back menu lists, or with `forward` a Forward menu: the
+/// nearest ones, nearest first.
+fn history_places(finder: &Finder, forward: bool) -> Vec<Location> {
+    let (history, most) = (&finder.history, HISTORY_MENU_LENGTH);
+    match forward {
+        true => history.forward_list().take(most).cloned().collect(),
+        false => history.back_list().take(most).cloned().collect(),
+    }
+}
+
+/// What a Back or Forward menu calls each of `places`: its name, and for a
+/// folder whose name another place in the menu has too, the folder it is in
+/// as well, as in "src — atlas". Whole paths would tell such folders apart
+/// too, but a menu doesn't cut its items' text short, and long ones run out
+/// of the window before the part they differ in.
+fn history_labels(places: &[Location]) -> Vec<String> {
+    places
+        .iter()
+        .map(|place| {
+            let title = place.title();
+            let namesakes: Vec<&Location> = places
+                .iter()
+                .filter(|other| *other != place && other.title() == title)
+                .collect();
+            match place.folder().and_then(Path::parent) {
+                Some(parent) if !namesakes.is_empty() => {
+                    let parents: Vec<&Path> = namesakes
+                        .iter()
+                        .filter_map(|other| other.folder().and_then(Path::parent))
+                        .collect();
+                    format!("{title} — {}", distinct_end(parent, &parents).display())
+                }
+                _ => title,
+            }
+        })
+        .collect()
+}
+
+/// The shortest end of `folder`'s path that none of `others` ends with too:
+/// its name, or its name after those of as many folders above it as it takes.
+fn distinct_end(folder: &Path, others: &[&Path]) -> PathBuf {
+    let names: Vec<Component> = folder.components().collect();
+    (1..=names.len())
+        .map(|count| names[names.len() - count..].iter().collect::<PathBuf>())
+        .find(|end| !others.iter().any(|other| other.ends_with(end)))
+        .unwrap_or_else(|| folder.to_path_buf())
+}
+
+/// A Back or Forward button's menu: the places it leads to, each going
+/// straight there.
+fn history_menu(
+    view: &Entity<Finder>,
+    menu: PopupMenu,
+    forward: bool,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    // The kit draws a menu like this one where the mouse was pressed, and
+    // only while its button is still there. These buttons keep to the
+    // window's right edge, so a window that changes size takes them from
+    // under the menu, which would be gone with the keyboard still in it and
+    // nothing to close it. So it closes, as Escape closes it. A window
+    // reports its bounds when it only moved or came to the front as well,
+    // and the menu stays open through those.
+    let size = window.viewport_size();
+    cx.observe_window_bounds(window, move |menu, window, cx| {
+        if window.viewport_size() != size && menu.focus_handle(cx).is_focused(window) {
+            window.dispatch_action(Box::new(Cancel), cx);
+        }
+    })
+    .detach();
+    let places = history_places(view.read(cx), forward);
+    let labels = history_labels(&places);
+    places
+        .into_iter()
+        .zip(labels)
+        .enumerate()
+        .fold(menu, |menu, (ix, (place, label))| {
+            menu.item(PopupMenuItem::new(label).on_click(window.listener_for(
+                view,
+                move |this: &mut Finder, _: &ClickEvent, window, cx| {
+                    // Keys still reach the window while a menu is open, so
+                    // the history may have moved on since this one listed
+                    // it. An item goes only to the place it names.
+                    if history_places(this, forward).get(ix) != Some(&place) {
+                        return;
+                    }
+                    match forward {
+                        true => this.go_forward_by(ix + 1, window, cx),
+                        false => this.go_back_by(ix + 1, window, cx),
+                    }
+                },
+            )))
+        })
+        .min_w(ui(200.))
+        // A menu doesn't cut its items' text short, so a long name would run
+        // out of a menu of the usual width. This one may fill the window's,
+        // but for the margin the kit keeps around a menu.
+        .max_w(size.width - px(16.))
+}
+
+/// The Back button, or with `forward` the Forward button, with its menu,
+/// which a right-click opens.
+fn with_history_menu(
+    id: &'static str,
+    button: Button,
+    forward: bool,
+    view: &Entity<Finder>,
+) -> impl IntoElement {
+    let (pressed, listed) = (view.clone(), view.clone());
+    // The menu goes on a wrapper and not on the button, which would hold it
+    // as one of its own children: the keyboard would be inside the button
+    // for as long as the menu is open.
+    div()
+        .id(id)
+        .flex_none()
+        .child(
+            button.on_mouse_down(MouseButton::Right, move |_, window, cx| {
+                // A press gives a button the keyboard, and a menu that closes
+                // gives the keyboard back to whatever had it when the menu
+                // opened. That must stay the files, not become this button.
+                window.prevent_default();
+                // A menu with nothing in it isn't drawn, yet it would take
+                // the keyboard, and nothing could close it to give it back.
+                if history_places(pressed.read(cx), forward).is_empty() {
+                    cx.stop_propagation();
+                }
+            }),
+        )
+        .context_menu(move |menu, window, cx| history_menu(&listed, menu, forward, window, cx))
+}
+
 impl Finder {
     /// How much of the toolbar fits in the width it was last drawn at, after
     /// what the toolbar has to show on this system.
@@ -333,23 +480,31 @@ impl Finder {
         let fit = self.toolbar_room(traffic, window);
         self.toolbar_fit = fit;
 
+        let back_tip = history_tip("Back", self.history.back_list().next());
+        let forward_tip = history_tip("Forward", self.history.forward_list().next());
         let nav = pill(cx)
-            .child(
+            .child(with_history_menu(
+                "back-history",
                 pill_button("back", IconName::ChevronLeft, cx)
-                    .tooltip_with_action("Back", &GoBack, Some(FINDER))
+                    .tooltip_with_action(back_tip, &GoBack, Some(FINDER))
                     .disabled(!can_back)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.go_back(&GoBack, window, cx)
                     })),
-            )
-            .child(
+                false,
+                &view,
+            ))
+            .child(with_history_menu(
+                "forward-history",
                 pill_button("forward", IconName::ChevronRight, cx)
-                    .tooltip_with_action("Forward", &GoForward, Some(FINDER))
+                    .tooltip_with_action(forward_tip, &GoForward, Some(FINDER))
                     .disabled(!can_forward)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.go_forward(&GoForward, window, cx)
                     })),
-            );
+                true,
+                &view,
+            ));
 
         let view_button = |id: &'static str,
                            icon: Lucide,
@@ -860,7 +1015,8 @@ fn actions_menu(
 
 #[cfg(test)]
 mod tests {
-    use super::{TOOLBAR_FULL_WIDTH, TOOLBAR_MIN_WIDTH, ToolbarFit};
+    use super::{TOOLBAR_FULL_WIDTH, TOOLBAR_MIN_WIDTH, ToolbarFit, history_labels, history_tip};
+    use crate::model::Location;
 
     #[test]
     fn the_toolbar_folds_one_step_at_a_time() {
@@ -878,5 +1034,63 @@ mod tests {
             ToolbarFit::for_room(TOOLBAR_MIN_WIDTH - 200.),
             ToolbarFit::SortInActions
         );
+    }
+
+    #[test]
+    fn a_history_buttons_tooltip_names_where_it_leads() {
+        let projects = Location::Folder("/srv/Projects".into());
+
+        assert_eq!(history_tip("Back", Some(&projects)), "Back to “Projects”");
+        assert_eq!(
+            history_tip("Forward", Some(&Location::Recents)),
+            "Forward to “Recents”"
+        );
+        assert_eq!(history_tip("Back", None), "Back");
+    }
+
+    #[test]
+    fn a_history_menu_tells_folders_with_one_name_apart() {
+        let folder = |path: &str| Location::Folder(path.into());
+        let sep = std::path::MAIN_SEPARATOR;
+
+        let places = [
+            folder("/srv/a/src"),
+            folder("/srv/Projects"),
+            folder("/srv/b/src"),
+            Location::Recents,
+        ];
+        assert_eq!(
+            history_labels(&places),
+            ["src — a", "Projects", "src — b", "Recents"]
+        );
+
+        // Where the folders they are in have one name as well, the folders
+        // above those follow, as far up as it takes and no further. That can
+        // be the whole path, for a folder another one's path ends with.
+        let nested = [
+            folder("/srv/a/lib/src"),
+            folder("/srv/b/lib/src"),
+            folder("/srv/c/src"),
+            folder("/lib/src"),
+        ];
+        assert_eq!(
+            history_labels(&nested),
+            [
+                format!("src — a{sep}lib"),
+                format!("src — b{sep}lib"),
+                "src — c".to_string(),
+                format!("src — {sep}lib"),
+            ]
+        );
+
+        // The same folder twice is one place, and its name says which.
+        let twice = [folder("/srv/a/src"), folder("/srv/a/src")];
+        assert_eq!(history_labels(&twice), ["src", "src"]);
+        let thrice = [twice[0].clone(), folder("/srv/b/src"), twice[1].clone()];
+        assert_eq!(history_labels(&thrice), ["src — a", "src — b", "src — a"]);
+
+        // The Trash has no folder to tell it from a folder of that name.
+        let trashes = [folder("/srv/Trash"), Location::Trash];
+        assert_eq!(history_labels(&trashes), ["Trash — srv", "Trash"]);
     }
 }

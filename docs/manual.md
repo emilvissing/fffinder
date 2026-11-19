@@ -182,7 +182,7 @@ From left to right, with everything showing:
 | --- | --- |
 | Show Sidebar | Appears only when the sidebar is hidden. Shows it again. |
 | Title | The folder's name, or `Searching "text"` during a search. On macOS and Linux, drag empty toolbar space to move the window, and double-click it to zoom (maximize on Linux). |
-| Back, Forward | Move through the window's history. The back and forward buttons on a mouse do the same. |
+| Back, Forward | Move through the window's history. The back and forward buttons on a mouse do the same. Each button's tooltip names the place it leads to, as in Back to "Projects". Right-click a button for a menu of the places it leads to, and choose one to go straight there. See [Toolbar menus](#toolbar-menus). |
 | as Icons, as List, as Columns, as Gallery | Switch the view. |
 | Sort and View Options | The sort menu. See [Sorting and hidden files](#sorting-and-hidden-files). |
 | Nushell | The Nushell menu. See [Menus](#menus). |
@@ -854,6 +854,7 @@ Your actions, then **Edit Actions…** and **Reload Actions**. See [Nushell acti
 
 ### Toolbar menus
 
+- **Back** and **Forward** (right-click either button): the places the button leads to, nearest first, at most twelve. Choosing one goes straight there. The places passed over stay in the history, as if you had clicked the button once for each. A folder with the same name as another place in the menu has the folder it is in after its name, as in "src — atlas", and as many of the folders above that one as it takes to tell them apart, as in "src — atlas/lib". A button with nowhere to go has no menu.
 - **Sort and View Options**: Sort By (Relevance, Name, Date Modified, Date Created, Size, Kind), Ascending, Descending, Keep Folders on Top, Show Hidden Files, Group By.
 - **List header** (right-click a column header in the list view): the columns, Keep Folders on Top, Calculate All Sizes, Reset Columns.
 - **Nushell**: Open Nushell Here, Run a Pipeline… (or Hide Pipeline Panel when it is open), Nushell Actions, Copy as Nushell List.

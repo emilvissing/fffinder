@@ -12,8 +12,9 @@
 //! `--do` replays a step in the window before the picture is taken, and can be
 //! given many times. The steps are the ones `examples/drive.rs` takes:
 //! `key:<keys>` presses keys (`cmd-f`, `enter`), `click:<id>` clicks an element
-//! by ID, `hover:<id>` rests the mouse on one until its tooltip shows,
-//! `type:<text>` types into the focused field, and `wait:<ms>` pauses.
+//! by ID, `right-click:<id>` right-clicks one for its menu, `hover:<id>` rests
+//! the mouse on one until its tooltip shows, `type:<text>` types into the
+//! focused field, and `wait:<ms>` pauses.
 //!
 //! ```text
 //! cargo run --example screenshot -- out.png --view list --do key:cmd-f --do type:readme
@@ -296,6 +297,9 @@ fn main() {
             cx.update_window(handle, |_, window, cx| match kind {
                 "key" => window.press(arg, cx),
                 "click" => window.click(gpui_kit::SharedString::from(arg.to_string()), cx),
+                "right-click" => {
+                    window.right_click(gpui_kit::SharedString::from(arg.to_string()), cx)
+                }
                 "hover" => window.hover(gpui_kit::SharedString::from(arg.to_string()), cx),
                 "type" => window.input(arg, cx),
                 other => eprintln!("unknown step kind {other:?}"),

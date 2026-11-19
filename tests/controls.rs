@@ -62,6 +62,130 @@ fn back_and_forward_buttons(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn back_and_forward_buttons_list_their_history(cx: &mut TestAppContext) {
+    let fx = Fixture::new("history-menus");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // With nowhere to go there is nothing to list, and a menu with nothing
+    // in it must not take the keyboard from the files.
+    for button in ["back", "forward"] {
+        ui.right_click(button);
+        assert!(!ui.menu_open(), "{button} has no history yet");
+        assert!(ui.files_focused(), "after a right-click on {button}");
+    }
+
+    ui.go_to(&fx.path("Projects"));
+    ui.go_to(&fx.path("Projects/atlas"));
+    let start = Location::Folder(fx.dir.clone()).title();
+    ui.right_click("back");
+    assert_eq!(
+        ui.menu_labels(),
+        ["Projects", start.as_str()],
+        "nearest first"
+    );
+
+    ui.click_menu_item(&start);
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    assert_eq!(
+        ui.selected(),
+        ["Projects"],
+        "selects the folder gone into from here"
+    );
+    assert!(!ui.read(|f| f.can_go_back()));
+    assert!(!ui.menu_open(), "choosing a place closes the menu");
+    assert!(ui.files_focused(), "the keyboard is back with the files");
+
+    ui.right_click("forward");
+    assert_eq!(ui.menu_labels(), ["Projects", "atlas"]);
+    ui.press("escape");
+    assert!(!ui.menu_open());
+    assert!(ui.files_focused(), "after closing the menu with Escape");
+    assert_eq!(ui.folder(), Some(fx.dir.clone()), "Escape goes nowhere");
+
+    ui.right_click("forward");
+    ui.click_menu_item("atlas");
+    assert_eq!(ui.folder(), Some(fx.path("Projects/atlas")));
+    ui.right_click("forward");
+    assert!(!ui.menu_open(), "forward is used up");
+    assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn a_history_menu_lists_the_twelve_nearest_places(cx: &mut TestAppContext) {
+    let fx = Fixture::new("history-long");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let stops: Vec<String> = (1..=13).map(|n| format!("stop {n:02}")).collect();
+    for stop in &stops {
+        std::fs::create_dir(fx.path(stop)).unwrap();
+        ui.go_to(&fx.path(stop));
+    }
+
+    // Thirteen places lie behind stop 13, the folder the window opened at
+    // being the farthest.
+    ui.right_click("back");
+    let nearest: Vec<&str> = stops[..12].iter().rev().map(String::as_str).collect();
+    assert_eq!(ui.menu_labels(), nearest);
+
+    ui.click_menu_item("stop 01");
+    assert_eq!(ui.folder(), Some(fx.path("stop 01")), "twelve steps back");
+    assert!(ui.read(|f| f.can_go_back()), "one more is left");
+
+    ui.right_click("forward");
+    assert_eq!(ui.menu_labels(), stops[1..]);
+    ui.click_menu_item("stop 13");
+    assert_eq!(ui.folder(), Some(fx.path("stop 13")));
+}
+
+#[gpui_kit::test]
+fn a_history_menu_goes_only_where_it_says(cx: &mut TestAppContext) {
+    let fx = Fixture::new("history-moved-on");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Projects"));
+    ui.go_to(&fx.path("Projects/atlas"));
+    ui.right_click("back");
+    assert_eq!(ui.menu_labels().len(), 2);
+
+    // Keys still reach the window while a menu is open. This one goes back
+    // to Projects, which the menu still lists as one step away.
+    ui.press("alt-left");
+    assert_eq!(ui.folder(), Some(fx.path("Projects")));
+    assert!(ui.menu_open(), "the menu is still up");
+
+    ui.click_menu_item("Projects");
+    assert_eq!(
+        ui.folder(),
+        Some(fx.path("Projects")),
+        "not a step further back, to a place the item didn't name"
+    );
+    assert!(!ui.menu_open());
+    assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn a_history_menu_closes_when_the_window_changes_size(cx: &mut TestAppContext) {
+    let fx = Fixture::new("history-resized");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Projects"));
+    ui.right_click("back");
+    assert!(ui.menu_open());
+
+    // The buttons keep to the window's right edge, so in a narrower window
+    // Back is no longer where it was pressed, and that is where its menu is
+    // drawn. Left open, the menu would hold the keyboard without showing.
+    let size = ui.window(|window, _| window.viewport_size());
+    ui.resize(f32::from(size.width) - 120., f32::from(size.height));
+    assert!(!ui.menu_open());
+    assert!(ui.files_focused(), "the keyboard is back with the files");
+    ui.press("alt-left");
+    assert_eq!(ui.folder(), Some(fx.dir.clone()), "and their keys work");
+
+    // A window that comes to the front reports its bounds as well. It is no
+    // bigger or smaller for that, and a menu stays open through it.
+    ui.right_click("forward");
+    ui.activate();
+    assert_eq!(ui.menu_labels(), ["Projects"]);
+}
+
+#[gpui_kit::test]
 fn sidebar_hide_and_show_buttons(cx: &mut TestAppContext) {
     let fx = Fixture::new("sidebar-toggle");
     let mut ui = Ui::open(cx, &fx.dir);

@@ -147,20 +147,51 @@ impl History {
     }
 
     pub fn back(&mut self) -> bool {
-        let Some(prev) = self.back.pop() else {
-            return false;
-        };
-        let from = std::mem::replace(&mut self.current, prev);
-        self.forward.push(from);
-        true
+        self.back_by(1)
     }
 
     pub fn forward(&mut self) -> bool {
-        let Some(next) = self.forward.pop() else {
+        self.forward_by(1)
+    }
+
+    /// Go back `steps` places at once, to where that many single steps would
+    /// lead. With fewer places than that to go back to, it stays where it
+    /// is rather than go as far as it can.
+    ///
+    /// # Arguments
+    ///
+    /// * `steps` - How many places to go back; 1 is the nearest
+    ///
+    /// # Returns
+    ///
+    /// Whether it went there
+    pub fn back_by(&mut self, steps: usize) -> bool {
+        if steps == 0 || steps > self.back.len() {
             return false;
-        };
-        let from = std::mem::replace(&mut self.current, next);
-        self.back.push(from);
+        }
+        for to in self.back.drain(self.back.len() - steps..).rev() {
+            self.forward.push(std::mem::replace(&mut self.current, to));
+        }
+        true
+    }
+
+    /// Go forward `steps` places at once, or stay put when there are fewer,
+    /// as [`History::back_by`] does.
+    ///
+    /// # Arguments
+    ///
+    /// * `steps` - How many places to go forward; 1 is the nearest
+    ///
+    /// # Returns
+    ///
+    /// Whether it went there
+    pub fn forward_by(&mut self, steps: usize) -> bool {
+        if steps == 0 || steps > self.forward.len() {
+            return false;
+        }
+        for to in self.forward.drain(self.forward.len() - steps..).rev() {
+            self.back.push(std::mem::replace(&mut self.current, to));
+        }
         true
     }
 
@@ -170,6 +201,16 @@ impl History {
 
     pub fn can_forward(&self) -> bool {
         !self.forward.is_empty()
+    }
+
+    /// The places Back leads to, nearest first.
+    pub fn back_list(&self) -> impl Iterator<Item = &Location> {
+        self.back.iter().rev()
+    }
+
+    /// The places Forward leads to, nearest first.
+    pub fn forward_list(&self) -> impl Iterator<Item = &Location> {
+        self.forward.iter().rev()
     }
 
     /// Keep up with items that moved: every folder in the history that was
@@ -404,6 +445,45 @@ mod tests {
         assert!(h.back() && h.back());
         assert_eq!(h.current(), &a);
         assert!(!h.back());
+    }
+
+    #[test]
+    fn history_goes_several_places_at_once() {
+        let [a, b, c, d] = ["/a", "/b", "/c", "/d"].map(|p| Location::Folder(p.into()));
+        let mut h = History::new(a.clone());
+        for to in [&b, &c, &d] {
+            h.navigate(to.clone());
+        }
+        assert_eq!(h.back_list().collect::<Vec<_>>(), [&c, &b, &a]);
+        assert_eq!(h.forward_list().count(), 0);
+
+        // More steps than there are places, or none, goes nowhere.
+        assert!(!h.back_by(4) && !h.back_by(0));
+        assert_eq!(h.current(), &d);
+        assert_eq!(h.back_list().count(), 3);
+
+        // Two at once end where two single steps do.
+        let mut stepped = h.clone();
+        assert!(stepped.back() && stepped.back());
+        assert!(h.back_by(2));
+        assert_eq!(h.current(), &b);
+        assert_eq!(h.back_list().collect::<Vec<_>>(), [&a]);
+        assert_eq!(h.forward_list().collect::<Vec<_>>(), [&c, &d]);
+        assert_eq!(stepped.current(), h.current());
+        assert!(stepped.back_list().eq(h.back_list()));
+        assert!(stepped.forward_list().eq(h.forward_list()));
+
+        assert!(!h.forward_by(3) && !h.forward_by(0));
+        assert_eq!(h.current(), &b);
+        assert!(h.forward_by(2));
+        assert_eq!(h.current(), &d);
+        assert_eq!(h.back_list().collect::<Vec<_>>(), [&c, &b, &a]);
+        assert!(!h.can_forward());
+
+        assert!(h.back_by(3));
+        assert_eq!(h.current(), &a);
+        assert!(!h.can_back());
+        assert_eq!(h.forward_list().collect::<Vec<_>>(), [&b, &c, &d]);
     }
 
     #[test]
