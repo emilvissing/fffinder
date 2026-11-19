@@ -6,7 +6,7 @@ mod common;
 
 use common::{Fixture, Open, Ui, at, cmd, item_id};
 use fffinder::actions::*;
-use fffinder::finder::{PickerOptions, SearchScope};
+use fffinder::finder::{AppState, PickerOptions, SearchScope};
 use fffinder::model::Location;
 use fffinder::system::SystemCall;
 use fffinder_core::terminals::{Launch, Terminal};
@@ -392,6 +392,195 @@ fn scope_bar_controls(cx: &mut TestAppContext) {
     assert!(ui.dialog_open());
     ui.click("help-done");
     assert!(!ui.dialog_open());
+}
+
+#[gpui_kit::test]
+fn typing_on_after_no_results_keeps_the_message(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-nothing-typing");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("qqzzqqzz");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Results"));
+
+    // The next letter's search hasn't answered yet.
+    ui.type_without_settling("q");
+    assert!(ui.read(|f| f.search_in_flight_for_test()));
+    assert!(
+        !ui.exists("skeleton"),
+        "placeholders would flash between two No Results"
+    );
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Results"));
+
+    ui.settle();
+    assert!(!ui.read(|f| f.search_in_flight_for_test()));
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Results"));
+}
+
+#[gpui_kit::test]
+fn the_first_letter_of_a_search_takes_the_folders_items_away(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-first-letter");
+    let mut ui = Ui::open(cx, &fx.dir);
+    assert_eq!(ui.names().len(), 4);
+    ui.click("search");
+    ui.type_without_settling("a");
+    assert!(ui.read(|f| f.search_in_flight_for_test()));
+    assert!(
+        ui.names().is_empty(),
+        "the folder's items aren't results: {:?}",
+        ui.names()
+    );
+    assert!(ui.exists("skeleton"), "placeholders until the results come");
+
+    ui.settle();
+    let found = ui.names();
+    assert!(found.contains(&"atlas".to_string()), "{found:?}");
+    assert!(!ui.exists("skeleton"));
+}
+
+#[gpui_kit::test]
+fn switching_between_name_and_contents_takes_the_other_results_away(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-name-contents");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let details = |ui: &Ui| -> Vec<String> {
+        ui.read(|f| {
+            f.rows_for_test()
+                .iter()
+                .map(|r| r.detail.to_string())
+                .collect()
+        })
+    };
+    ui.click("search");
+    ui.type_text("atlas");
+    assert!(ui.names().len() > 1, "{:?}", ui.names());
+
+    // Names found show their folder, which isn't a matching line.
+    ui.click_without_settling("by-contents");
+    assert!(ui.read(|f| f.search_in_flight_for_test()));
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(ui.exists("skeleton"));
+    ui.settle();
+    assert_eq!(ui.names(), ["Project Atlas.txt"]);
+    assert_eq!(details(&ui), ["1: atlas"]);
+
+    // And the other way around.
+    ui.click_without_settling("by-name");
+    assert!(ui.read(|f| f.search_in_flight_for_test()));
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(ui.exists("skeleton"));
+    ui.settle();
+    assert!(ui.names().len() > 1, "{:?}", ui.names());
+    assert!(
+        details(&ui).iter().all(|d| !d.starts_with("1: ")),
+        "{:?}",
+        details(&ui)
+    );
+}
+
+#[gpui_kit::test]
+fn a_contents_search_that_found_nothing_says_it_is_searching_again(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-contents-again");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("qqzzqqzz");
+    ui.click("by-contents");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Results"));
+
+    // Looking inside files can take seconds, and until it has answered
+    // nothing says there are no results for the words as they are now.
+    ui.click("search");
+    ui.type_without_settling("q");
+    assert_eq!(ui.read(|f| f.query().to_string()), "qqzzqqzzq");
+    assert!(ui.read(|f| f.search_in_flight_for_test()));
+    assert!(!ui.exists("skeleton"));
+    assert_eq!(ui.snapshot("message-title").label(), Some("Searching…"));
+
+    ui.settle();
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Results"));
+}
+
+#[gpui_kit::test]
+fn a_folder_whose_index_is_still_being_built_doesnt_say_no_results(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-outside");
+    // A folder outside the search locations gets an index of its own the
+    // first time it's searched. This one holds enough that the search's
+    // first answer nearly always comes before that index is built.
+    let outside = Fixture::new("search-outside-folder");
+    for i in 0..300 {
+        std::fs::write(outside.path(&format!("Projects/file {i}.txt")), "x").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    let title = |ui: &mut Ui| {
+        ui.exists("message-title")
+            .then(|| ui.snapshot("message-title").label().map(str::to_string))
+            .flatten()
+    };
+    ui.go_to(&outside.dir);
+    ui.click("search-scope");
+    assert_eq!(ui.read(|f| f.search_scope()), SearchScope::Folder);
+    ui.click("search");
+    ui.type_without_settling("atlas");
+
+    // The search answers when the typing has paused. Unless the index was
+    // built in no time, that answer comes from a part of it.
+    ui.cx
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(50));
+    ui.cx.run_until_parked();
+    if ui.names().is_empty() {
+        assert_eq!(title(&mut ui).as_deref(), Some("Indexing…"));
+    }
+
+    // With the index built, the search runs again by itself.
+    let engine = ui.cx.read(|cx| cx.global::<AppState>().engine.clone());
+    assert!(engine.prepare(
+        Some(outside.dir.as_path()),
+        std::time::Duration::from_secs(20)
+    ));
+    for _ in 0..5 {
+        ui.settle();
+        assert_ne!(title(&mut ui).as_deref(), Some("No Results"));
+    }
+    let found = ui.names();
+    assert!(
+        found.contains(&"Project Atlas.txt".to_string()),
+        "{found:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn indexing_stays_while_the_search_is_tried_again(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-outside-again");
+    // As in the test before this one, a folder whose index is nearly always
+    // still being built when the search's first answer comes.
+    let outside = Fixture::new("search-outside-again-folder");
+    for i in 0..300 {
+        std::fs::write(outside.path(&format!("Projects/file {i}.txt")), "x").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&outside.dir);
+    ui.click("search-scope");
+    ui.click("search");
+    ui.type_without_settling("atlas");
+    ui.cx
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(50));
+    ui.cx.run_until_parked();
+    if ui.names().is_empty() {
+        assert_eq!(ui.snapshot("message-title").label(), Some("Indexing…"));
+
+        // Until the index is built the search is tried again every so often.
+        // Refresh tries it now, and that search hasn't answered yet.
+        ui.press_without_settling(&cmd("r"));
+        assert!(ui.read(|f| f.search_in_flight_for_test()));
+        assert!(
+            !ui.exists("skeleton"),
+            "placeholders would flash at every try"
+        );
+        assert_eq!(ui.snapshot("message-title").label(), Some("Indexing…"));
+    }
+    ui.settle();
 }
 
 // ----- sidebar, path bar, status bar ---------------------------------------------
@@ -1484,6 +1673,39 @@ fn nushell_filter_and_smart_folders(cx: &mut TestAppContext) {
     ui.right_click(("smart", 0usize));
     ui.click_menu_item("Remove from Sidebar");
     assert!(ui.read(|f| f.smart_folders().is_empty()));
+}
+
+#[gpui_kit::test]
+fn a_filter_waits_for_the_rows_a_search_has_yet_to_find(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-search-start");
+    std::fs::write(fx.path("big.log"), "x".repeat(20_000)).unwrap();
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    ui.press(&cmd("alt-f"));
+    ui.type_text("size > 10kb");
+    ui.press("enter");
+    assert_eq!(ui.names(), ["big.log"]);
+
+    // The folder's items are gone and the results aren't in. A run over no
+    // rows would end with nothing kept, which would hide the results when
+    // they come, until their own run had finished.
+    ui.click("search");
+    ui.type_without_settling("log");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(!ui.read(|f| f.is_filtering()));
+
+    ui.settle();
+    assert_eq!(ui.names(), ["big.log"]);
 }
 
 #[gpui_kit::test]

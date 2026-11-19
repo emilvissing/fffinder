@@ -97,6 +97,12 @@ impl Finder {
         if self.filter.is_empty() {
             return;
         }
+        // A search that hasn't answered has no rows of its own yet. A run
+        // over none would end at once with nothing kept, and that would hide
+        // the search's first results until their own run finished.
+        if rows.is_empty() && self.is_searching() && self.search_stats.is_none() {
+            return;
+        }
         let paths: Vec<PathBuf> = rows.iter().map(|r| r.entry.path.clone()).collect();
         if self.filter_source.as_ref() != Some(&paths) {
             self.filter_source = Some(paths);

@@ -122,7 +122,8 @@ The file area shows a message when there is nothing to list:
 | Message | When |
 | --- | --- |
 | Can't open this folder | The folder can't be read. The reason is shown. |
-| Indexing… | A search ran before the index was ready. It runs again as soon as a search location finishes indexing, and again as the rest finish. |
+| Indexing… | A search ran before the index was ready. It runs again as soon as a search location finishes indexing, and again as the rest finish. A folder outside the search locations says the same while its temporary index is built. |
+| Searching… | A contents search is still looking inside files, after the search before it found nothing. |
 | No Results | The search found nothing. |
 | No Recent Files | Recents is empty. |
 | No Items | The folder is empty. |
@@ -322,6 +323,8 @@ Each group has a header with its name and how many items it holds. Click the hea
 ## Searching
 
 Type in the search field (Cmd+F) to search. Searches start 50 ms after you stop typing. Return searches right away and moves into the results, selecting the first one. Down Arrow in the search field also moves into the results. If the results aren't in yet, both keys wait for them and then move in. Typing on, or moving the caret, calls that off, and when nothing is found the keyboard stays in the search field. Return doesn't run a search again when its results are already in; Refresh (Cmd+R) does.
+
+From the first letter, the file area shows placeholders in place of the items it was showing, until the results are in. It does the same when you switch between Name and Contents. After that, the results stay while a search runs again, as when you type on, and so does No Results. A contents search can take seconds, so while one runs again No Results reads Searching… instead.
 
 To search one part of the tree, open its folder and turn on **Search Only in "Folder name"**, the folder button left of the search field, before or while you search.
 

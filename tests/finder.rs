@@ -333,6 +333,27 @@ fn return_before_the_results_are_in_waits_in_an_empty_folder_too(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
+fn return_after_a_switch_to_contents_waits_for_what_is_inside_files(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-contents-return");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("atlas");
+    assert!(ui.names().len() > 1, "{:?}", ui.names());
+
+    // The names found are gone, and the files haven't been looked into yet.
+    ui.click_without_settling("by-contents");
+    ui.press_without_settling(&cmd("f"));
+    ui.press_without_settling("enter");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(!ui.files_focused());
+
+    ui.settle();
+    assert_eq!(ui.names(), ["Project Atlas.txt"]);
+    assert!(ui.files_focused(), "the results came in");
+    assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+}
+
+#[gpui_kit::test]
 fn a_second_return_before_the_results_are_in_opens_nothing(cx: &mut TestAppContext) {
     let fx = Fixture::new("search-return-twice");
     let mut ui = Ui::open(cx, &fx.dir);

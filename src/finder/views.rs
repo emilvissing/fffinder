@@ -1322,6 +1322,7 @@ impl Finder {
             ViewMode::Icons | ViewMode::Gallery => {
                 let icon = self.config.icon_size;
                 h_flex()
+                    .id("skeleton")
                     .flex_wrap()
                     .gap(ui(24.))
                     .p(ui(GRID_PADDING + 8.))
@@ -1333,9 +1334,11 @@ impl Finder {
                             .child(Skeleton::new().w(ui(icon)).h(ui(icon)).rounded(ui(8.)))
                             .child(Skeleton::new().w(ui(icon * 0.9)).h(ui(10.)).rounded(ui(4.)))
                     }))
+                    .test_support()
                     .into_any_element()
             }
             _ => v_flex()
+                .id("skeleton")
                 .gap(ui(10.))
                 .p(ui(16.))
                 .children((0..14usize).map(|i| {
@@ -1352,6 +1355,7 @@ impl Finder {
                         .child(Skeleton::new().w(ui(120.)).h(ui(10.)))
                         .child(Skeleton::new().w(ui(70.)).h(ui(10.)))
                 }))
+                .test_support()
                 .into_any_element(),
         }
     }

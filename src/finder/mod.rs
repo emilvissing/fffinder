@@ -693,6 +693,12 @@ impl Finder {
         &self.rows
     }
 
+    /// A search has been asked for and hasn't answered yet.
+    #[doc(hidden)]
+    pub fn search_in_flight_for_test(&self) -> bool {
+        self.searching
+    }
+
     #[doc(hidden)]
     pub fn tree_selection_for_test(&self) -> Option<NodeKey> {
         self.tree.selected().cloned()
@@ -1369,6 +1375,14 @@ impl Finder {
         self.searching || self.filtering || (indexing && self.rows.is_empty())
     }
 
+    /// A search is running and hasn't answered yet, so the file area shows
+    /// placeholders. Once it has, running again leaves the area as it is
+    /// until the next answer, so typing on after "No Results" doesn't flash
+    /// placeholders between that message and the next.
+    fn awaits_first_results(&self) -> bool {
+        self.searching && self.search_stats.is_none()
+    }
+
     /// Give the files the keyboard, with the first one selected unless
     /// something already is.
     fn enter_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1444,13 +1458,24 @@ impl Finder {
             return;
         }
         if !was_searching {
-            self.selection.clear();
             self.result_sort = SortOrder {
                 key: SortKey::Relevance,
                 ascending: true,
             };
+            self.drop_stale_results(cx);
         }
         self.run_search(!immediate, cx);
+    }
+
+    /// The rows aren't results of the search about to run: they're a
+    /// folder's items, or what the other of Name and Contents found. Until
+    /// it answered they'd be drawn as its results, a folder under Match or a
+    /// matching line under Folder, so they go and placeholders show.
+    fn drop_stale_results(&mut self, cx: &mut Context<Self>) {
+        self.results.clear();
+        self.search_stats = None;
+        self.selection.clear();
+        self.rebuild_rows(cx);
     }
 
     fn end_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1591,6 +1616,10 @@ impl Finder {
     pub fn set_search_contents(&mut self, contents: bool, cx: &mut Context<Self>) {
         if self.search_contents != contents {
             self.search_contents = contents;
+            // Outside a search the rows are a folder's, and stay.
+            if self.is_searching() {
+                self.drop_stale_results(cx);
+            }
             self.run_search(false, cx);
         }
     }
@@ -3346,8 +3375,11 @@ impl Finder {
                     )
                 })
                 .into_any_element()
-        } else if self.rows.is_empty() && !self.loading && !self.searching {
+        } else if self.rows.is_empty() && !self.loading && !self.awaits_first_results() {
             let (title, detail) = if self.is_searching() {
+                // What an index held while it was still being built is no
+                // "No Results": the search runs again as the index fills.
+                let partial = self.search_stats.as_ref().is_some_and(|s| s.indexing);
                 match self.indexing_progress() {
                     Some(n) => (
                         "Indexing…".to_string(),
@@ -3355,6 +3387,21 @@ impl Finder {
                             "{} files indexed so far. Results appear when indexing finishes.",
                             group_digits(n)
                         ),
+                    ),
+                    // Without a count: the index being built is a folder's
+                    // own, outside the search locations, or the locations
+                    // were last looked at before their indexing began or as
+                    // it ended.
+                    None if partial => (
+                        "Indexing…".to_string(),
+                        "Results appear when indexing finishes.".to_string(),
+                    ),
+                    // Looking inside files can take seconds, too long to
+                    // leave "No Results" up for words it wasn't about. A name
+                    // search answers before another message could be read.
+                    None if self.searching && self.search_contents => (
+                        "Searching…".to_string(),
+                        "Looking inside files for a match.".to_string(),
                     ),
                     None => (
                         "No Results".to_string(),
@@ -3513,10 +3560,13 @@ impl Finder {
             .gap_1()
             .child(
                 div()
+                    .id("message-title")
+                    .aria_label(SharedString::from(title.to_string()))
                     .text_size(ui(17.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
-                    .child(title.to_string()),
+                    .child(title.to_string())
+                    .test_support(),
             )
             .child(
                 div()
