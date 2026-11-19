@@ -341,7 +341,8 @@ While a search is active, the scope bar shows:
 
 | Type | Meaning |
 | --- | --- |
-| `budget report` | Fuzzy words, typo tolerant. Every word must match. |
+| `budget report` | Fuzzy words. Every word must match. Typos are allowed unless **Allow typos** is off. |
+| `"tax exemption"` | Quoted words. The name must have them as written, letters in a row. |
 | `*.pdf *.md` | Extensions. Several are ORed. |
 | `src/**/*.rs` | A glob against the path inside the search location. |
 | `/notes/ todo` | Only paths inside a folder named `notes`. |
@@ -352,9 +353,11 @@ While a search is active, the scope bar shows:
 
 Cmd+/ shows this table in the app.
 
+Unquoted words match fzf-style: their letters must appear in order somewhere in the path inside the search location, with gaps allowed, folder names included. So `taxexemptionc` also finds `token/exemption/coding/TaxHandler.java`. Quote a word to match it only in the name, letters in a row. Fuzzy words and quoted words both ignore letter case; quoted words and globs follow **Letter case in searches** in [Settings › Search engine](#search-engine).
+
 ### Ranking and limits
 
-fff-search ranks results, and fffinder re-ranks them so name matches come first, shallow paths come before deep ones, and nothing inside `.app` or `.framework` bundles shows. When a word matches files exactly, typo-only matches are dropped. Apps from the app folders rank as one item wherever their folder is, so "safari" or "term" puts Safari or Terminal ahead of a file with the same words in its name.
+fff-search ranks results, and fffinder re-ranks them so name matches come first, shallow paths come before deep ones, and nothing inside `.app` or `.framework` bundles shows. When a word matches files exactly, typo-only matches are dropped. With **Allow typos** off in [Settings › Search engine](#search-engine), they're always dropped. Apps from the app folders rank as one item wherever their folder is, so "safari" or "term" puts Safari or Terminal ahead of a file with the same words in its name.
 
 A search shows at most `result_limit` items (500 by default; **Results shown** in [Settings › Search engine](#search-engine)). With a filter on, it fetches up to 5,000 so the filter has enough to work with. Opening a file from search results records it, so files you open often rank higher for the same search later.
 
@@ -991,13 +994,14 @@ These are fff-search's options. Each change applies and saves right away.
 | Rank recent git changes higher | In a git repository, files from the last 10 commits rank higher. | `search.git_recency` |
 | Index file contents | After scanning, index file contents so content searches skip non-matching files sooner. Uses more memory. | `search.content_index` |
 | Keep often-used files in memory | Load the most-opened files into memory for faster content search. | `search.preload_files` |
-| Letter case in content search | **Smart** ignores case unless the text has a capital letter; **Match Case**; **Ignore Case**. | `search.case` |
+| Allow typos | When no name has a search's words with their letters in order, show near misses with typos instead. Off, such a search shows nothing. On by default. | `search.typos` |
+| Letter case in searches | For content searches, quoted words, and globs. **Smart** ignores case unless the text has a capital letter; **Match Case**; **Ignore Case**. | `search.case` |
 | Results shown | The most items a search lists: 100, 200, 500, 1000, 2000, or 5000. | `result_limit` |
 | Content search skips files over | 1 MB to 1000 MB (10 MB by default). | `search.max_file_size_mb` |
 | Content search time limit | After this long a content search stops and shows what it found so far, even when that is nothing: None, or 1 to 60 seconds (5 by default). The status bar then says "stopped at the time limit". | `search.time_limit_secs` |
 | Search threads | Threads for name searches; Auto uses one per processor core. Content search always uses fff-search's own threads, one per performance core on macOS and one per core elsewhere. | `search.threads` |
 
-Changing one of the five switches rebuilds every index, so the file counts under Search locations start over. The other controls apply to the next search, and a search on screen runs again.
+Changing one of the first five switches rebuilds every index, so the file counts under Search locations start over. The other controls apply to the next search, and a search on screen runs again.
 
 ### Appearance and text size
 
@@ -1091,6 +1095,7 @@ The `search` record:
 | `git_recency` | `true` | Rank files from recent git commits higher. |
 | `content_index` | `false` | Index file contents after scanning. |
 | `preload_files` | `false` | Keep often-used files in memory for content search. |
+| `typos` | `true` | Show typo-tolerant name matches when nothing matches without typos. |
 | `case` | `"smart"` | Content search case: `smart`, `sensitive`, or `insensitive`. |
 | `max_file_size_mb` | `10` | Content search skips bigger files. |
 | `time_limit_secs` | `5` | Content search time limit; `0` means none. |

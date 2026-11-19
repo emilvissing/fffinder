@@ -350,7 +350,10 @@ pub struct SearchSettings {
     pub content_index: bool,
     /// Keep the most-used files in memory for content search.
     pub preload_files: bool,
-    /// Letter case in content search.
+    /// Let name searches fall back to typo-tolerant matches when nothing
+    /// has the words' letters in order.
+    pub typos: bool,
+    /// Letter case in content search, quoted words, and globs.
     pub case: SearchCase,
     /// Content search skips files bigger than this, in megabytes.
     pub max_file_size_mb: u64,
@@ -369,6 +372,7 @@ impl Default for SearchSettings {
             git_recency: true,
             content_index: false,
             preload_files: false,
+            typos: true,
             case: SearchCase::Smart,
             max_file_size_mb: 10,
             time_limit_secs: 5,
@@ -391,7 +395,7 @@ impl SearchSettings {
     }
 }
 
-/// Letter case in content search.
+/// Letter case in content search, quoted words, and globs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchCase {

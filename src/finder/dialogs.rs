@@ -43,7 +43,7 @@ fn search_engine_controls(
 ) -> impl IntoElement {
     let search = finder.config.search.clone();
     type Field = fn(&mut fffinder_core::SearchSettings) -> &mut bool;
-    let switches: [(&'static str, &'static str, bool, Field); 5] = [
+    let switches: [(&'static str, &'static str, bool, Field); 6] = [
         (
             "follow-symlinks",
             "Follow symbolic links",
@@ -74,6 +74,7 @@ fn search_engine_controls(
             search.preload_files,
             |s| &mut s.preload_files,
         ),
+        ("typos", "Allow typos", search.typos, |s| &mut s.typos),
     ];
     let case = match search.case {
         SearchCase::Smart => 0,
@@ -109,7 +110,7 @@ fn search_engine_controls(
             }),
         ))
         .child(setting_row(
-            "Letter case in content search",
+            "Letter case in searches",
             "Smart ignores case unless the text has a capital letter",
             ButtonGroup::new("search-case")
                 .small()
@@ -945,10 +946,14 @@ impl Finder {
         cx: &mut Context<Self>,
     ) {
         self.focus_before_dialog(window, cx);
-        const ROWS: [(&str, &str); 10] = [
+        const ROWS: [(&str, &str); 11] = [
             (
                 "budget report",
-                "Fuzzy words, typo tolerant; every word must match",
+                "Fuzzy words; every word must match (typos allowed in Settings)",
+            ),
+            (
+                "\"tax exemption\"",
+                "Quoted: the name has it as written, letters in a row",
             ),
             ("*.pdf  *.md", "Extensions (several are ORed)"),
             (

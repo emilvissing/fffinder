@@ -760,6 +760,8 @@ fn settings_search_engine(cx: &mut TestAppContext) {
     );
     ui.click("git-recency");
     assert!(!search(&ui).git_recency);
+    ui.click("typos");
+    assert!(!search(&ui).typos);
 
     ui.click("case-sensitive");
     assert_eq!(search(&ui).case, SearchCase::Sensitive);

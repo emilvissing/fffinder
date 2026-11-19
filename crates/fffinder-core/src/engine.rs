@@ -518,11 +518,21 @@ impl Engine {
         let limit = if req.limit == 0 { 500 } else { req.limit };
         let indexes = self.indexes_for(req.scope.as_deref());
         let indexing = indexes.iter().any(|r| r.status().scanning);
+        let settings = self.search_settings();
+        let case = settings.case;
+        // fff-search reads a quoted phrase as plain fuzzy words, which find
+        // every name that has it; the names are checked for it below.
+        let (query, exact) = split_quoted(&req.query);
+        let req = &SearchRequest {
+            query: fold_glob_case(&query, case),
+            ..req.clone()
+        };
+        let wide = !exact.is_empty();
 
         let parts: Vec<RootPart> = std::thread::scope(|s| {
             let handles: Vec<_> = indexes
                 .iter()
-                .map(|root| s.spawn(move || self.search_root(root, req, limit)))
+                .map(|root| s.spawn(move || self.search_root(root, req, limit, wide)))
                 .collect();
             handles.into_iter().filter_map(|h| h.join().ok()).collect()
         });
@@ -544,8 +554,18 @@ impl Engine {
             total_matched += apps.len();
             raw.extend(apps);
         }
+        if wide {
+            raw.retain(|hit| {
+                let name = display_name(&hit.path);
+                exact
+                    .iter()
+                    .all(|phrase| contains_phrase(&name, phrase, case))
+            });
+            total_matched = raw.len();
+        }
         // Typo-tolerant matches are a fallback: when some results contain every
-        // word as an in-order subsequence (fzf-style), keep only those.
+        // word as an in-order subsequence (fzf-style), keep only those. With
+        // typos turned off, they're never kept.
         let base = req.scope.as_deref();
         let strict = |hit: &RawHit| {
             let shown = base
@@ -555,7 +575,7 @@ impl Engine {
                 .to_lowercase();
             words.iter().all(|w| is_subsequence(w, &shown))
         };
-        if !words.is_empty() && raw.iter().any(&strict) {
+        if !words.is_empty() && (!settings.typos || raw.iter().any(&strict)) {
             raw.retain(strict);
         }
         for hit in &mut raw {
@@ -580,7 +600,15 @@ impl Engine {
         }
     }
 
-    fn search_root(&self, root: &RootIndex, req: &SearchRequest, limit: usize) -> RootPart {
+    /// Search one root. `wide` fetches as many candidates as a one-letter
+    /// search does, for a filter the results go through afterwards.
+    fn search_root(
+        &self,
+        root: &RootIndex,
+        req: &SearchRequest,
+        limit: usize,
+        wide: bool,
+    ) -> RootPart {
         let mut part = RootPart::default();
         let Ok(guard) = root.picker.read() else {
             return part;
@@ -634,7 +662,7 @@ impl Engine {
 
         // fff ignores one-character words, so over-fetch and filter by name.
         // Over-fetch so the re-rank and package filter have candidates to work with.
-        let fetch = if single_char || (scope_rel.is_some() && scope_glob.is_none()) {
+        let fetch = if wide || single_char || (scope_rel.is_some() && scope_glob.is_none()) {
             limit.max(20_000)
         } else {
             (limit * 4).max(2_000)
@@ -1532,6 +1560,132 @@ fn fuzzy_text(query: &str) -> String {
         .join(" ")
 }
 
+/// Take the quoted phrases out of a name search, `"tax exemption"` and the
+/// like. A quote left open runs to the end, so typing one narrows the results
+/// right away.
+///
+/// # Arguments
+///
+/// * `query` - What was typed in the search field
+///
+/// # Returns
+///
+/// The query with each phrase's words left unquoted, for fff-search, and the
+/// phrases each name must contain
+fn split_quoted(query: &str) -> (String, Vec<String>) {
+    let mut rest = String::new();
+    let mut phrases = Vec::new();
+    let mut parts = query.split('"');
+    rest.push_str(parts.next().unwrap_or_default());
+    for (i, part) in parts.enumerate() {
+        if i % 2 == 0 {
+            let phrase = part.trim();
+            if !phrase.is_empty() {
+                phrases.push(phrase.to_string());
+                // Only words fff-search reads as fuzzy text, not as a glob,
+                // folder, or exclusion.
+                rest.push(' ');
+                rest.push_str(&fuzzy_text(phrase));
+                rest.push(' ');
+            }
+        } else {
+            rest.push_str(part);
+        }
+    }
+    (
+        rest.split_whitespace().collect::<Vec<_>>().join(" "),
+        phrases,
+    )
+}
+
+/// Whether letter case is ignored for `text` under `case`.
+fn ignores_case(case: SearchCase, text: &str) -> bool {
+    match case {
+        SearchCase::Smart => !text.chars().any(char::is_uppercase),
+        SearchCase::Sensitive => false,
+        SearchCase::Insensitive => true,
+    }
+}
+
+/// Whether `name` has `phrase` in it, letters in a row.
+///
+/// # Arguments
+///
+/// * `name` - A file or folder name
+/// * `phrase` - A quoted phrase from the search
+/// * `case` - The letter case setting
+fn contains_phrase(name: &str, phrase: &str, case: SearchCase) -> bool {
+    match ignores_case(case, phrase) {
+        true => name.to_lowercase().contains(&phrase.to_lowercase()),
+        false => name.contains(phrase),
+    }
+}
+
+/// Make the globs in a name search follow the letter case setting.
+/// fff-search matches globs letter for letter, so where case is ignored each
+/// letter outside a `[...]` set becomes a set of both cases: `*Tax*` turns
+/// into `*[tT][aA][xX]*`. Extensions such as `*.pdf` are left alone.
+///
+/// # Arguments
+///
+/// * `query` - The search, after quoted phrases are taken out
+/// * `case` - The letter case setting
+fn fold_glob_case(query: &str, case: SearchCase) -> String {
+    query
+        .split_whitespace()
+        .map(|token| {
+            let body = token.strip_prefix('!').unwrap_or(token);
+            let is_glob = body.contains(['*', '?', '[', '{']);
+            let is_extension = body
+                .strip_prefix("*.")
+                .is_some_and(|ext| !ext.is_empty() && ext.chars().all(char::is_alphanumeric));
+            match is_glob && !is_extension && ignores_case(case, body) {
+                true => fold_case(token),
+                false => token.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Turn each letter of a glob outside `[...]` and escapes into `[xX]`.
+fn fold_case(glob: &str) -> String {
+    let mut out = String::with_capacity(glob.len() * 2);
+    let mut in_set = false;
+    let mut chars = glob.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                out.push(c);
+                out.extend(chars.next());
+            }
+            '[' if !in_set => {
+                in_set = true;
+                out.push(c);
+            }
+            ']' if in_set => {
+                in_set = false;
+                out.push(c);
+            }
+            _ if !in_set => {
+                let mut lower = c.to_lowercase();
+                let mut upper = c.to_uppercase();
+                match (lower.next(), lower.next(), upper.next(), upper.next()) {
+                    (Some(l), None, Some(u), None) if l != u => {
+                        out.push('[');
+                        out.push(l);
+                        out.push(u);
+                        out.push(']');
+                    }
+                    _ => out.push(c),
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Greedy case-insensitive subsequence match of `needle` in `name`, for highlighting.
 pub fn highlight(name: &str, needle: &str) -> Vec<(usize, usize)> {
     let needle: Vec<char> = needle
@@ -1784,6 +1938,145 @@ mod tests {
                 .get(&dir.join("inner/deep")),
             Some(&5)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quoted_phrases_come_out_of_the_query() {
+        assert_eq!(
+            split_quoted(r#""tax exemption" *.sql"#),
+            ("tax exemption *.sql".into(), vec!["tax exemption".into()])
+        );
+        assert_eq!(
+            split_quoted(r#"report "Q3"#),
+            ("report Q3".into(), vec!["Q3".into()]),
+            "an open quote runs to the end"
+        );
+        assert_eq!(
+            split_quoted(r#"a "" b"#),
+            ("a b".into(), Vec::<String>::new())
+        );
+        assert_eq!(
+            split_quoted("plain"),
+            ("plain".into(), Vec::<String>::new())
+        );
+    }
+
+    #[test]
+    fn globs_follow_the_letter_case_setting() {
+        use SearchCase::*;
+        assert_eq!(
+            fold_glob_case("*tax* budget", Insensitive),
+            "*[tT][aA][xX]* budget"
+        );
+        assert_eq!(
+            fold_glob_case("*Tax*", Smart),
+            "*Tax*",
+            "a capital asks for case"
+        );
+        assert_eq!(fold_glob_case("*tax*", Smart), "*[tT][aA][xX]*");
+        assert_eq!(fold_glob_case("*tax*", Sensitive), "*tax*");
+        assert_eq!(fold_glob_case("*.pdf !*.log", Insensitive), "*.pdf !*.log");
+        assert_eq!(
+            fold_glob_case(r"!src/[ab]x\*", Insensitive),
+            r"![sS][rR][cC]/[ab][xX]\*"
+        );
+    }
+
+    #[test]
+    fn quoted_words_match_names_letter_for_letter() {
+        let dir = std::env::temp_dir().join(format!("fff-exact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("token/exemption/coding")).unwrap();
+        std::fs::write(dir.join("TaxExemptionCertificate.object"), "").unwrap();
+        std::fs::write(dir.join("TAX_EXEMPTION_CODE.sql"), "").unwrap();
+        // Every letter of "taxexemptionc", in order, across the path.
+        std::fs::write(dir.join("token/exemption/coding/TaxHandler.java"), "").unwrap();
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let names = |query: &str| {
+            let mut names: Vec<String> = engine
+                .search(&SearchRequest {
+                    query: query.into(),
+                    files_only: true,
+                    limit: 50,
+                    ..Default::default()
+                })
+                .hits
+                .into_iter()
+                .map(|h| h.entry.name)
+                .collect();
+            names.sort();
+            names
+        };
+        let set_case = |case| {
+            let mut settings = engine.search_settings();
+            settings.case = case;
+            engine.set_search_settings(settings);
+        };
+
+        assert!(names("taxexemptionc").len() > 1, "fuzzy finds the gaps too");
+        assert_eq!(
+            names(r#""taxexemptionc""#),
+            ["TaxExemptionCertificate.object"]
+        );
+        assert_eq!(
+            names(r#""tax_exemption" *.sql"#),
+            ["TAX_EXEMPTION_CODE.sql"]
+        );
+        assert_eq!(
+            names(r#""TaxExemption""#),
+            ["TaxExemptionCertificate.object"]
+        );
+        set_case(SearchCase::Sensitive);
+        assert_eq!(names(r#""taxexemption""#), Vec::<String>::new());
+        assert_eq!(names("*TaxEx*"), ["TaxExemptionCertificate.object"]);
+        assert_eq!(names("*taxex*"), Vec::<String>::new());
+        set_case(SearchCase::Insensitive);
+        assert_eq!(names("*taxex*"), ["TaxExemptionCertificate.object"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typos_can_be_turned_off() {
+        let dir = std::env::temp_dir().join(format!("fff-typos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("budget.txt"), "").unwrap();
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let names = |query: &str| -> Vec<String> {
+            engine
+                .search(&SearchRequest {
+                    query: query.into(),
+                    files_only: true,
+                    limit: 50,
+                    ..Default::default()
+                })
+                .hits
+                .into_iter()
+                .map(|h| h.entry.name)
+                .collect()
+        };
+        // "bduget" isn't "budget"'s letters in order: only a typo match.
+        assert_eq!(names("bduget"), ["budget.txt"], "typos are allowed");
+        let mut settings = engine.search_settings();
+        settings.typos = false;
+        engine.set_search_settings(settings);
+        assert_eq!(names("bduget"), Vec::<String>::new());
+        assert_eq!(names("bdgt"), ["budget.txt"], "gaps still match");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

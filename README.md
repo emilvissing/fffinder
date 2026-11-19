@@ -103,14 +103,15 @@ On Linux, a big home folder can use up the inotify watch limit. Raise it with `s
 
 ### Search syntax
 
-| Type            | Meaning                                                 |
-| --------------- | ------------------------------------------------------- |
-| `budget report` | Fuzzy words, typo tolerant. Every word must match.      |
-| `*.pdf *.md`    | Extensions. Several are ORed.                           |
-| `src/**/*.rs`   | A glob against the path inside the search location.     |
-| `/notes/ todo`  | Only paths inside a folder named `notes`.               |
-| `git:modified`  | Git status: `modified`, `untracked`, `staged`, `clean`. |
-| `!*.log !test`  | Exclude an extension, glob, folder, or text.            |
+| Type              | Meaning                                                 |
+| ----------------- | ------------------------------------------------------- |
+| `budget report`   | Fuzzy words, typo tolerant. Every word must match.      |
+| `"tax exemption"` | Quoted words, matched in the name as written.           |
+| `*.pdf *.md`      | Extensions. Several are ORed.                           |
+| `src/**/*.rs`     | A glob against the path inside the search location.     |
+| `/notes/ todo`    | Only paths inside a folder named `notes`.               |
+| `git:modified`    | Git status: `modified`, `untracked`, `staged`, `clean`. |
+| `!*.log !test`    | Exclude an extension, glob, folder, or text.            |
 
 Cmd+/ shows the full syntax in the app.
 

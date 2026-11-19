@@ -2,6 +2,18 @@
 
 This file lists every notable change to fffinder. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Quoted words in a name search, such as `"tax exemption"`, match only names that have them as written, letters in a row. Unquoted words still match fuzzily across the whole path, so `taxexemptionc` can find a file whose folders spell it out between them.
+
+- An **Allow typos** switch in Settings › Search engine. Turned off, a name search never shows typo-tolerant matches, even when nothing else matches. It's on by default, as before.
+
+### Changed
+
+- Globs in a name search follow the letter case setting, now called **Letter case in searches**. Before, `*taxex*` never found `TaxExemption.object`, even with case set to ignore.
+
 ## [0.5.1] - 2026-11-09
 
 This release keeps every folder on screen up to date with files other programs add, remove, or rename, including folders opened in place in the list and the column view's panes. The sidebar's tree also scrolls sideways when it's wider than the sidebar.
