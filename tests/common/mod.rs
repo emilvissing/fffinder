@@ -350,6 +350,17 @@ impl<'a> Ui<'a> {
         });
     }
 
+    /// Only the second click of a double-click, on the middle of `id`. The
+    /// first went to what was at that spot before `id` was, like the button
+    /// that opened the dialog `id` is in.
+    pub fn second_click(&mut self, id: impl Into<ElementId>) {
+        let id = id.into();
+        let position = self.snapshot(id.clone()).bounds().center();
+        self.step(format!("second click on {id:?}"), |window, cx| {
+            click_point_as(window, position, MouseButton::Left, 2, cx)
+        });
+    }
+
     pub fn right_click(&mut self, id: impl Into<ElementId>) {
         let id = id.into();
         self.step(format!("right-click {id:?}"), |window, cx| {
@@ -770,6 +781,17 @@ impl<'a> Ui<'a> {
 
 /// A real mouse click at a window position, through native hit testing.
 fn click_point(window: &mut Window, position: Point<Pixels>, button: MouseButton, cx: &mut App) {
+    click_point_as(window, position, button, 1, cx)
+}
+
+/// The same, counted as the `click_count`th click in a row at that position.
+fn click_point_as(
+    window: &mut Window,
+    position: Point<Pixels>,
+    button: MouseButton,
+    click_count: usize,
+    cx: &mut App,
+) {
     window.render_frame(cx);
     window.dispatch_event(
         MouseMoveEvent {
@@ -786,7 +808,7 @@ fn click_point(window: &mut Window, position: Point<Pixels>, button: MouseButton
             button,
             position,
             modifiers: Default::default(),
-            click_count: 1,
+            click_count,
             first_mouse: false,
         }
         .to_platform_input(),
@@ -798,7 +820,7 @@ fn click_point(window: &mut Window, position: Point<Pixels>, button: MouseButton
             button,
             position,
             modifiers: Default::default(),
-            click_count: 1,
+            click_count,
         }
         .to_platform_input(),
         cx,

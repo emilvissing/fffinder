@@ -975,6 +975,173 @@ fn closing_search_syntax_gives_the_keyboard_back_to_the_search_field(cx: &mut Te
 }
 
 #[gpui_kit::test]
+fn a_click_on_a_search_syntax_example_searches_for_it(cx: &mut TestAppContext) {
+    let fx = Fixture::new("syntax-example");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let query = |ui: &Ui| ui.read(|f| f.query().to_string());
+    // The row of `*.pdf  *.md`, and the Kind menu's, which is no example.
+    let (extensions, kind_menu) = (("syntax-row", 2usize), ("syntax-row", 9usize));
+    ui.press(&cmd("/"));
+    assert!(ui.dialog_open());
+    assert_eq!(ui.snapshot(extensions).selected(), Some(false));
+
+    ui.click(extensions);
+    assert!(ui.dialog_open(), "the table stays, for the next example");
+    assert_eq!(query(&ui), "*.pdf *.md", "with one space, as it's typed");
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert_eq!(
+        ui.snapshot(extensions).selected(),
+        Some(true),
+        "the row is marked as the one searched for"
+    );
+
+    // The second click of a double-click finds the same row, not a result
+    // to open.
+    ui.double_click(extensions);
+    assert_eq!(query(&ui), "*.pdf *.md");
+    assert!(ui.system_calls().is_empty());
+    assert_eq!(ui.folder().as_deref(), Some(fx.dir.as_path()));
+
+    ui.click(kind_menu);
+    assert_eq!(query(&ui), "*.pdf *.md");
+    assert_eq!(ui.snapshot(kind_menu).selected(), None);
+
+    // The keyboard goes back to the files, where it was, and they are now
+    // the results.
+    ui.click("help-done");
+    assert!(!ui.dialog_open());
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+
+    // The mark is for what's being searched for, so the table has it the
+    // next time it opens.
+    ui.press(&cmd("/"));
+    assert_eq!(ui.snapshot(extensions).selected(), Some(true));
+}
+
+#[gpui_kit::test]
+fn a_double_click_on_what_opens_search_syntax_tries_no_example(cx: &mut TestAppContext) {
+    let fx = Fixture::new("syntax-example-opener");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let query = |ui: &Ui| ui.read(|f| f.query().to_string());
+    let extensions = ("syntax-row", 2usize);
+    ui.click("search");
+    ui.type_text("atlas");
+
+    // In a small window the table opens over the (i) that was clicked for
+    // it, and the second click of a double-click there finds a row under
+    // it. That's no click on the example: the words in the field stay.
+    ui.click("search-help");
+    ui.second_click(extensions);
+    assert!(ui.dialog_open());
+    assert_eq!(query(&ui), "atlas");
+    assert_eq!(ui.snapshot(extensions).selected(), Some(false));
+
+    // A click of its own is one.
+    ui.click(extensions);
+    assert_eq!(query(&ui), "*.pdf *.md");
+}
+
+#[gpui_kit::test]
+fn a_search_syntax_example_takes_the_place_of_a_contents_search(cx: &mut TestAppContext) {
+    let fx = Fixture::new("syntax-example-contents");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("plain");
+    ui.click("by-contents");
+    assert_eq!(ui.names(), ["notes.txt"], "the file with the word in it");
+
+    // The table is about names, so that's what an example searches. It
+    // doesn't sit out the pause a search waits for after a key: the answer
+    // comes without any time passing.
+    ui.click("search-help");
+    ui.click_without_settling(("syntax-row", 2usize));
+    ui.cx.run_until_parked();
+    assert!(!ui.read(|f| f.searches_contents()));
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+
+    // The search field has the example, to go on typing from.
+    ui.click("help-done");
+    ui.type_text(" *.csv");
+    assert_eq!(ui.read(|f| f.query().to_string()), "*.pdf *.md *.csv");
+    let mut names = ui.names();
+    names.sort();
+    assert_eq!(names, ["Budget.csv", "Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn search_syntax_marks_no_example_during_a_contents_search(cx: &mut TestAppContext) {
+    let fx = Fixture::new("syntax-example-in-files");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let extensions = ("syntax-row", 2usize);
+    ui.click("search");
+    ui.type_text("*.pdf *.md");
+    ui.click("by-contents");
+    assert!(ui.names().is_empty(), "no file has these words in it");
+
+    // Searched for in files, the words are text to find, not the example.
+    ui.click("search-help");
+    assert_eq!(ui.snapshot(extensions).selected(), Some(false));
+
+    // A click searches for the same words by name, as the example.
+    ui.click(extensions);
+    assert!(!ui.read(|f| f.searches_contents()));
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert_eq!(ui.snapshot(extensions).selected(), Some(true));
+}
+
+#[gpui_kit::test]
+fn undo_in_the_search_field_brings_back_what_an_example_replaced(cx: &mut TestAppContext) {
+    let fx = Fixture::new("syntax-example-undo");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let query = |ui: &Ui| ui.read(|f| f.query().to_string());
+    let (extensions, exclusions) = (("syntax-row", 2usize), ("syntax-row", 7usize));
+    ui.click("search");
+    ui.type_text("atlas");
+    ui.click("search-help");
+    ui.click(extensions);
+    ui.click(exclusions);
+    // A click on the example that's already there changes nothing, so
+    // there's no step of its own to undo.
+    ui.click(exclusions);
+    assert_eq!(query(&ui), "!*.log !test");
+    ui.click("help-done");
+
+    ui.press(&cmd("z"));
+    assert_eq!(query(&ui), "*.pdf *.md", "the example before");
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    ui.press(&cmd("z"));
+    assert_eq!(query(&ui), "atlas", "what was typed");
+    let mut names = ui.names();
+    names.sort();
+    assert_eq!(names, ["Project Atlas.txt", "atlas"]);
+}
+
+#[gpui_kit::test]
+fn search_syntax_says_whether_typos_are_allowed(cx: &mut TestAppContext) {
+    let fx = Fixture::new("syntax-typos");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let fuzzy_words = |ui: &mut Ui| {
+        let row = ui.snapshot(("syntax-row", 0usize));
+        row.label().expect("the row says what it shows").to_string()
+    };
+    ui.press(&cmd("/"));
+    assert_eq!(
+        fuzzy_words(&mut ui),
+        "budget report: Fuzzy words; every word must match (typos allowed)"
+    );
+    ui.click("help-done");
+
+    ui.update(|f, _, cx| f.update_search_settings(|s| s.typos = false, cx));
+    ui.press(&cmd("/"));
+    assert_eq!(
+        fuzzy_words(&mut ui),
+        "budget report: Fuzzy words; every word must match (typos off in Settings)"
+    );
+}
+
+#[gpui_kit::test]
 fn a_click_in_the_other_panes_scope_bar_takes_the_keyboard_to_its_files(cx: &mut TestAppContext) {
     let fx = Fixture::new("scope-bar-split");
     let mut ui = Ui::open_with(

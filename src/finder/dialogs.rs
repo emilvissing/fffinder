@@ -7,6 +7,7 @@ use crate::model::Location;
 use crate::theme::ui;
 use fffinder_core::terminals::{self, CUSTOM, Platform, Terminal};
 use fffinder_core::{Appearance, FileEntry, SearchCase, SidebarMode, config, listing};
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogClose, DialogFooter};
@@ -946,65 +947,138 @@ impl Finder {
         cx: &mut Context<Self>,
     ) {
         self.focus_before_dialog(window, cx);
-        const ROWS: [(&str, &str); 11] = [
-            (
-                "budget report",
-                "Fuzzy words; every word must match (typos allowed in Settings)",
-            ),
-            (
-                "\"tax exemption\"",
-                "Quoted: the name has it as written, letters in a row",
-            ),
-            ("*.pdf  *.md", "Extensions (several are ORed)"),
-            (
-                "src/**/*.rs",
-                "Glob against the path inside the search location",
-            ),
-            ("/notes/ todo", "Only paths inside a folder named “notes”"),
-            ("main src/", "Folder filter written at the end"),
-            (
-                "git:modified",
-                "Git status: modified, untracked, staged, clean",
-            ),
-            (
-                "!*.log  !test",
-                "Exclude an extension, glob, folder, or text",
-            ),
-            ("main.rs:42", "Line suffix, ignored for matching"),
-            ("Kind menu", "Restrict to folders, documents, images, …"),
-            ("Contents", "Search inside files instead of names"),
-        ];
-        window.open_dialog(cx, move |dialog, _, cx| {
+        let view = cx.entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
             let theme = cx.theme();
+            let (hover, searched_bg) = (theme.list_hover, theme.primary.opacity(0.14));
+            let finder = view.read(cx);
+            let fuzzy = if finder.config.search.typos {
+                "Fuzzy words; every word must match (typos allowed)"
+            } else {
+                "Fuzzy words; every word must match (typos off in Settings)"
+            };
+            // What to type, what it means, and whether it's an example that
+            // a click searches for. The last two rows name controls instead.
+            let rows = [
+                ("budget report", fuzzy, true),
+                (
+                    "\"tax exemption\"",
+                    "Quoted: the name has it as written, letters in a row",
+                    true,
+                ),
+                ("*.pdf  *.md", "Extensions (several are ORed)", true),
+                (
+                    "src/**/*.rs",
+                    "Glob against the path inside the search location",
+                    true,
+                ),
+                (
+                    "/notes/ todo",
+                    "Only paths inside a folder named “notes”",
+                    true,
+                ),
+                ("main src/", "Folder filter written at the end", true),
+                (
+                    "git:modified",
+                    "Git status: modified, untracked, staged, clean",
+                    true,
+                ),
+                (
+                    "!*.log  !test",
+                    "Exclude an extension, glob, folder, or text",
+                    true,
+                ),
+                ("main.rs:42", "Line suffix, ignored for matching", true),
+                (
+                    "Kind menu",
+                    "Restrict to folders, documents, images, …",
+                    false,
+                ),
+                ("Contents", "Search inside files instead of names", false),
+            ];
+            let rows = rows
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (syntax, meaning, example))| {
+                    h_flex()
+                        .id(("syntax-row", ix))
+                        .gap(ui(14.))
+                        .px(ui(6.))
+                        .py(ui(3.))
+                        .rounded(ui(4.))
+                        .aria_label(SharedString::from(format!("{syntax}: {meaning}")))
+                        .when(example, |row| {
+                            // The results are half hidden behind the dialog, so the
+                            // row itself shows that it's being searched for.
+                            let searched = !finder.search_contents
+                                && syntax
+                                    .split_whitespace()
+                                    .eq(finder.query.split_whitespace());
+                            row.cursor_pointer()
+                                .aria_selected(searched)
+                                .when(searched, |row| row.bg(searched_bg))
+                                .when(!searched, |row| row.hover(move |s| s.bg(hover)))
+                                .on_click(window.listener_for(
+                                    &view,
+                                    move |this: &mut Finder, event: &ClickEvent, window, cx| {
+                                        // In a small window the dialog opens over the
+                                        // (i) that was clicked for it, and the second
+                                        // click of a double-click there lands on a row.
+                                        // Only a click of its own tries an example.
+                                        if event.click_count() == 1 {
+                                            this.search_for_example(syntax, window, cx)
+                                        }
+                                    },
+                                ))
+                        })
+                        .child(
+                            div()
+                                .w(ui(150.))
+                                .font_family(theme.mono_font_family.clone())
+                                .text_color(theme.primary)
+                                .child(syntax),
+                        )
+                        .child(div().flex_1().child(meaning))
+                        .test_support()
+                });
             dialog
                 .title("Search Syntax")
-                .w(ui(560.))
+                .w(ui(580.))
                 .child(
                     v_flex()
                         .gap(ui(2.))
                         .text_size(ui(12.))
-                        .children(ROWS.iter().map(|(syntax, meaning)| {
-                            h_flex()
-                                .gap(ui(14.))
-                                .py(ui(3.))
-                                .child(
-                                    div()
-                                        .w(ui(150.))
-                                        .font_family(theme.mono_font_family.clone())
-                                        .text_color(theme.primary)
-                                        .child(*syntax),
-                                )
-                                .child(div().flex_1().child(*meaning))
-                        }))
+                        .children(rows)
                         .child(
                             div()
                                 .pt(ui(10.))
                                 .text_color(theme.muted_foreground)
-                                .child("Searches run 50 ms after you stop typing; Return searches now and Down Arrow moves into the results. Hidden files are only indexed inside git repositories."),
+                                .child("Click an example to try it. Searches run 50 ms after you stop typing; Return searches now and Down Arrow moves into the results. Hidden files are only indexed inside git repositories."),
                         ),
                 )
                 .footer(DialogFooter::new().child(DialogClose::new().child(Button::new("help-done").primary().label("Done"))))
         });
+    }
+
+    /// Search for an example from the Search Syntax table, in place of
+    /// whatever was being searched for.
+    fn search_for_example(&mut self, example: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // The table sets an example's parts apart with two spaces; one is
+        // what gets typed.
+        let query = example.split_whitespace().collect::<Vec<_>>().join(" ");
+        // The table is about names: searched for in files' contents, an
+        // example would only be text to find.
+        self.set_search_contents(false, cx);
+        // An edit, so the field keeps its history, which `set_value` would
+        // clear: Undo there brings back the words the example took the place
+        // of. The edit's change event comes after the words are set here, so
+        // the search doesn't wait the 50 ms it does for typing.
+        self.search_input.update(cx, |field, cx| {
+            if field.value() != query {
+                field.replace_all(query.clone(), window, cx);
+            }
+        });
+        self.set_query(query, true, cx);
     }
 }
 

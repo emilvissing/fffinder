@@ -359,7 +359,7 @@ While a search is active, the scope bar shows the controls below. A click on Thi
 | `!*.log !test` | Exclude an extension, glob, folder, or text. |
 | `main.rs:42` | A line suffix, ignored for matching. |
 
-Cmd+/ shows this table in the app.
+Cmd+/ shows this table in the app. Click an example there to try it: it replaces what's in the search field and is searched for right away, by name even if Contents was on. Undo in the search field (Cmd+Z there) brings back what it replaced. The table stays open so you can try one example after another, with the results changing behind it, and it highlights the row of the example that's being searched for. An example is an ordinary search, so it shows No Results when nothing in your search locations fits it, or when the kind, the scope, or a filter leaves out what does. The first row says whether typos are allowed, as **Allow typos** is set.
 
 Unquoted words match fzf-style: their letters must appear in order somewhere in the path inside the search location, with gaps allowed, folder names included. So `taxexemptionc` also finds `token/exemption/coding/TaxHandler.java`. Quote a word to match it only in the name, letters in a row.
 
