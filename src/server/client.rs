@@ -135,15 +135,19 @@ pub fn status(endpoint: &Endpoint) -> io::Result<Value> {
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 
-/// Ask the running window to open `path` and search `query`. Returns false
-/// when no window answers, so the caller starts one.
-pub fn forward_open(path: Option<&Path>, query: Option<&str>) -> bool {
+/// Ask the running window to open `path` and search `query`, only in that
+/// folder with `here`. Returns false when no window answers, so the caller
+/// starts one.
+pub fn forward_open(path: Option<&Path>, query: Option<&str>, here: bool) -> bool {
     let Some(endpoint) = discover() else {
         return false;
     };
     if status(&endpoint).is_err() {
         return false;
     }
-    let body = json!({ "path": path, "query": query });
+    let mut body = json!({ "path": path, "query": query });
+    if here {
+        body["in_folder"] = json!(true);
+    }
     json(&endpoint, "POST", "/v1/open", Some(&body)).is_ok()
 }

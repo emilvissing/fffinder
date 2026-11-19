@@ -58,6 +58,7 @@ fffinder [PATH] [OPTIONS]
   -s, --startup-path PATH
                      Folder to open, same as [PATH] (also --startup-path=PATH)
   -q, --query TEXT   Start with this search (also --query=TEXT)
+      --here         Search only in the folder opened
       --pick         Choose files and print them as JSON to stdout
       --multiple     With --pick, allow choosing several items (also -m)
       --detach       Start in the background and return right away
@@ -72,9 +73,10 @@ fffinder [PATH] [OPTIONS]
 - `--startup-path` (`-s`) is another way to give PATH. Give one or the other, not both.
 - A PATH that is a file opens its folder.
 - With no PATH, run from a terminal, the window opens the folder you ran it from. Started from the Dock, Finder, Explorer, or a desktop menu, it opens the folder you last had open, or your home folder if that folder is gone.
-- If fffinder is already running, a second launch hands its folder (PATH, or the folder it was run from in a terminal) and `--query` to the running copy, which shows them in its window, and then exits. There is always one app and one index. `--pick` windows are separate and never hand off.
+- If fffinder is already running, a second launch hands its folder (PATH, or the folder it was run from in a terminal), `--query`, and `--here` to the running copy, which shows them in its window, and then exits. There is always one app and one index. `--pick` windows are separate and never hand off.
 - On macOS, fffinder keeps running after you close its last window, like Finder, so the index stays warm for Nushell. Clicking the Dock icon opens a new window. On Linux and Windows, closing the last window quits.
 - The app icon shows everywhere: on macOS, fffinder puts it in the Dock itself when it runs outside `fffinder.app` (as `cargo install` and `scripts/install.nu` install it). Windows takes it from the executable. On Linux, X11 gets it from fffinder, and Wayland from the desktop entry that `scripts/install.nu` installs.
+- `--here` starts with **Search Only in "Folder name"** on (see [Toolbar](#toolbar)): `--query`, and anything you type later, searches only the folder the window opens and everything inside it, instead of every search location. `fffinder ~/src --query readme --here` finds the READMEs under `~/src`. It works without `--query` and with `--pick`. It stays on in that tab until you click the button, so a later launch without `--here` that the same tab shows still searches only its folder.
 - `--detach` starts fffinder in the background and returns at once. `fff gui` uses it.
 - `--pick` turns the window into a file chooser. See [Choosing files for scripts](#choosing-files-for-scripts).
 - `--term` shows the window inside the terminal instead. See [In a terminal](#in-a-terminal).
@@ -182,7 +184,7 @@ From left to right, with everything showing:
 | Sort and View Options | The sort menu. See [Sorting and hidden files](#sorting-and-hidden-files). |
 | Nushell | The Nushell menu. See [Menus](#menus). |
 | Actions (…) | File commands and dialogs. See [Menus](#menus). |
-| Search Only in "Folder name" | Searches only the folder the window shows, and everything inside it, instead of every search location. Click it again to search This Computer. It's the same choice as the scope bar's, so you can make it before you type. It's off in Recents and other results that aren't one folder. |
+| Search Only in "Folder name" | Searches only the folder the window shows, and everything inside it, instead of every search location. Click it again to search This Computer. It's the same choice as the scope bar's, so you can make it before you type. It's off in Recents and other results that aren't one folder. `--here` on the command line starts with it on. |
 | Search field | Search as you type. The clear button ends the search. |
 | Minimize, Maximize, Close | Linux only, when the window manager doesn't draw a title bar, as on GNOME with Wayland. The toolbar is then the title bar, and right-clicking empty toolbar space shows the window menu. |
 
@@ -326,7 +328,7 @@ Type in the search field (Cmd+F) to search. Searches start 50 ms after you stop 
 
 From the first letter, the file area shows placeholders in place of the items it was showing, until the results are in. It does the same when you switch between Name and Contents. After that, the results stay while a search runs again, as when you type on, and so does No Results. A contents search can take seconds, so while one runs again No Results reads Searching… instead.
 
-To search one part of the tree, open its folder and turn on **Search Only in "Folder name"**, the folder button left of the search field, before or while you search.
+To search one part of the tree, open its folder and turn on **Search Only in "Folder name"**, the folder button left of the search field, before or while you search. From a terminal, `--here` does the same: `fffinder ~/src --query readme --here`.
 
 While a search is active, the scope bar shows:
 
@@ -732,11 +734,12 @@ If the terminal saved in Settings isn't installed, Automatic's choice is used an
 
 ## Choosing files for scripts
 
-`fffinder --pick [PATH] [--multiple] [--query TEXT]` opens a chooser window. The picker bar at the bottom explains what to do and has **Cancel** and **Choose** buttons. "Choose" becomes "Choose N Items" with several selected.
+`fffinder --pick [PATH] [--multiple] [--query TEXT] [--here]` opens a chooser window. The picker bar at the bottom explains what to do and has **Cancel** and **Choose** buttons. "Choose" becomes "Choose N Items" with several selected.
 
 - Return, double-click on a file, **Choose**, or "Choose" or "Choose Items" in the item menu prints a JSON array of absolute paths to stdout and exits 0.
 - Double-clicking a folder opens it.
 - Escape or **Cancel** exits 1.
+- With `--here`, searches in the chooser find only what's in the folder it shows, as with **Search Only in "Folder name"** on. That narrows what a search shows, not what is indexed: a chooser indexes every search location itself each time it opens.
 
 `fff pick` in Nushell wraps it.
 
@@ -1127,7 +1130,7 @@ fff keybindings
 
 Most commands ask the running fffinder over its [control socket](#the-control-socket), so nothing is scanned in the shell and results come from the window's live index. When no window is running they fail with "no fffinder window is running"; `fff gui` starts one. `fff show` starts it for you.
 
-The module finds the app through `$env.FFFINDER_BIN`, then `PATH`, then `/Applications/fffinder.app` and `~/Applications/fffinder.app`, then a release or debug build in the repository.
+The module finds the app through `$env.FFFINDER_BIN`, then `PATH`, then `/Applications/fffinder.app` and `~/Applications/fffinder.app`, then a release or debug build in the repository. An fffinder older than the module doesn't know the module's newer options, such as `--here`, and the commands that start it then fail with its message, "unknown option: --here".
 
 | Command | What it does |
 | --- | --- |
@@ -1139,13 +1142,13 @@ The module finds the app through `$env.FFFINDER_BIN`, then `PATH`, then `/Applic
 | `fff watch [pattern]` | Streams file changes from the index. `--ignore (-i)` globs or path prefixes, and `--timeout (-t)` or `--max-events (-n)`; one of the two is required. |
 | `fff selection` | What is selected in the front window. `--all (-a)` returns everything it shows. |
 | `fff show` | Shows piped paths, `ls` or `glob` output, or any table with a `path` or `name` column in the window, like a search. `--title (-t)` names the results. |
-| `fff pick ...query` | Chooses files in a `--pick` window and returns the path, or nothing when cancelled. `--root (-r)` opens another folder, and `--multiple (-m)` allows several and always returns a list. |
-| `fff gui [path]` | Opens a window at a folder (default: the current one). `--query (-q)` starts a search. |
+| `fff pick ...query` | Chooses files in a `--pick` window and returns the path, or nothing when cancelled. `--root (-r)` opens another folder, and `--multiple (-m)` allows several and always returns a list. `--here` searches only in the folder the chooser opens. |
+| `fff gui [path]` | Opens a window at a folder (default: the current one). `--query (-q)` starts a search, and `--here` searches only in that folder. |
 | `fff open ...query` | Finds the best document match and opens it as structured data. |
-| `fff insert ...query` | Picks files and inserts them at the cursor as NUON. |
-| `fff cd ...query` | Picks a folder, or a file's folder, and changes to it. |
-| `fff edit ...query` | Picks a file and opens it in `$env.config.buffer_editor`, `$VISUAL`, `$EDITOR`, or `vi` (`notepad` on Windows). |
-| `fff keybindings` | Adds key bindings in emacs and vi modes: Ctrl+T runs `fff insert`, and Alt+C runs `fff cd`. `--insert-key` and `--cd-key` change the letters. |
+| `fff insert ...query` | Picks files and inserts them at the cursor as NUON. `--here` searches only in the current folder. |
+| `fff cd ...query` | Picks a folder, or a file's folder, and changes to it. `--here` searches only in the current folder. |
+| `fff edit ...query` | Picks a file and opens it in `$env.config.buffer_editor`, `$VISUAL`, `$EDITOR`, or `vi` (`notepad` on Windows). `--here` searches only in the current folder. |
+| `fff keybindings` | Adds key bindings in emacs and vi modes: Ctrl+T runs `fff insert`, and Alt+C runs `fff cd`. `--insert-key` and `--cd-key` change the letters, and `--here` has both search only in the current folder. |
 
 ## The control socket
 

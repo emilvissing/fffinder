@@ -1,11 +1,11 @@
 //! The control server over a real socket, against a fixture index: every
 //! endpoint's shape, errors, the token on TCP, and requests that need the
-//! window.
+//! window, also from a second launch of the program.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fffinder::server::{self, Endpoint, Options, UiRequest, client};
 use fffinder_core::{Engine, EngineOptions};
@@ -244,9 +244,17 @@ fn window_requests_reach_the_ui_thread() {
                         .send(Ok(json!({"shown": paths.len(), "missing": []})))
                         .unwrap();
                 }
-                UiRequest::Open { path, query, reply } => {
+                UiRequest::Open {
+                    path,
+                    query,
+                    in_folder,
+                    reply,
+                } => {
                     seen.push(format!("open {path:?} {query:?}"));
-                    reply.send(Err("no such folder".into())).unwrap();
+                    // The refusal says what was asked, for the checks below.
+                    reply
+                        .send(Err(format!("no such folder, in_folder={in_folder}")))
+                        .unwrap();
                 }
             }
         }
@@ -280,13 +288,97 @@ fn window_requests_reach_the_ui_thread() {
             .to_string()
             .contains("not an absolute path")
     );
-    let refused = client::json(&endpoint, "POST", "/v1/open", Some(&json!({"query": "x"})));
-    assert!(refused.unwrap_err().to_string().contains("no such folder"));
+    let open = |body: Value| {
+        client::json(&endpoint, "POST", "/v1/open", Some(&body))
+            .unwrap_err()
+            .to_string()
+    };
+    let refused = open(json!({"query": "x"}));
+    assert!(
+        refused.contains("no such folder, in_folder=false"),
+        "{refused}"
+    );
+    let refused = open(json!({"query": "x", "in_folder": true}));
+    assert!(refused.contains("in_folder=true"), "{refused}");
+    let refused = open(json!({"query": "x", "in_folder": null}));
+    assert!(refused.contains("in_folder=false"), "{refused}");
+    let bad = open(json!({"query": "x", "in_folder": "yes"}));
+    assert!(
+        bad.contains(r#"in_folder must be true or false, not "yes""#),
+        "{bad}"
+    );
     drop(server);
     drop(endpoint);
     // The channel closes once the server's threads let go of it.
     std::thread::sleep(Duration::from_millis(100));
     let _ = ui;
+}
+
+/// The real program, started while a window is running: it hands its folder,
+/// its search and `--here` to that window, and leaves without opening one.
+#[test]
+fn a_second_launch_hands_here_to_the_running_window() {
+    let fx = Fixture::new("second-launch");
+    let (tx, rx) = async_channel::unbounded::<UiRequest>();
+    // The second launch looks for the server in its data folder.
+    let data = fx.dir.join("data");
+    let options = Options {
+        run_dir: data.join("run"),
+        tcp: true,
+    };
+    let _server = server::start_with(fx.engine(false), Some(tx), options).unwrap();
+    let (asked_tx, asked) = std::sync::mpsc::channel();
+    // A stand-in for the window, which notes what it's asked to open.
+    std::thread::spawn(move || {
+        while let Ok(request) = rx.recv_blocking() {
+            if let UiRequest::Open {
+                path,
+                query,
+                in_folder,
+                reply,
+            } = request
+            {
+                let _ = asked_tx.send((path, query, in_folder));
+                let _ = reply.send(Ok(json!({"ok": true})));
+            }
+        }
+    });
+    let launch = |options: &[&str]| {
+        let mut second = std::process::Command::new(env!("CARGO_BIN_EXE_fffinder"))
+            .arg(fx.tree())
+            .args(options)
+            .env("FFFINDER_DATA_DIR", &data)
+            .env("FFFINDER_CONFIG_DIR", fx.dir.join("config"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        // A launch that finds no window to hand off to opens its own and
+        // stays, so it's given a while and then stopped.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let left = loop {
+            if let Some(status) = second.try_wait().unwrap() {
+                break status.success();
+            }
+            if Instant::now() > deadline {
+                let _ = second.kill();
+                let _ = second.wait();
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(left, "{options:?} handed off and left");
+        asked.try_recv().expect("the window was asked")
+    };
+
+    assert_eq!(
+        launch(&["--query", "atlas", "--here"]),
+        (Some(fx.tree()), Some("atlas".to_string()), true)
+    );
+    assert_eq!(
+        launch(&["--query", "atlas"]),
+        (Some(fx.tree()), Some("atlas".to_string()), false)
+    );
 }
 
 #[test]

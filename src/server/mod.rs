@@ -38,6 +38,8 @@ pub enum UiRequest {
     Open {
         path: Option<PathBuf>,
         query: Option<String>,
+        /// Search only in the folder the window then shows.
+        in_folder: bool,
         reply: Reply,
     },
 }
@@ -630,7 +632,21 @@ fn open(request: &Request, ctx: &Context) -> Result<Answer, Failure> {
         .get("query")
         .and_then(Value::as_str)
         .map(str::to_string);
-    ui(ctx, |reply| UiRequest::Open { path, query, reply })
+    let in_folder = match body.get("in_folder") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(on)) => *on,
+        Some(other) => {
+            return Err(Failure::bad(format!(
+                "in_folder must be true or false, not {other}"
+            )));
+        }
+    };
+    ui(ctx, |reply| UiRequest::Open {
+        path,
+        query,
+        in_folder,
+        reply,
+    })
 }
 
 /// A row describing one item, as `/v1/selection` lists them.

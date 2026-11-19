@@ -126,7 +126,7 @@ Body: `{"paths": ["…"], "title": "Large images"}`. Reply: `{"shown": 12, "miss
 
 Bring a window forward, at a folder and with a search when given.
 
-Body: `{"path": "/Users/me/src", "query": "readme"}`, both optional. A file path opens its folder with the file selected. Reply: `{"ok": true}`.
+Body: `{"path": "/Users/me/src", "query": "readme", "in_folder": true}`, all optional. A file path opens its folder with the file selected. With `"in_folder": true` the window searches only the folder it then shows, as with its Search Only in This Folder button on, and goes on doing so until the button is clicked. Without it, or with `false` or `null`, the window keeps the choice it has. Any other value is an error. Reply: `{"ok": true}`.
 
 ## Notes for clients
 

@@ -845,11 +845,13 @@ impl Finder {
     }
 
     /// Go to `path` (a folder, or a file's folder with the file selected)
-    /// and search `query`, as `fff gui` and a second launch ask.
+    /// and search `query`, as `fff gui` and a second launch ask. With `here`,
+    /// searches are only in that folder from then on.
     pub fn open_request(
         &mut self,
         path: Option<&Path>,
         query: Option<&str>,
+        here: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -859,6 +861,13 @@ impl Finder {
             } else if path.exists() {
                 self.reveal_in_place(path, window, cx);
             }
+        }
+        // After the window has gone there, so the folder is the one asked
+        // for, and before the words, so they're searched once, in it. Words
+        // that are already being searched are left alone by `set_query`, and
+        // then it's the new scope that searches again.
+        if here {
+            self.search_here(cx);
         }
         if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
             let query = query.to_string();
@@ -1637,6 +1646,14 @@ impl Finder {
             self.run_search(false, cx);
             // The toolbar shows the scope even when nothing is searched.
             cx.notify();
+        }
+    }
+
+    /// Turn on Search Only in This Folder, as `--here` asks. Like the
+    /// toolbar's button, it does nothing where the window shows no folder.
+    pub fn search_here(&mut self, cx: &mut Context<Self>) {
+        if self.current_folder().is_some() {
+            self.set_scope(SearchScope::Folder, cx);
         }
     }
 

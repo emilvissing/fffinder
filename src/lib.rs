@@ -54,7 +54,7 @@ pub fn run(args: args::Args) {
         let path = folder
             .as_ref()
             .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()));
-        if server::client::forward_open(path.as_deref(), args.query.as_deref()) {
+        if server::client::forward_open(path.as_deref(), args.query.as_deref(), args.here) {
             return;
         }
     }
@@ -145,7 +145,14 @@ pub fn run(args: args::Args) {
             cx.set_global(disk_access::Checked(access));
             cx.set_global(disk_access::IndexHeld(hold_index));
         }
-        open_window(start, args.query.clone(), picker, cx);
+        let opened = open_window(start, args.query.clone(), picker, cx);
+        // A window opens set to search every location. One that opened with
+        // a search is narrowed to its folder before that search has answered.
+        if args.here
+            && let Some((_, finder)) = opened
+        {
+            finder.update(cx, |f, cx| f.search_here(cx));
+        }
         cx.activate(true);
         if hold_index {
             ask_for_disk_access(cx);
@@ -258,19 +265,27 @@ fn handle_request(request: server::UiRequest, cx: &mut App) {
             cx.activate(true);
             let _ = reply.send(Ok(json!({ "shown": shown, "missing": missing })));
         }
-        UiRequest::Open { path, query, reply } => {
+        UiRequest::Open {
+            path,
+            query,
+            in_folder,
+            reply,
+        } => {
             match frontmost(cx) {
                 Some((handle, view)) => {
                     let _ = handle.update(cx, |_, window, cx| {
                         view.update(cx, |f, cx| {
-                            f.open_request(path.as_deref(), query.as_deref(), window, cx)
+                            f.open_request(path.as_deref(), query.as_deref(), in_folder, window, cx)
                         });
                         window.activate_window();
                     });
                 }
                 None => {
                     let start = start_location(path.as_ref(), &settings::current(cx));
-                    open_window(start, query, None, cx);
+                    let opened = open_window(start, query, None, cx);
+                    if in_folder && let Some((_, finder)) = opened {
+                        finder.update(cx, |f, cx| f.search_here(cx));
+                    }
                 }
             }
             cx.activate(true);

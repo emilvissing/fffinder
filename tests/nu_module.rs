@@ -15,8 +15,8 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Fixture {
-        let dir = std::env::temp_dir().join(format!("fff-nu-module-{}", std::process::id()));
+    fn new(name: &str) -> Fixture {
+        let dir = std::env::temp_dir().join(format!("fff-nu-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("tree/Projects/atlas")).unwrap();
         std::fs::write(dir.join("tree/Roadmap.md"), "# Roadmap\n").unwrap();
@@ -60,13 +60,139 @@ fn nu(nu: &Path, data_dir: &Path, cwd: &Path, script: &str) -> Result<Value, Str
         .map_err(|e| format!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
 }
 
+/// A shell script named `name` to run in fffinder's place: the real program
+/// would open a window.
+#[cfg(unix)]
+fn stand_in(fx: &Fixture, name: &str, script: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = fx.dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// The commands that start fffinder hand `--here` on to it. The stand-in
+/// writes down the arguments it is started with.
+#[cfg(unix)]
+#[test]
+fn fff_nu_commands_pass_here_to_fffinder() {
+    let Some(nu_bin) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("here");
+    let script = "printf '%s\\n' \"$@\" > \"$0.args\"\nprintf '[]'";
+    let stand_in = stand_in(&fx, "fffinder", script);
+    let noted = fx.dir.join("fffinder.args");
+    // The commands spell the folder with its symlinks resolved.
+    let tree = std::fs::canonicalize(fx.dir.join("tree")).unwrap();
+    let dir = tree.to_str().unwrap();
+    let run = |script: &str| {
+        let script = format!(
+            "$env.FFFINDER_BIN = {}; {script}",
+            serde_json::to_string(&stand_in).unwrap()
+        );
+        nu(&nu_bin, &fx.dir, &tree, &script).unwrap_or_else(|e| panic!("{script}:\n{e}"))
+    };
+    let started_with = |script: &str| -> Vec<String> {
+        let _ = std::fs::remove_file(&noted);
+        run(script);
+        let args = std::fs::read_to_string(&noted).unwrap_or_else(|e| panic!("{script}: {e}"));
+        args.lines().map(str::to_string).collect()
+    };
+
+    assert_eq!(
+        started_with("fff gui . --query readme --here"),
+        ["--detach", dir, "--query", "readme", "--here"]
+    );
+    assert_eq!(started_with("fff gui"), ["--detach", dir]);
+    assert_eq!(
+        started_with("fff pick --here budget"),
+        ["--pick", dir, "--here", "--query", "budget"]
+    );
+    assert_eq!(
+        started_with("fff pick budget"),
+        ["--pick", dir, "--query", "budget"]
+    );
+
+    // The commands built on `fff pick` hand it on, and only when given.
+    assert_eq!(
+        started_with("fff insert --here"),
+        ["--pick", dir, "--multiple", "--here"]
+    );
+    assert_eq!(started_with("fff insert"), ["--pick", dir, "--multiple"]);
+    assert_eq!(
+        started_with("fff cd --here budget"),
+        ["--pick", dir, "--here", "--query", "budget"]
+    );
+    assert_eq!(
+        started_with("fff cd budget"),
+        ["--pick", dir, "--query", "budget"]
+    );
+    assert_eq!(
+        started_with("fff edit --here budget"),
+        ["--pick", dir, "--here", "--query", "budget"]
+    );
+
+    // Ctrl+T and Alt+C run them with it.
+    let bound = "$env.config.keybindings | where name in [fff_insert fff_cd] | get event.cmd";
+    assert_eq!(
+        run(&format!("fff keybindings --here; {bound}")),
+        json!(["fff insert --here", "fff cd --here"])
+    );
+    assert_eq!(
+        run(&format!("fff keybindings; {bound}")),
+        json!(["fff insert", "fff cd"])
+    );
+}
+
+/// An fffinder older than the module doesn't know `--here`: it says so and
+/// leaves without showing a chooser. `fff pick` passes that on, where a
+/// chooser that was cancelled gives nothing.
+#[cfg(unix)]
+#[test]
+fn fff_pick_says_when_fffinder_refuses_an_option() {
+    let Some(nu_bin) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("refused");
+    let tree = fx.dir.join("tree");
+    let run = |app: &Path, script: &str| {
+        let app = serde_json::to_string(app).unwrap();
+        nu(
+            &nu_bin,
+            &fx.dir,
+            &tree,
+            &format!("$env.FFFINDER_BIN = {app}; {script}"),
+        )
+    };
+
+    let older = "echo 'fffinder: unknown option: --here' >&2\necho 'Usage: fffinder' >&2\nexit 2";
+    let older = stand_in(&fx, "older", older);
+    for command in ["fff pick --here", "fff insert --here", "fff cd --here"] {
+        let said = run(&older, command).expect_err(command);
+        assert!(
+            said.contains("fffinder: unknown option: --here"),
+            "{command}: {said}"
+        );
+        assert!(!said.contains("Usage:"), "only what went wrong: {said}");
+    }
+
+    // Escape and Cancel leave with 1, and that is no error.
+    let cancelled = stand_in(&fx, "cancelled", "exit 1");
+    assert_eq!(run(&cancelled, "fff pick --here"), Ok(Value::Null));
+    assert_eq!(run(&cancelled, "fff pick --multiple"), Ok(json!([])));
+}
+
 #[test]
 fn fff_nu_commands_talk_to_the_window() {
     let Some(nu_bin) = fffinder::nushell::find_nu(None) else {
         eprintln!("nu not installed; skipping");
         return;
     };
-    let fx = Fixture::new();
+    let fx = Fixture::new("module");
     let tree = fx.dir.join("tree");
     let data = fx.dir.join("data");
     let engine: Arc<Engine> = Engine::new(EngineOptions {

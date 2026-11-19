@@ -1,5 +1,5 @@
-//! Command line: `fffinder [PATH] [--startup-path PATH] [--query TEXT] [--pick]
-//! [--multiple] [--detach] [--term] [--fps] [--software-rendering]`.
+//! Command line: `fffinder [PATH] [--startup-path PATH] [--query TEXT] [--here]
+//! [--pick] [--multiple] [--detach] [--term] [--fps] [--software-rendering]`.
 //!
 //! `--pick` turns the window into a chooser for scripts (used by `fff pick`):
 //! choosing prints a JSON array of absolute paths and exits 0; cancelling exits 1.
@@ -12,6 +12,8 @@ pub struct Args {
     /// The folder to open, from `[PATH]` or `--startup-path`.
     pub path: Option<PathBuf>,
     pub query: Option<String>,
+    /// Start with Search Only in This Folder on.
+    pub here: bool,
     pub pick: bool,
     pub multiple: bool,
     /// Start in the background and return at once (used by `fff gui`).
@@ -37,6 +39,7 @@ Options:
   -s, --startup-path PATH
                      Folder to open, same as [PATH]
   -q, --query TEXT   Start with this search
+      --here         Search only in the folder opened
       --pick         Choose files and print them as JSON to stdout
       --multiple     With --pick, allow choosing several items
       --detach       Start in the background and return right away
@@ -63,6 +66,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String>
         match text.as_ref() {
             "-h" | "--help" => return Ok(Parsed::Help),
             "-V" | "--version" => return Ok(Parsed::Version),
+            "--here" => out.here = true,
             "--pick" => out.pick = true,
             "--multiple" | "-m" => out.multiple = true,
             "--detach" => out.detach = true,
@@ -126,6 +130,7 @@ mod tests {
             Parsed::Run(Args {
                 path: Some("/tmp".into()),
                 query: Some("main rs".into()),
+                here: false,
                 pick: true,
                 multiple: true,
                 detach: false,
@@ -134,6 +139,24 @@ mod tests {
                 software_rendering: false,
             })
         );
+    }
+
+    #[test]
+    fn parses_here() {
+        for args in [
+            &["--here"][..],
+            &["--pick", "/tmp", "--here"],
+            &["/tmp", "--here", "--query", "main rs"],
+        ] {
+            let Parsed::Run(parsed) = run(args).unwrap() else {
+                panic!("expected a run");
+            };
+            assert!(parsed.here, "{args:?}");
+        }
+        let Parsed::Run(args) = run(&["/tmp", "--query", "main rs"]).unwrap() else {
+            panic!("expected a run");
+        };
+        assert!(!args.here, "a search isn't in the folder unless asked");
     }
 
     #[test]

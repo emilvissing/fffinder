@@ -128,14 +128,25 @@ export def "fff pick" [
     ...query: string    # Initial search text
     --root (-r): path   # Folder to open instead of the current one
     --multiple (-m)     # Allow choosing several items; always returns a list
+    --here              # Search only in the folder opened
 ]: nothing -> any {
     let root = $root | default $env.PWD | path expand
     let args = (
         [--pick $root]
         | append (if $multiple { [--multiple] } else { [] })
+        | append (if $here { [--here] } else { [] })
         | append (if ($query | is-empty) { [] } else { [--query ($query | str join ' ')] })
     )
-    let result = run-external (app-binary) ...$args | complete
+    let app = app-binary
+    let result = run-external $app ...$args | complete
+    # Cancelling exits 1. With 2, fffinder refused its options and showed no
+    # chooser, as a copy older than this module does with --here.
+    if $result.exit_code == 2 {
+        error make {
+            msg: ($result.stderr | lines | get 0? | default 'fffinder refused its options')
+            help: $'($app) may be older than this module'
+        }
+    }
     if $result.exit_code != 0 {
         return (if $multiple { [] } else { null })
     }
@@ -145,13 +156,18 @@ export def "fff pick" [
 
 # Open the fffinder window at a folder, optionally searching.
 @example "Open the window at the current folder" { fff gui }
-@example "Search for READMEs under ~/src" { fff gui ~/src --query readme }
+@example "Search for READMEs under ~/src" { fff gui ~/src --query readme --here }
 export def "fff gui" [
     path?: path          # Folder to open (default: the current folder)
     --query (-q): string # Start a search
+    --here               # Search only in that folder
 ]: nothing -> nothing {
     let dir = $path | default $env.PWD | path expand
-    let args = [--detach $dir] | append (if $query == null { [] } else { [--query $query] })
+    let args = (
+        [--detach $dir]
+        | append (if $query == null { [] } else { [--query $query] })
+        | append (if $here { [--here] } else { [] })
+    )
     run-external (app-binary) ...$args
 }
 
@@ -342,8 +358,9 @@ export def "fff open" [
 # Pick files in fffinder and insert them at the cursor as NUON.
 export def "fff insert" [
     ...query: string  # Initial search text
+    --here            # Search only in the current folder
 ]: nothing -> nothing {
-    let picked = fff pick --multiple ...$query
+    let picked = fff pick --multiple --here=$here ...$query
     if ($picked | is-empty) { return }
     let text = $picked | each { to nuon } | str join ' '
     commandline edit --insert $text
@@ -352,8 +369,9 @@ export def "fff insert" [
 # Pick a folder (or a file's folder) in fffinder and cd into it.
 export def --env "fff cd" [
     ...query: string  # Initial search text
+    --here            # Search only in the current folder
 ]: nothing -> nothing {
-    let picked = fff pick ...$query
+    let picked = fff pick --here=$here ...$query
     if $picked == null { return }
     let dir = if ($picked | path type) == 'dir' { $picked } else { $picked | path dirname }
     cd $dir
@@ -363,8 +381,9 @@ export def --env "fff cd" [
 # $env.VISUAL, or $env.EDITOR.
 export def "fff edit" [
     ...query: string  # Initial search text
+    --here            # Search only in the current folder
 ]: nothing -> nothing {
-    let picked = fff pick ...$query
+    let picked = fff pick --here=$here ...$query
     if $picked == null { return }
     let fallback = if $nu.os-info.name == 'windows' { 'notepad' } else { 'vi' }
     let editor = $env.config.buffer_editor? | default $env.VISUAL? | default $env.EDITOR? | default $fallback
@@ -377,8 +396,10 @@ export def "fff edit" [
 export def --env "fff keybindings" [
     --insert-key: string = 't'  # Key used with Ctrl to insert picked paths
     --cd-key: string = 'c'      # Key used with Alt to cd into a picked folder
+    --here                      # Search only in the current folder when picking
 ]: nothing -> nothing {
     let modes = [emacs vi_normal vi_insert]
+    let flag = if $here { ' --here' } else { '' }
     $env.config.keybindings = $env.config.keybindings
         | where name not-in [fff_insert fff_cd]
         | append [
@@ -387,14 +408,14 @@ export def --env "fff keybindings" [
                 modifier: control
                 keycode: $"char_($insert_key)"
                 mode: $modes
-                event: {send: executehostcommand, cmd: 'fff insert'}
+                event: {send: executehostcommand, cmd: $'fff insert($flag)'}
             }
             {
                 name: fff_cd
                 modifier: alt
                 keycode: $"char_($cd_key)"
                 mode: $modes
-                event: {send: executehostcommand, cmd: 'fff cd'}
+                event: {send: executehostcommand, cmd: $'fff cd($flag)'}
             }
         ]
 }

@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Fixture, Open, Ui, cmd};
-use fffinder::finder::QuickLookMode;
+use fffinder::finder::{PickerOptions, QuickLookMode, SearchScope};
 use fffinder::model::Location;
 use fffinder_core::ViewMode;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
@@ -465,7 +465,11 @@ fn other_words_from_a_second_launch_call_off_the_move_into_the_results(cx: &mut 
     // `fff gui` and a second launch put their own words in the field, and
     // these leave the caret where it was.
     let view = ui.view.clone();
-    ui.window(|window, cx| view.update(cx, |f, cx| f.open_request(None, Some("note"), window, cx)));
+    ui.window(|window, cx| {
+        view.update(cx, |f, cx| {
+            f.open_request(None, Some("note"), false, window, cx)
+        })
+    });
     ui.settle();
     let found = ui.names();
     assert!(found.contains(&"notes.txt".to_string()), "{found:?}");
@@ -604,7 +608,7 @@ fn results_sent_from_nushell(cx: &mut TestAppContext) {
 
     // `fff gui` and a second launch: a folder and a search.
     let projects = fx.path("Projects");
-    ui.update(|f, window, cx| f.open_request(Some(&projects), Some("atlas"), window, cx));
+    ui.update(|f, window, cx| f.open_request(Some(&projects), Some("atlas"), false, window, cx));
     assert_eq!(ui.folder(), Some(projects));
     assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
     let report = ui.read(|f| f.selection_json(true));
@@ -613,9 +617,138 @@ fn results_sent_from_nushell(cx: &mut TestAppContext) {
 
     // A file opens its folder with the file selected.
     let roadmap = fx.path("Roadmap.md");
-    ui.update(|f, window, cx| f.open_request(Some(&roadmap), None, window, cx));
+    ui.update(|f, window, cx| f.open_request(Some(&roadmap), None, false, window, cx));
     assert_eq!(ui.folder().as_deref(), Some(fx.dir.as_path()));
     assert_eq!(ui.selected(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn a_search_sent_with_here_stays_in_the_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("open-here");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let scope = |ui: &Ui| ui.read(|f| f.search_scope());
+    let projects = fx.path("Projects");
+
+    // Without it, the folder is only where the window goes.
+    ui.update(|f, window, cx| f.open_request(Some(&projects), Some("budget"), false, window, cx));
+    assert_eq!(scope(&ui), SearchScope::Computer);
+    assert_eq!(ui.names(), ["Budget.csv"]);
+
+    ui.update(|f, window, cx| f.open_request(Some(&projects), Some("budget"), true, window, cx));
+    assert_eq!(ui.folder(), Some(projects.clone()));
+    assert_eq!(scope(&ui), SearchScope::Folder);
+    assert!(ui.names().is_empty(), "Budget.csv is outside Projects");
+    assert!(ui.exists("scope-folder"));
+
+    ui.update(|f, window, cx| f.open_request(Some(&projects), Some("atlas"), true, window, cx));
+    let names = ui.names();
+    assert!(names.iter().any(|n| n == "Project Atlas.txt"), "{names:?}");
+
+    // It stays on, as when the button is clicked, until it's clicked again.
+    ui.update(|f, window, cx| f.open_request(Some(&projects), Some("budget"), false, window, cx));
+    assert_eq!(scope(&ui), SearchScope::Folder);
+    assert!(ui.names().is_empty());
+    ui.click("search-scope");
+    assert_eq!(ui.names(), ["Budget.csv"]);
+}
+
+#[gpui_kit::test]
+fn here_narrows_a_search_that_is_sent_again_with_the_same_words(cx: &mut TestAppContext) {
+    let fx = Fixture::new("open-here-same-words");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Projects"));
+    ui.click("search");
+    ui.type_text("budget");
+    assert_eq!(ui.names(), ["Budget.csv"]);
+
+    ui.update(|f, window, cx| f.open_request(None, Some("budget"), true, window, cx));
+    assert_eq!(ui.read(|f| f.search_scope()), SearchScope::Folder);
+    assert!(
+        ui.names().is_empty(),
+        "the same words, now only in Projects"
+    );
+}
+
+#[gpui_kit::test]
+fn here_is_the_folder_the_window_goes_to(cx: &mut TestAppContext) {
+    let fx = Fixture::new("open-here-recents");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let scope = |ui: &Ui| ui.read(|f| f.search_scope());
+
+    // Recents isn't a folder, so there is nothing to search only in.
+    ui.update(|f, window, cx| f.navigate(Location::Recents, window, cx));
+    ui.update(|f, window, cx| f.open_request(None, Some("budget"), true, window, cx));
+    assert_eq!(scope(&ui), SearchScope::Computer);
+    assert_eq!(ui.names(), ["Budget.csv"]);
+
+    let projects = fx.path("Projects");
+    ui.update(|f, window, cx| f.open_request(Some(&projects), Some("budget"), true, window, cx));
+    assert_eq!(scope(&ui), SearchScope::Folder);
+    assert!(ui.names().is_empty(), "Budget.csv is outside Projects");
+
+    // A file opens its folder, and that is the folder searched.
+    ui.click("search-scope");
+    assert_eq!(ui.names(), ["Budget.csv"], "the button turns it off");
+    let file = fx.path("Projects/atlas/Project Atlas.txt");
+    ui.update(|f, window, cx| f.open_request(Some(&file), Some("budget"), true, window, cx));
+    assert_eq!(ui.folder(), Some(fx.path("Projects/atlas")));
+    assert_eq!(scope(&ui), SearchScope::Folder);
+    assert!(ui.names().is_empty(), "Budget.csv is outside atlas");
+}
+
+#[gpui_kit::test]
+fn a_window_opened_with_here_shows_nothing_from_outside_its_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("window-here");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // A launch with `--here` opens the window searching, and has it search
+    // only in its folder before that first search has answered.
+    let open = |ui: &mut Ui, words: &str| -> Vec<String> {
+        let start = Location::Folder(ui.dir.join("Projects"));
+        let finder = ui.cx.update(|cx| {
+            let (_, finder) =
+                fffinder::open_window(start, Some(words.into()), None, cx).expect("a window");
+            finder.update(cx, |f, cx| f.search_here(cx));
+            finder
+        });
+        ui.settle();
+        finder.read_with(ui.cx, |f, _| {
+            assert_eq!(f.search_scope(), SearchScope::Folder);
+            let rows = f.rows_for_test().iter();
+            rows.map(|r| r.entry.name.clone()).collect()
+        })
+    };
+
+    let found = open(&mut ui, "atlas");
+    assert!(
+        found.contains(&"Project Atlas.txt".to_string()),
+        "{found:?}"
+    );
+    let found = open(&mut ui, "budget");
+    assert!(
+        found.is_empty(),
+        "Budget.csv is outside Projects: {found:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_file_chooser_opened_with_here_searches_only_its_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("chooser-here");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            picker: Some(PickerOptions { multiple: false }),
+            ..Default::default()
+        },
+    );
+    ui.go_to(&fx.path("Projects"));
+    // As after `fff pick --here`, with the words typed in the chooser.
+    ui.update(|f, _, cx| f.search_here(cx));
+    ui.click("search");
+    ui.type_text("budget");
+    assert!(ui.names().is_empty(), "Budget.csv is outside Projects");
+    ui.click("search-scope");
+    assert_eq!(ui.names(), ["Budget.csv"], "the button turns it off");
 }
 
 #[gpui_kit::test]
