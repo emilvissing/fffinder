@@ -5,6 +5,7 @@
 mod common;
 
 use common::{Fixture, Open, Ui, cmd, item_id};
+use fffinder::system::SystemCall;
 use gpui_kit::{
     Modifiers, MouseButton, NavigationDirection, Pixels, Point, TestAppContext, point, px,
 };
@@ -245,6 +246,437 @@ fn the_mouse_back_and_forward_buttons_navigate(cx: &mut TestAppContext) {
         "content",
     );
     assert_eq!(ui.folder(), Some(fx.path("Projects")));
+}
+
+// ----- double-clicks -----------------------------------------------------------------
+
+/// The name of the item, in the folder the window opened at, whose row or
+/// tile of `kind` is drawn at `spot`.
+fn item_at(ui: &mut Ui, kind: &'static str, spot: Point<Pixels>) -> Option<String> {
+    use gpui_kit::test::TestWindowExt as _;
+    let items: Vec<_> = ui
+        .names()
+        .into_iter()
+        .map(|name| (item_id(kind, &ui.dir.join(&name)), name))
+        .collect();
+    ui.window(|window, cx| {
+        window.render_frame(cx);
+        items.into_iter().find_map(|(id, name)| {
+            let item = window.try_find(id)?;
+            item.bounds().contains(&spot).then_some(name)
+        })
+    })
+}
+
+#[gpui_kit::test]
+fn a_double_click_opens_the_item_in_every_view(cx: &mut TestAppContext) {
+    let fx = Fixture::new("double-click-opens");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let notes = fx.path("notes.txt");
+    for (view, kind) in [
+        ("view-list", "row"),
+        ("view-icons", "tile"),
+        ("view-columns", "crow"),
+        ("view-gallery", "strip"),
+    ] {
+        ui.click(view);
+        let opened = ui.system_calls().len();
+
+        ui.double_click(item_id(kind, &notes));
+        let calls = ui.system_calls();
+        assert_eq!(calls.len(), opened + 1, "{view}: {calls:?}");
+        assert_eq!(calls.last(), Some(&SystemCall::Open(notes.clone())));
+        assert_eq!(ui.selected(), ["notes.txt"], "{view}");
+
+        ui.double_click(item_id(kind, &fx.path("Projects")));
+        assert_eq!(ui.folder(), Some(fx.path("Projects")), "{view}");
+        ui.click("back");
+    }
+
+    // One of several selected items opens the same way, and is the one left
+    // selected.
+    ui.click("view-list");
+    ui.select("Budget.csv");
+    ui.select_also("notes.txt");
+    let opened = ui.system_calls().len();
+    ui.double_click(item_id("row", &notes));
+    assert_eq!(ui.system_calls().len(), opened + 1);
+    assert_eq!(ui.selected(), ["notes.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_double_click_on_a_dialogs_button_does_nothing_to_the_item_under_it(cx: &mut TestAppContext) {
+    let fx = long_folder("stray-done");
+    let mut ui = Ui::open(cx, &fx.dir);
+    for (view, kind) in [("view-list", "row"), ("view-icons", "tile")] {
+        ui.click(view);
+        ui.select("item 001.txt");
+        ui.select_also("item 002.txt");
+        ui.press(&cmd("/"));
+        let done = ui.snapshot("help-done").bounds().center();
+        let under = item_at(&mut ui, kind, done);
+        assert!(under.is_some(), "{view}: Done is over an item");
+
+        // The first click closes the dialog, and the second finds that item
+        // where the button was.
+        ui.double_click("help-done");
+        assert!(!ui.dialog_open(), "{view}");
+        let calls = ui.system_calls();
+        assert!(calls.is_empty(), "{view}: {under:?} is under it: {calls:?}");
+        assert_eq!(ui.selected(), ["item 001.txt", "item 002.txt"], "{view}");
+    }
+
+    // Nor when that item is one of several selected ones, where a click
+    // narrows the selection to it once the mouse is let go.
+    ui.click("view-list");
+    ui.press(&cmd("a"));
+    let all = ui.selected();
+    assert_eq!(all.len(), ui.names().len());
+    ui.press(&cmd("/"));
+    ui.double_click("help-done");
+    assert!(!ui.dialog_open());
+    assert_eq!(ui.selected(), all);
+    assert!(ui.system_calls().is_empty());
+}
+
+#[gpui_kit::test]
+fn a_double_click_on_a_dialogs_button_holds_up_no_click_after_it(cx: &mut TestAppContext) {
+    let fx = long_folder("stray-done-then");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("/"));
+    let done = ui.snapshot("help-done").bounds().center();
+    let under = item_at(&mut ui, "row", done).expect("Done is over an item");
+    ui.double_click("help-done");
+    assert!(ui.selected().is_empty());
+
+    // Clicked without a pause or a move, the item where the button was is
+    // clicked for the third and fourth time at that spot, as the system
+    // counts. They are its first click and its second: no pause is needed
+    // before a double-click opens it.
+    ui.nth_click_point(done, 3);
+    assert_eq!(ui.selected(), [under.as_str()]);
+    assert!(ui.system_calls().is_empty());
+    ui.nth_click_point(done, 4);
+    assert_eq!(ui.system_calls(), [SystemCall::Open(fx.path(&under))]);
+
+    // The same over empty space: the click after the double-click on the
+    // button clears the selection, as a click there does.
+    ui.click("search");
+    ui.type_text("item 009");
+    assert_eq!(ui.names(), ["item 009.txt"]);
+    ui.select("item 009.txt");
+    ui.click("search-help");
+    assert_eq!(item_at(&mut ui, "row", done), None);
+    ui.double_click("help-done");
+    assert_eq!(ui.selected(), ["item 009.txt"]);
+    ui.nth_click_point(done, 3);
+    assert!(ui.selected().is_empty());
+}
+
+#[gpui_kit::test]
+fn a_double_click_on_a_dialogs_button_leaves_the_keyboard_where_it_was(cx: &mut TestAppContext) {
+    let fx = long_folder("stray-done-keys");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.click("search");
+    ui.type_text("item");
+    ui.click("search-help");
+    let done = ui.snapshot("help-done").bounds().center();
+    assert!(
+        item_at(&mut ui, "row", done).is_some(),
+        "Done is over a result"
+    );
+
+    // Closing the dialog gives the keyboard back to the search field, and
+    // the second click doesn't take it on to the files.
+    ui.double_click("help-done");
+    ui.type_text(" 00");
+    assert_eq!(ui.read(|f| f.query().to_string()), "item 00");
+    assert!(ui.system_calls().is_empty());
+
+    // Nor does it where the results end above the button.
+    ui.type_text("9");
+    assert!(ui.names().len() < 5, "{:?}", ui.names());
+    ui.click("search-help");
+    assert_eq!(
+        item_at(&mut ui, "row", done),
+        None,
+        "Done is over empty space"
+    );
+    ui.double_click("help-done");
+    ui.type_text(".");
+    assert_eq!(ui.read(|f| f.query().to_string()), "item 009.");
+}
+
+#[gpui_kit::test]
+fn a_double_click_on_a_dialogs_button_keeps_the_selection_over_empty_space(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("stray-done-empty");
+    let mut ui = Ui::open(cx, &fx.dir);
+    for (view, kind) in [("view-list", "row"), ("view-icons", "tile")] {
+        ui.click(view);
+        ui.select("notes.txt");
+        ui.select_also("Roadmap.md");
+        ui.press(&cmd("/"));
+        let done = ui.snapshot("help-done").bounds().center();
+        // With so few items the button is over the view's empty space,
+        // where a click clears the selection.
+        assert!(ui.snapshot("content").bounds().contains(&done), "{view}");
+        assert_eq!(item_at(&mut ui, kind, done), None, "{view}");
+
+        ui.double_click("help-done");
+        assert!(!ui.dialog_open(), "{view}");
+        assert_eq!(ui.selected(), ["notes.txt", "Roadmap.md"], "{view}");
+    }
+}
+
+#[gpui_kit::test]
+fn a_double_click_on_cancel_or_the_close_button_does_nothing_to_the_files(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+    let fx = long_folder("stray-cancel");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.select("item 001.txt");
+
+    ui.press(&cmd("shift-g"));
+    let cancel = ui.snapshot("goto-cancel").bounds().center();
+    assert!(item_at(&mut ui, "row", cancel).is_some());
+    ui.double_click("goto-cancel");
+    assert!(!ui.dialog_open());
+    assert_eq!(ui.selected(), ["item 001.txt"], "after Cancel");
+
+    ui.press(&cmd("/"));
+    let close = ui.window(|window, _| window.within("dialog").find("close").bounds().center());
+    assert!(item_at(&mut ui, "row", close).is_some());
+    ui.window(|window, cx| window.within("dialog").double_click("close", cx));
+    ui.settle();
+    assert!(!ui.dialog_open());
+    assert_eq!(ui.selected(), ["item 001.txt"], "after the close button");
+
+    let calls = ui.system_calls();
+    assert!(calls.is_empty(), "{calls:?}");
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+}
+
+#[gpui_kit::test]
+fn a_double_click_beside_a_dialog_does_nothing_to_the_item_there(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+    let fx = long_folder("stray-backdrop");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // An item that the dialog leaves in view in each of the views.
+    for (view, kind, name) in [
+        ("view-list", "row", "item 030.txt"),
+        ("view-icons", "tile", "item 030.txt"),
+        ("view-columns", "crow", "item 030.txt"),
+        ("view-gallery", "strip", "item 003.txt"),
+    ] {
+        ui.click(view);
+        ui.select("item 001.txt");
+        let selected = ui.selected();
+        let item = item_id(kind, &fx.path(name));
+        let spot = ui.snapshot(item.clone()).bounds().center();
+        ui.press(&cmd("/"));
+        let dialog = ui.window(|window, _| window.within("dialog").find("surface").bounds());
+        assert!(
+            !dialog.contains(&spot),
+            "{view}: {name} is beside the dialog"
+        );
+
+        // A click beside the dialog closes it, and the second click of a
+        // double-click there is on the item.
+        ui.click_point(spot);
+        assert!(!ui.dialog_open(), "{view}");
+        ui.second_click(item);
+        let calls = ui.system_calls();
+        assert!(calls.is_empty(), "{view}: {calls:?}");
+        assert_eq!(ui.selected(), selected, "{view}");
+    }
+
+    // The gallery's items leave a press to the file area around them, which
+    // takes the keyboard for it. Not for this one: the search field, which
+    // had the keyboard when the dialog opened, still has it.
+    let item = item_id("strip", &fx.path("item 003.txt"));
+    let spot = ui.snapshot(item.clone()).bounds().center();
+    ui.click("search");
+    ui.press(&cmd("/"));
+    assert!(ui.dialog_open());
+    ui.click_point(spot);
+    ui.second_click(item);
+    ui.type_text("budget");
+    assert_eq!(ui.read(|f| f.query().to_string()), "budget");
+    assert!(ui.system_calls().is_empty());
+}
+
+#[gpui_kit::test]
+fn a_second_click_beside_a_dialog_draws_no_box_when_the_mouse_moves(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+    let fx = long_folder("stray-box");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.select("item 001.txt");
+    // A row's other columns, where a press starts a box, beside the dialog.
+    let row = item_id("row", &fx.path("item 030.txt"));
+    let date = ui.window(|window, _| window.within(row).find(("cell", 0usize)).bounds().center());
+    ui.press(&cmd("/"));
+    let dialog = ui.window(|window, _| window.within("dialog").find("surface").bounds());
+    assert!(
+        !dialog.contains(&date),
+        "the row's date is beside the dialog"
+    );
+
+    // The first click closes the dialog. The mouse moves while the second
+    // is down, as it does a little in a hurried click.
+    ui.click_point(date);
+    assert!(!ui.dialog_open());
+    ui.nth_drag_points(date, date + point(px(0.), px(30.)), 2);
+    assert_eq!(ui.selected(), ["item 001.txt"]);
+    assert!(ui.system_calls().is_empty());
+}
+
+#[gpui_kit::test]
+fn a_double_click_on_a_menu_item_does_nothing_to_the_item_under_it(cx: &mut TestAppContext) {
+    let fx = long_folder("stray-menu");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    let copied = fx.path("item 001.txt");
+    ui.right_click(item_id("row", &copied));
+    let copy = "Copy “item 001.txt”";
+    let spot = ui
+        .snapshots()
+        .into_iter()
+        .find(|item| item.role() == Some(gpui_kit::Role::MenuItem) && item.label() == Some(copy))
+        .expect("the menu has Copy")
+        .bounds()
+        .center();
+    let under = item_at(&mut ui, "row", spot);
+    assert!(under.is_some(), "the menu is over the rows");
+
+    // The first click copies and closes the menu, and the second finds the
+    // row that was under it.
+    ui.click_menu_item(copy);
+    assert!(!ui.menu_open());
+    ui.nth_click_point(spot, 2);
+    assert_eq!(ui.clipboard(), copied.display().to_string());
+    let calls = ui.system_calls();
+    assert!(calls.is_empty(), "{under:?} is under it: {calls:?}");
+    assert_eq!(ui.selected(), ["item 001.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_double_click_that_closes_a_tab_does_nothing_to_the_tab_behind_it(cx: &mut TestAppContext) {
+    let fx = long_folder("stray-tab");
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.click("view-icons");
+    ui.press(&cmd("t"));
+    let close = ui.snapshot(("close-tab", 1usize)).bounds().center();
+    ui.press(&cmd("w"));
+    assert_eq!(tabs(&ui).0, 1);
+
+    // With one tab there is no tab bar, and an icon is where the second
+    // tab's close button was. It is the last thing clicked in the first tab.
+    let under = item_at(&mut ui, "tile", close).expect("an icon is there");
+    ui.click(item_id("tile", &fx.path(&under)));
+    ui.press(&cmd("t"));
+    assert_eq!(
+        ui.snapshot(("close-tab", 1usize)).bounds().center(),
+        close,
+        "the close button is where it was"
+    );
+
+    ui.click(("close-tab", 1usize));
+    assert_eq!(tabs(&ui).0, 1);
+    ui.nth_click_point(close, 2);
+    let calls = ui.system_calls();
+    assert!(calls.is_empty(), "{under} is under it: {calls:?}");
+    assert_eq!(ui.selected(), [under]);
+}
+
+#[gpui_kit::test]
+fn a_double_click_that_closes_quick_look_does_nothing_to_the_file_behind_it(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("stray-quick-look");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    let notes = fx.path("notes.txt");
+    ui.click(item_id("row", &notes));
+    ui.press("space");
+    ui.in_quick_look(|ui| ui.click("ql-open"));
+    assert!(ui.read(|f| f.quick_look_window()).is_none());
+
+    // Quick Look's window was over the browser's, which only now gets the
+    // mouse again. Where the system counts clicks across windows, the
+    // second click of a double-click on Open comes to a file behind it.
+    ui.second_click(item_id("row", &fx.path("Roadmap.md")));
+    assert_eq!(ui.system_calls(), [SystemCall::Open(notes)]);
+    assert_eq!(ui.selected(), ["notes.txt"]);
+}
+
+#[gpui_kit::test]
+fn quick_double_clicks_at_one_spot_open_one_item_each(cx: &mut TestAppContext) {
+    // A folder in a folder in a folder, each the only item, so that each is
+    // drawn where the one before it was.
+    let fx = Fixture::new("double-click-twice");
+    let (first, second) = (fx.path("Projects/atlas"), fx.path("Projects/atlas/inner"));
+    std::fs::remove_file(first.join("Project Atlas.txt")).unwrap();
+    std::fs::create_dir_all(second.join("innermost")).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.go_to(&fx.path("Projects"));
+    let spot = ui.snapshot(item_id("row", &first)).bounds().center();
+
+    ui.double_click(item_id("row", &first));
+    assert_eq!(ui.folder(), Some(first.clone()));
+    let inner = ui.snapshot(item_id("row", &second)).bounds();
+    assert!(
+        inner.contains(&spot),
+        "the folder inside is at that spot now"
+    );
+
+    // Without a pause the system counts on, and the next double-click
+    // starts with the third click at that spot.
+    ui.nth_click_point(spot, 3);
+    assert_eq!(ui.folder(), Some(first), "the third click only selects");
+    assert_eq!(ui.selected(), ["inner"]);
+    ui.nth_click_point(spot, 4);
+    assert_eq!(ui.folder(), Some(second));
+}
+
+#[gpui_kit::test]
+fn a_second_click_on_another_item_only_selects_it(cx: &mut TestAppContext) {
+    let fx = Fixture::new("second-click-elsewhere");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let (notes, roadmap) = (fx.path("notes.txt"), fx.path("Roadmap.md"));
+    for (view, kind) in [
+        ("view-list", "row"),
+        ("view-icons", "tile"),
+        ("view-columns", "crow"),
+        ("view-gallery", "strip"),
+    ] {
+        ui.click(view);
+        // Two clicks close enough in time and place for the system to count
+        // the second as a double-click, but on different items.
+        ui.click(item_id(kind, &notes));
+        ui.second_click(item_id(kind, &roadmap));
+        assert_eq!(ui.selected(), ["Roadmap.md"], "{view}");
+        let calls = ui.system_calls();
+        assert!(calls.is_empty(), "{view}: {calls:?}");
+    }
+
+    // The same after a click in the empty space beside the items.
+    ui.click("view-list");
+    let empty = empty_list_space(&mut ui, &fx);
+    ui.click_point(empty);
+    assert!(ui.selected().is_empty());
+    ui.second_click(item_id("row", &notes));
+    assert_eq!(ui.selected(), ["notes.txt"]);
+    assert!(ui.system_calls().is_empty());
+
+    // A double-click that is all on the item opens it straight afterwards.
+    ui.double_click(item_id("row", &notes));
+    assert_eq!(ui.system_calls(), [SystemCall::Open(notes)]);
 }
 
 // ----- new tabs ---------------------------------------------------------------------

@@ -493,6 +493,15 @@ impl<'a> Ui<'a> {
         });
     }
 
+    /// One click at `position`, on whatever is there, as the `nth` click in
+    /// a row at that spot: the second click of a double-click is 2. The
+    /// clicks before it have done their work by then.
+    pub fn nth_click_point(&mut self, position: Point<Pixels>, nth: usize) {
+        self.step(format!("click {nth} at {position:?}"), |window, cx| {
+            click_point_as(window, position, MouseButton::Left, nth, cx)
+        });
+    }
+
     pub fn right_click(&mut self, id: impl Into<ElementId>) {
         let id = id.into();
         self.step(format!("right-click {id:?}"), |window, cx| {
@@ -655,7 +664,7 @@ impl<'a> Ui<'a> {
         modifiers: gpui_kit::Modifiers,
     ) {
         self.step(format!("drag from {start:?} to {end:?}"), |window, cx| {
-            press_and_move(window, cx, start, end, modifiers);
+            press_and_move(window, cx, start, end, modifiers, 1);
             window.dispatch_event(
                 MouseUpEvent {
                     button: MouseButton::Left,
@@ -668,6 +677,28 @@ impl<'a> Ui<'a> {
             );
             window.render_frame(cx);
         });
+    }
+
+    /// The same without modifiers, with the press counted as the `nth` click
+    /// in a row at `start`: a second click that moves while it is down is 2.
+    pub fn nth_drag_points(&mut self, start: Point<Pixels>, end: Point<Pixels>, nth: usize) {
+        self.step(
+            format!("click {nth} at {start:?}, dragged to {end:?}"),
+            |window, cx| {
+                press_and_move(window, cx, start, end, Default::default(), nth);
+                window.dispatch_event(
+                    MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: end,
+                        modifiers: Default::default(),
+                        click_count: nth,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.render_frame(cx);
+            },
+        );
     }
 
     /// Press the left button at `start` and drag to `end` without letting go.
@@ -683,7 +714,7 @@ impl<'a> Ui<'a> {
         modifiers: gpui_kit::Modifiers,
     ) {
         self.step(format!("hold from {start:?} to {end:?}"), |window, cx| {
-            press_and_move(window, cx, start, end, modifiers);
+            press_and_move(window, cx, start, end, modifiers, 1);
         });
     }
 
@@ -960,14 +991,16 @@ fn click_point_as(
     window.render_frame(cx);
 }
 
-/// Move to `start`, press the left button, and drag to `end`, with a frame
-/// between each step so the window sees each one as a person would.
+/// Move to `start`, press the left button as the `click_count`th click in a
+/// row there, and drag to `end`, with a frame between each step so the window
+/// sees each one as a person would.
 fn press_and_move(
     window: &mut Window,
     cx: &mut App,
     start: Point<Pixels>,
     end: Point<Pixels>,
     modifiers: gpui_kit::Modifiers,
+    click_count: usize,
 ) {
     let pressed = Some(MouseButton::Left);
     let moves = [
@@ -992,7 +1025,7 @@ fn press_and_move(
                     button: MouseButton::Left,
                     position,
                     modifiers,
-                    click_count: 1,
+                    click_count,
                     first_mouse: false,
                 }
                 .to_platform_input(),

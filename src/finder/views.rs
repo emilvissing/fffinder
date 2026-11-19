@@ -94,6 +94,88 @@ pub(super) fn drag_frame(cx: &App) -> Div {
         .text_size(ui(12.))
 }
 
+/// What a press of the mouse landed on, in a file view.
+enum Pressed {
+    /// The item at this path.
+    Item(PathBuf),
+    /// The empty space beside the items.
+    EmptySpace,
+    /// An item or empty space that left the press alone, as the rest of a
+    /// double-click on something outside the views.
+    LeftAlone,
+}
+
+/// The last two presses of the mouse in the window, as far as the file views
+/// took them. The system counts clicks by place and time alone, so the second
+/// click of a double-click can land on an item the first one wasn't on: the
+/// one under a dialog's button, when the first click closed the dialog. These
+/// tell that from a double-click on the item.
+#[derive(Default)]
+pub(super) struct Presses {
+    /// What the last press landed on, or `None` outside the file views.
+    last: Option<Pressed>,
+    /// The same for the press before it.
+    before: Option<Pressed>,
+}
+
+impl Presses {
+    /// The mouse went down somewhere in the window. This comes before the
+    /// press reaches what it landed on, which then says what that was.
+    fn began(&mut self) {
+        self.before = self.last.take();
+    }
+
+    /// Whether a press that the system counts as the `click_count`th click in
+    /// a row at its spot is the rest of a double-click on something outside
+    /// the views: the press before it landed there. The views leave such a
+    /// press alone. They leave only that one alone, and the press after it
+    /// is a click again, or a double-click on what has come under the mouse
+    /// would open nothing until the mouse rested or moved.
+    pub(super) fn is_stray(&self, click_count: usize) -> bool {
+        click_count >= 2 && self.before.is_none()
+    }
+
+    /// The press landed on the item at `path`, as the system's `click_count`th
+    /// click in a row at that spot. Returns which click in a row it is for
+    /// the item: the system's count when the press before it was on this item
+    /// too, and a first click after a press on another item, in empty space,
+    /// or one that was left alone. After a press on anything else it returns
+    /// `None`: this one is the rest of a double-click on that, and no click
+    /// on the item at all.
+    fn on_item(&mut self, path: &std::path::Path, click_count: usize) -> Option<usize> {
+        if self.is_stray(click_count) {
+            self.last = Some(Pressed::LeftAlone);
+            return None;
+        }
+        let count = match &self.before {
+            _ if click_count < 2 => click_count,
+            Some(Pressed::Item(before)) if before == path => click_count,
+            _ => 1,
+        };
+        self.last = Some(Pressed::Item(path.to_path_buf()));
+        Some(count)
+    }
+
+    /// The press landed in a view's empty space, as the system's
+    /// `click_count`th click in a row at that spot. Returns whether it is a
+    /// click there, and not the rest of a double-click on something outside
+    /// the views.
+    pub(super) fn in_empty_space(&mut self, click_count: usize) -> bool {
+        let stray = self.is_stray(click_count);
+        self.last = Some(match stray {
+            true => Pressed::LeftAlone,
+            false => Pressed::EmptySpace,
+        });
+        !stray
+    }
+
+    /// Presses were made that the browser didn't hear of, in a window over
+    /// its own or while its tab was hidden. What it remembers is out of date.
+    fn forget(&mut self) {
+        *self = Presses::default();
+    }
+}
+
 /// How wide and tall each item in the icon view is, in points, for icons
 /// `icon_size` points big.
 pub(super) fn tile_size(icon_size: f32) -> (f32, f32) {
@@ -309,6 +391,44 @@ impl Finder {
         })
     }
 
+    /// Hears of every press of the mouse in the window before it reaches what
+    /// it landed on. A dialog or a menu over the files takes its presses
+    /// without this browser's own elements getting them.
+    pub(super) fn press_capture(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        view.update(cx, |this, _| this.presses.began());
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
+    /// The mouse was pressed, or will be, where this browser doesn't hear of
+    /// it: in its Quick Look window, or while its tab is hidden.
+    pub(crate) fn forget_presses(&mut self) {
+        self.presses.forget();
+    }
+
+    /// Which click in a row a press on row `ix` is for its item, or `None`
+    /// when it's no click on it (see [`Presses::on_item`]).
+    fn press_on_row(&mut self, ix: usize, click_count: usize) -> Option<usize> {
+        let row = self.rows.get(ix)?;
+        self.presses.on_item(&row.entry.path, click_count)
+    }
+
+    /// The same for row `ix` of the column view's pane `col`.
+    fn press_on_column_row(&mut self, col: usize, ix: usize, click_count: usize) -> Option<usize> {
+        let entry = self.columns.get(col)?.entries.get(ix)?;
+        self.presses.on_item(&entry.path, click_count)
+    }
+
     /// Shared mouse handling for an item in the icon, list, or gallery views.
     /// `wrapper` hosts the context menu so the item itself stays observable
     /// in UI tests.
@@ -337,13 +457,18 @@ impl Finder {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    let Some(click_count) = this.press_on_row(ix, event.click_count) else {
+                        // Left to go on, it would give the files the keyboard.
+                        cx.stop_propagation();
+                        return;
+                    };
                     let already = this.selection.contains(ix);
-                    if event.click_count >= 2
+                    if click_count >= 2
                         || event.modifiers.secondary(cx)
                         || event.modifiers.shift
                         || !already
                     {
-                        this.click_row(ix, event.modifiers, event.click_count, window, cx);
+                        this.click_row(ix, event.modifiers, click_count, window, cx);
                     } else {
                         this.focus_files(window, cx);
                     }
@@ -952,7 +1077,11 @@ impl Finder {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                            this.begin_marquee(event, cx)
+                            // The row leaves a stray press alone, and a box
+                            // from it would select the row all the same.
+                            if !this.presses.is_stray(event.click_count) {
+                                this.begin_marquee(event, cx)
+                            }
                         }),
                     )
                     .when(searching, |this| {
@@ -1146,8 +1275,12 @@ impl Finder {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
+                    let Some(click_count) = this.press_on_column_row(col, ix, event.click_count)
+                    else {
+                        return;
+                    };
                     this.select_in_column(col, ix, window, cx);
-                    if event.click_count >= 2
+                    if click_count >= 2
                         && let Some(entry) = this.column_selection()
                     {
                         if this.picker.is_some() && !entry.is_navigable() {
@@ -1363,10 +1496,106 @@ impl Finder {
 
 #[cfg(test)]
 mod tests {
-    use super::drag_frame;
+    use super::{Presses, drag_frame};
     use fffinder_core::Appearance;
     use gpui_kit::component::ActiveTheme as _;
     use gpui_kit::{Styled as _, TestAppContext};
+    use std::path::Path;
+
+    /// A press on the item at `path`: the window hears of it first, and
+    /// then the item does.
+    fn press(presses: &mut Presses, path: &str, click_count: usize) -> Option<usize> {
+        presses.began();
+        presses.on_item(Path::new(path), click_count)
+    }
+
+    #[test]
+    fn a_second_click_counts_on_the_item_the_first_was_on() {
+        let mut presses = Presses::default();
+
+        assert_eq!(press(&mut presses, "/a", 1), Some(1));
+        assert_eq!(press(&mut presses, "/a", 2), Some(2));
+
+        // Clicked on without a pause, an item that came under the mouse is
+        // clicked for the first time, and opens with the click after that.
+        assert_eq!(press(&mut presses, "/b", 3), Some(1));
+        assert_eq!(press(&mut presses, "/b", 4), Some(4));
+    }
+
+    #[test]
+    fn a_second_click_after_one_in_empty_space_is_a_first_click() {
+        let mut presses = Presses::default();
+        presses.began();
+        assert!(presses.in_empty_space(1));
+
+        assert_eq!(press(&mut presses, "/a", 2), Some(1));
+        assert_eq!(press(&mut presses, "/a", 3), Some(3));
+
+        // And in empty space, after one on an item or beside the items.
+        presses.began();
+        assert!(presses.in_empty_space(4));
+        presses.began();
+        assert!(presses.in_empty_space(5));
+    }
+
+    #[test]
+    fn the_rest_of_a_double_click_on_something_else_is_no_click_on_an_item() {
+        let mut presses = Presses::default();
+        assert_eq!(press(&mut presses, "/a", 1), Some(1));
+
+        // A press on a dialog's button: only the window hears of it.
+        presses.began();
+        assert_eq!(press(&mut presses, "/a", 2), None);
+
+        // Nor is it a click in empty space, however many presses the button
+        // had before it.
+        presses.began();
+        presses.began();
+        presses.began();
+        assert!(presses.is_stray(3));
+        assert!(!presses.in_empty_space(3));
+
+        // A click of its own counts again.
+        assert_eq!(press(&mut presses, "/a", 1), Some(1));
+        assert_eq!(press(&mut presses, "/a", 2), Some(2));
+    }
+
+    #[test]
+    fn the_click_after_one_that_was_left_alone_is_a_first_click() {
+        let mut presses = Presses::default();
+
+        // A double-click on a dialog's button, over an item. Clicked on
+        // without a pause, the item is clicked for the first time, and
+        // opens with the click after that.
+        presses.began();
+        assert_eq!(press(&mut presses, "/a", 2), None);
+        assert_eq!(press(&mut presses, "/a", 3), Some(1));
+        assert_eq!(press(&mut presses, "/a", 4), Some(4));
+
+        // Over empty space, the click after it is a click there.
+        presses.began();
+        presses.began();
+        assert!(!presses.in_empty_space(2));
+        presses.began();
+        assert!(!presses.is_stray(3));
+        assert!(presses.in_empty_space(3));
+
+        // Or on an item that has come under the mouse.
+        presses.began();
+        presses.began();
+        assert!(!presses.in_empty_space(2));
+        assert_eq!(press(&mut presses, "/a", 3), Some(1));
+    }
+
+    #[test]
+    fn a_second_click_after_presses_that_went_unheard_is_no_click_on_an_item() {
+        let mut presses = Presses::default();
+        assert_eq!(press(&mut presses, "/a", 1), Some(1));
+
+        presses.forget();
+
+        assert_eq!(press(&mut presses, "/a", 2), None);
+    }
 
     #[gpui_kit::test]
     fn drag_frames_set_a_readable_text_color_in_both_themes(cx: &mut TestAppContext) {

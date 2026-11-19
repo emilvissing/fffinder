@@ -584,6 +584,9 @@ pub struct Finder {
     /// begun in the file area since. The second press of a double-click on
     /// the button finds what the first one put in its place.
     message_button_clicked: bool,
+    /// What the last presses of the mouse landed on, for telling a
+    /// double-click on an item from a second click that only ends up on it.
+    presses: views::Presses,
 
     nu_open: bool,
     /// The open "Rename N Items" dialog's state.
@@ -845,6 +848,7 @@ impl Finder {
             quick_look_window: None,
             item_menu_at: None,
             message_button_clicked: false,
+            presses: views::Presses::default(),
             type_select: String::new(),
             type_select_at: None,
             nu_open: false,
@@ -2677,6 +2681,12 @@ impl Finder {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The rest of a double-click on something else, as on a row. Left
+        // to go on, it would give the files the keyboard.
+        if !self.presses.in_empty_space(event.click_count) {
+            cx.stop_propagation();
+            return;
+        }
         // As with a click on a row: this press was refused, and only said why.
         if self.renaming.is_some() {
             return;
@@ -4247,6 +4257,9 @@ impl Render for Finder {
                 }),
             )
             .relative()
+            // First, so that it hears of a press before anything in the
+            // browser can keep the press to itself.
+            .child(self.press_capture(cx))
             .child(
                 h_flex()
                     .size_full()

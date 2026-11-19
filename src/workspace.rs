@@ -172,10 +172,13 @@ impl Workspace {
     }
 
     /// The active tab is about to be hidden. A name being edited in it ends
-    /// here: a hidden tab draws nothing, so its field can't go on.
+    /// here: a hidden tab draws nothing, so its field can't go on. It hears
+    /// of no press of the mouse either, so it forgets the last ones.
     fn leave_active_tab(&self, window: &mut Window, cx: &mut App) {
-        self.active()
-            .update(cx, |finder, cx| finder.end_rename(window, cx));
+        self.active().update(cx, |finder, cx| {
+            finder.end_rename(window, cx);
+            finder.forget_presses();
+        });
     }
 
     /// Open a tab at `start`, after the active one, and show it.

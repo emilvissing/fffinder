@@ -286,6 +286,9 @@ impl Finder {
                         this.quick_look_window = None;
                         this.quick_look_closed();
                         this.forget_pdf_surface(Surface::QuickLook);
+                        // Presses in that window weren't heard of in this
+                        // one, the one that closed it among them.
+                        this.forget_presses();
                         cx.notify();
                     })
                     .detach();

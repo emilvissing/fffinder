@@ -280,7 +280,7 @@ Drag a header onto another header to move it there. Name stays first, and in sea
 | Cmd+click | Add the item to the selection, or remove it. |
 | Shift+click | Select the range from the last item clicked. |
 | Click one item of a multiple selection | Narrow the selection to it. |
-| Double-click | Open the item. |
+| Double-click | Open the item. Both clicks have to be on it. A second click that follows a click on another item only selects. One that follows a click on something the click took away, like a dialog's Done button or a menu item, does nothing to the files: it doesn't open or select the item now under the pointer, or clear the selection. |
 | Right-click | Select the item, unless it is already selected, and show its menu. |
 | Drag in empty space | Select everything the box touches. In the list view, drag from any column but Name. Past the top or bottom of the view, the view scrolls. |
 | Cmd+drag or Shift+drag in empty space | Add what the box touches to the selection. |
