@@ -37,11 +37,32 @@ fn view_buttons_switch_views(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn toolbar_buttons_that_would_do_nothing_are_disabled(cx: &mut TestAppContext) {
+    let fx = Fixture::new("disabled-buttons");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // A disabled button is drawn dimmed, so where these three have nothing
+    // to do they have to be disabled, and not only do nothing. A button
+    // tells a test when it is disabled, and nothing when it isn't.
+    let disabled = |ui: &mut Ui| {
+        ["back", "forward", "search-scope"].map(|id| ui.snapshot(id).disabled() == Some(true))
+    };
+    assert_eq!(disabled(&mut ui), [true, true, false], "in a new window");
+
+    ui.double_click(item_id("tile", &fx.path("Projects")));
+    assert_eq!(disabled(&mut ui), [false, true, false], "a folder further");
+    ui.click("back");
+    assert_eq!(disabled(&mut ui), [true, false, false], "and back again");
+
+    // Recents isn't a folder, so there is none to search only in.
+    ui.click("recents");
+    assert_eq!(disabled(&mut ui), [false, true, true], "in Recents");
+}
+
+#[gpui_kit::test]
 fn back_and_forward_buttons(cx: &mut TestAppContext) {
     let fx = Fixture::new("back-forward");
     let mut ui = Ui::open(cx, &fx.dir);
-    // Buttons don't report a disabled state to tests; check that clicking
-    // them does nothing instead.
+    // With nowhere to go, neither button does anything.
     ui.click("back");
     ui.click("forward");
     assert_eq!(ui.folder().as_deref(), Some(fx.dir.as_path()));

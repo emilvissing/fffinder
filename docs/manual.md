@@ -182,12 +182,12 @@ From left to right, with everything showing:
 | --- | --- |
 | Show Sidebar | Appears only when the sidebar is hidden. Shows it again. |
 | Title | The folder's name, or `Searching "text"` during a search. On macOS and Linux, drag empty toolbar space to move the window, and double-click it to zoom (maximize on Linux). |
-| Back, Forward | Move through the window's history. The back and forward buttons on a mouse do the same. A search you left by going somewhere else is part of the history, and Back during a search ends it and stays in its folder. See [Searching](#searching). Each button's tooltip names the place it leads to, as in Back to "Projects". Right-click a button for a menu of the places it leads to, and choose one to go straight there. See [Toolbar menus](#toolbar-menus). |
+| Back, Forward | Move through the window's history. The back and forward buttons on a mouse do the same. Back or Forward is dimmed while it has nowhere to go. A search you left by going somewhere else is part of the history, and Back during a search ends it and stays in its folder. See [Searching](#searching). Each button's tooltip names the place it leads to, as in Back to "Projects". Right-click a button for a menu of the places it leads to, and choose one to go straight there. See [Toolbar menus](#toolbar-menus). |
 | as Icons, as List, as Columns, as Gallery | Switch the view. |
 | Sort and View Options | The sort menu. See [Sorting and hidden files](#sorting-and-hidden-files). |
 | Nushell | The Nushell menu. See [Menus](#menus). |
 | Actions (…) | File commands and dialogs. See [Menus](#menus). |
-| Search Only in "Folder name" | Searches only the folder the window shows, and everything inside it, instead of every search location. Click it again to search This Computer. It's the same choice as the scope bar's, so you can make it before you type. It's off in Recents and other results that aren't one folder. `--here` on the command line starts with it on. |
+| Search Only in "Folder name" | Searches only the folder the window shows, and everything inside it, instead of every search location. Click it again to search This Computer. It's the same choice as the scope bar's, so you can make it before you type. It's off, and dimmed, in Recents and other results that aren't one folder. `--here` on the command line starts with it on. |
 | Search field | Search as you type. The clear button ends the search. |
 | Minimize, Maximize, Close | Linux only, when the window manager doesn't draw a title bar, as on GNOME with Wayland. The toolbar is then the title bar, and right-clicking empty toolbar space shows the window menu. |
 

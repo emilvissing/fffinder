@@ -137,21 +137,24 @@ pub fn pill(cx: &App) -> Div {
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
-pub fn pill_button(id: impl Into<ElementId>, icon: impl Into<Icon>, cx: &App) -> Button {
+/// A button in a [`pill`]. It takes its color from the kit, which draws a
+/// button in the window's text color and dims one that is disabled. A color
+/// set on the button, here or by a caller, would replace both, and a
+/// disabled button would look enabled.
+pub fn pill_button(id: impl Into<ElementId>, icon: impl Into<Icon>) -> Button {
     Button::new(id)
         .ghost()
         .icon(icon)
         .rounded(ButtonRounded::Size(ui(15.)))
         .w(ui(PILL_BUTTON_WIDTH))
         .h(ui(28.))
-        .text_color(cx.theme().foreground)
 }
 
 /// A pill button that opens a menu, with a caret after its icon.
-pub fn menu_button(id: impl Into<ElementId>, icon: impl Into<Icon>, cx: &App) -> Button {
+pub fn menu_button(id: impl Into<ElementId>, icon: impl Into<Icon>) -> Button {
     // The button puts its icon and caret at its two edges; the padding moves
     // them in from the pill's rounded ends.
-    pill_button(id, icon, cx)
+    pill_button(id, icon)
         .w(ui(MENU_BUTTON_WIDTH))
         .px(ui(8.))
         .dropdown_caret(true)
@@ -241,8 +244,8 @@ fn window_controls(window: &Window, cx: &mut Context<Finder>) -> Option<Div> {
     } else {
         (IconName::WindowMaximize, "Maximize")
     };
-    let button = |id: &'static str, icon: IconName, tip: &'static str, cx: &App| {
-        pill_button(id, icon, cx)
+    let button = |id: &'static str, icon: IconName, tip: &'static str| {
+        pill_button(id, icon)
             .w(ui(WINDOW_BUTTON_WIDTH))
             .tooltip(tip)
     };
@@ -253,18 +256,18 @@ fn window_controls(window: &Window, cx: &mut Context<Finder>) -> Option<Div> {
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .when(supported.minimize, |this| {
             this.child(
-                button("window-minimize", IconName::WindowMinimize, "Minimize", cx)
+                button("window-minimize", IconName::WindowMinimize, "Minimize")
                     .on_click(|_, window, _| window.minimize_window()),
             )
         })
         .when(supported.maximize, |this| {
             this.child(
-                button("window-maximize", maximize_icon, maximize_tip, cx)
+                button("window-maximize", maximize_icon, maximize_tip)
                     .on_click(|_, window, _| window.zoom_window()),
             )
         })
         .child(
-            button("window-close", IconName::WindowClose, "Close Window", cx)
+            button("window-close", IconName::WindowClose, "Close Window")
                 .on_click(cx.listener(|this, _, window, _| this.close_window(window))),
         );
     Some(controls)
@@ -519,7 +522,7 @@ impl Finder {
         let nav = pill(cx)
             .child(with_history_menu(
                 "back-history",
-                pill_button("back", IconName::ChevronLeft, cx)
+                pill_button("back", IconName::ChevronLeft)
                     .tooltip_with_action(back_tip, &GoBack, Some(FINDER))
                     .disabled(back_to.is_none())
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -530,7 +533,7 @@ impl Finder {
             ))
             .child(with_history_menu(
                 "forward-history",
-                pill_button("forward", IconName::ChevronRight, cx)
+                pill_button("forward", IconName::ChevronRight)
                     .tooltip_with_action(forward_tip, &GoForward, Some(FINDER))
                     .disabled(forward_to.is_none())
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -546,7 +549,7 @@ impl Finder {
                            m: ViewMode,
                            action: &dyn Action,
                            cx: &mut Context<Self>| {
-            pill_button(id, icon, cx)
+            pill_button(id, icon)
                 .tooltip_with_action(tip, action, Some(FINDER))
                 .selected(mode == m)
                 .when(mode == m, |b| b.bg(pal.pill_selected))
@@ -590,7 +593,7 @@ impl Finder {
         let views_menu = {
             let view = view.clone();
             pill(cx).child(
-                menu_button("view-menu", view_icon(mode), cx)
+                menu_button("view-menu", view_icon(mode))
                     .tooltip("View")
                     .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, _| {
                         view_mode_items(&view, menu, mode, window)
@@ -600,7 +603,7 @@ impl Finder {
 
         let sort_view = view.clone();
         let sort = pill(cx).child(
-            menu_button("sort", Lucide::ArrowUpDown, cx)
+            menu_button("sort", Lucide::ArrowUpDown)
                 .tooltip("Sort and View Options")
                 .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
                     sort_menu(&sort_view, menu, window, cx)
@@ -609,7 +612,7 @@ impl Finder {
 
         let nu_view = view.clone();
         let nushell = pill(cx).child(
-            menu_button("nushell", IconName::SquareTerminal, cx)
+            menu_button("nushell", IconName::SquareTerminal)
                 .tooltip("Nushell")
                 .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
                     nushell_menu(&nu_view, menu, window, cx)
@@ -618,7 +621,7 @@ impl Finder {
 
         let actions_view = view.clone();
         let actions = pill(cx).child(
-            menu_button("actions", IconName::Ellipsis, cx)
+            menu_button("actions", IconName::Ellipsis)
                 .tooltip("Actions")
                 .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
                     actions_menu(&actions_view, menu, window, cx)
@@ -636,7 +639,7 @@ impl Finder {
             None => "Search Only in This Folder".to_string(),
         };
         let scope = pill(cx).child(
-            pill_button("search-scope", Lucide::FolderSearch, cx)
+            pill_button("search-scope", Lucide::FolderSearch)
                 .tooltip(scope_tip)
                 .disabled(folder.is_none())
                 .selected(in_folder)
@@ -726,7 +729,7 @@ impl Finder {
                 .when(!self.config.show_sidebar, |this| {
                     this.child(
                         pill(cx).child(
-                            pill_button("show-sidebar", IconName::PanelLeft, cx)
+                            pill_button("show-sidebar", IconName::PanelLeft)
                                 .tooltip_with_action("Show Sidebar", &ToggleSidebar, Some(FINDER))
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.toggle_sidebar(&ToggleSidebar, window, cx)
@@ -1049,8 +1052,19 @@ fn actions_menu(
 
 #[cfg(test)]
 mod tests {
-    use super::{TOOLBAR_FULL_WIDTH, TOOLBAR_MIN_WIDTH, ToolbarFit, history_labels, history_tip};
+    use super::{
+        TOOLBAR_FULL_WIDTH, TOOLBAR_MIN_WIDTH, ToolbarFit, history_labels, history_tip, pill_button,
+    };
     use crate::model::{Location, SavedSearch, Visit};
+    use fffinder_core::Appearance;
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Selectable as _};
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        Context, Hsla, IntoElement, ParentElement as _, Render, TestAppContext, Window, canvas,
+    };
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     /// A place the window showed, with no search.
     fn place(location: Location) -> Visit {
@@ -1089,6 +1103,59 @@ mod tests {
             ToolbarFit::for_room(TOOLBAR_MIN_WIDTH - 200.),
             ToolbarFit::SortInActions
         );
+    }
+
+    /// What a window shows for the test below: one button. It keeps the text
+    /// color inside the button, which is the color its icon is drawn in.
+    struct Inked {
+        button: fn() -> Button,
+        ink: Rc<Cell<Option<Hsla>>>,
+    }
+
+    impl Render for Inked {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let ink = self.ink.clone();
+            (self.button)().child(canvas(
+                move |_, window, _| ink.set(Some(window.text_style().color)),
+                |_, _, _, _| {},
+            ))
+        }
+    }
+
+    /// The color the icon of the button that `button` makes is drawn in.
+    fn ink(button: fn() -> Button, cx: &mut TestAppContext) -> Hsla {
+        let ink = Rc::new(Cell::new(None));
+        let drawn = ink.clone();
+        let (_, cx) = cx.add_window_view(|_, _| Inked { button, ink });
+        cx.update(|window, cx| window.render_frame(cx));
+        drawn.get().expect("the button was drawn")
+    }
+
+    #[gpui_kit::test]
+    fn a_disabled_pill_button_is_drawn_dimmed_in_both_themes(cx: &mut TestAppContext) {
+        fn pill() -> Button {
+            pill_button("back", IconName::ChevronLeft)
+        }
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::theme::install(cx);
+        });
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            cx.update(|cx| crate::theme::apply(appearance, None, cx));
+            let text = cx.read(|cx| cx.theme().foreground);
+
+            // One that can be pressed has the window's text color, selected
+            // or not.
+            let enabled = ink(pill, cx);
+            assert_eq!(enabled, text, "{appearance:?}");
+            assert_eq!(ink(|| pill().selected(true), cx), text, "{appearance:?}");
+
+            // One that can't is dimmed as the kit dims its own buttons.
+            let disabled = ink(|| pill().disabled(true), cx);
+            let kits = ink(|| Button::new("kit").ghost().disabled(true), cx);
+            assert_eq!(disabled, kits, "{appearance:?}");
+            assert_ne!(disabled, enabled, "{appearance:?}");
+        }
     }
 
     #[test]

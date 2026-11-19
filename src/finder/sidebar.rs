@@ -472,7 +472,7 @@ impl Finder {
                                     .bg(gpui_kit::transparent_black())
                                     .border_color(gpui_kit::transparent_black())
                                     .child(
-                                        pill_button("hide-sidebar", IconName::PanelLeft, cx)
+                                        pill_button("hide-sidebar", IconName::PanelLeft)
                                             .tooltip_with_action(
                                                 "Hide Sidebar",
                                                 &ToggleSidebar,
