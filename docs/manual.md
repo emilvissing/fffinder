@@ -327,7 +327,7 @@ Each group has a header with its name and how many items it holds. Click the hea
 
 ## Searching
 
-Type in the search field (Cmd+F) to search. Searches start 50 ms after you stop typing. Return searches right away and moves into the results, selecting the first one. Down Arrow in the search field also moves into the results. If the results aren't in yet, both keys wait for them and then move in. Typing on, or moving the caret, calls that off, and when nothing is found the keyboard stays in the search field. Return doesn't run a search again when its results are already in; Refresh (Cmd+R) does.
+Type in the search field (Cmd+F) to search. Searches start 50 ms after you stop typing. Return searches right away and moves into the results, selecting the first one. Down Arrow in the search field also moves into the results. If the results aren't in yet, both keys wait for them and then move in. Typing on, or moving the caret, calls that off, and when nothing is found the keyboard stays in the search field. Return doesn't run a search again when its results are already in; Refresh (Cmd+R) does. Escape empties the search field, which ends the search, and the keyboard stays there for other words. Escape in an empty search field gives the keyboard to the files.
 
 From the first letter, the file area shows placeholders in place of the items it was showing, until the results are in. It does the same when you switch between Name and Contents. After that, the results stay while a search runs again, as when you type on, and so does No Results. A contents search can take seconds, so while one runs again No Results reads Searching… instead. Results for other words start at the top with nothing selected, and so do the results after you switch between This Computer and the folder, between Name and Contents, or to another kind. A search that runs again as it is, as with Refresh or while the index is being built, keeps what's selected and stays scrolled where it was. When you end a search, with Escape or by emptying the search field, the window is back where it was before the search: the same items are selected, and the view is scrolled to the same place. If you chose another view during the search, it also scrolls to the selected item.
 
@@ -650,7 +650,7 @@ Or start with `|` to use a whole pipeline, which must keep the `path` column:
 | sort-by size --reverse | first 20
 ```
 
-The filter runs 400 ms after you stop typing, or right away when you press Return. The status bar counts how many items pass. Errors show in red below the bar. The close button removes the filter, and so does Cmd+Alt+F.
+The filter runs 400 ms after you stop typing, or right away when you press Return. The status bar counts how many items pass. Errors show in red below the bar. The close button removes the filter, and so does Cmd+Alt+F. Escape empties the field, which turns the filter off, and Escape in an empty field gives the keyboard to the files. The bar stays open either way.
 
 While searching, the filter bar's **Save** button opens "Save Smart Folder". Name it, and the search, its scope folder, the kind, Name or Contents, and the filter are saved in the sidebar under Smart Folders. Clicking a Smart Folder runs the search again with the filter, so it stays up to date.
 
@@ -982,6 +982,7 @@ F2, Cut, Copy, and the Trash leave Favorites and Locations rows alone, so a key 
 | --- | --- |
 | Return | Search now and move into the results |
 | Down | Move into the results |
+| Escape | Empty the field and end the search; in an empty field, give the keyboard to the files |
 
 ## Settings
 

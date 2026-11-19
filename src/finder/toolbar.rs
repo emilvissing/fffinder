@@ -477,6 +477,18 @@ impl Finder {
                     cx.stop_propagation();
                 }
             }))
+            // Escape empties the field, which ends the search. In a field
+            // that's already empty it gives the files the keyboard. The field
+            // takes Escape as an action and passes nothing on, so a key
+            // listener like the one above would never hear of it.
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::Escape, window, cx| {
+                    if this.search_input.read(cx).value().is_empty() {
+                        this.focus_files(window, cx);
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             .child(
                 Input::new(&self.search_input)
                     .id("search")

@@ -260,6 +260,17 @@ impl Finder {
                     .px(ui(14.))
                     .gap(ui(8.))
                     .text_size(ui(12.))
+                    // As in the search field, Escape empties the field, and
+                    // in one that's already empty it gives the files the
+                    // keyboard. The bar stays open.
+                    .capture_action(cx.listener(
+                        |this, _: &gpui_kit::component::input::Escape, window, cx| {
+                            if this.filter_input.read(cx).value().is_empty() {
+                                this.focus_files(window, cx);
+                                cx.stop_propagation();
+                            }
+                        },
+                    ))
                     .child(
                         Icon::new(Lucide::Funnel)
                             .with_size(ui(14.))

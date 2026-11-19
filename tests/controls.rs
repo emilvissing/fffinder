@@ -414,6 +414,46 @@ fn search_field_typing_escape_and_down_arrow(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn escape_in_an_empty_search_field_gives_the_files_the_keyboard(cx: &mut TestAppContext) {
+    use gpui_kit::component::WindowExt as _;
+    let fx = Fixture::new("search-escape");
+    std::fs::create_dir(fx.path("Empty")).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    let in_a_field = |ui: &mut Ui| ui.window(|window, cx| window.has_focused_input(cx));
+    let query = |ui: &Ui| ui.read(|f| f.query().to_string());
+    ui.click("search");
+    ui.type_text("atlas");
+
+    // With words in it, Escape empties the field and stays there, so other
+    // words can be typed.
+    ui.press("escape");
+    assert_eq!(query(&ui), "");
+    assert!(in_a_field(&mut ui), "the first Escape stays in the field");
+    ui.type_text("atlas");
+    assert_eq!(query(&ui), "atlas");
+
+    ui.press("escape");
+    assert_eq!(query(&ui), "");
+    assert!(!ui.exists("scope-computer"));
+    ui.press("escape");
+    assert!(ui.files_focused(), "the second Escape leaves the field");
+    assert_eq!(ui.names().len(), 5, "the folder's items are showing");
+    // With the keyboard in the files, a letter selects an item. In the
+    // field it would search.
+    ui.type_text("r");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert_eq!(query(&ui), "");
+
+    // The same from a field that was empty all along, and in a folder with
+    // no items for the keyboard to move into.
+    ui.go_to(&fx.path("Empty"));
+    ui.press(&cmd("f"));
+    assert!(in_a_field(&mut ui));
+    ui.press("escape");
+    assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
 fn search_scope_button(cx: &mut TestAppContext) {
     let fx = Fixture::new("scope-button");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -2203,6 +2243,30 @@ fn the_keys_on_the_filter_bars_close_button_remove_the_filter(cx: &mut TestAppCo
     assert!(!ui.exists("filter-input"));
     assert_eq!(ui.read(|f| f.filter_text().to_string()), "");
     assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn escape_in_an_empty_filter_field_gives_the_files_the_keyboard(cx: &mut TestAppContext) {
+    use gpui_kit::component::WindowExt as _;
+    let fx = Fixture::new("filter-escape");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("alt-f"));
+    ui.type_text("size > 1kb");
+    ui.press("enter");
+    assert_eq!(ui.read(|f| f.filter_text().to_string()), "size > 1kb");
+
+    // With a condition in it, Escape empties the field, which turns the
+    // filter off, and stays there for another condition.
+    ui.press("escape");
+    assert_eq!(ui.read(|f| f.filter_text().to_string()), "");
+    assert!(
+        ui.window(|window, cx| window.has_focused_input(cx)),
+        "the first Escape stays in the field"
+    );
+
+    ui.press("escape");
+    assert!(ui.files_focused(), "the second Escape leaves the field");
+    assert!(ui.exists("filter-input"), "the bar stays open");
 }
 
 #[gpui_kit::test]
