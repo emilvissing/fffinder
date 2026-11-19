@@ -767,6 +767,290 @@ fn a_search_is_marked_only_when_the_result_limit_left_items_out(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+fn a_sort_chooses_among_every_match_not_among_the_ones_listed(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-sort-limit");
+    for (name, size) in [
+        ("a.log", 10),
+        ("b.log", 3000),
+        ("c.log", 200),
+        ("d.log", 50),
+    ] {
+        std::fs::write(fx.path(name), vec![b'x'; size]).unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    let status = |ui: &mut Ui| ui.snapshot("status-text").label().unwrap().to_string();
+    ui.click("view-list");
+    ui.update(|f, _, cx| {
+        f.set_result_limit(3, cx);
+        f.set_query("*.log".into(), true, cx);
+    });
+    assert_eq!(ui.names().len(), 3, "three of the four fit");
+
+    // The three largest of the four, then the three smallest.
+    ui.click("Size");
+    assert_eq!(ui.names(), ["b.log", "c.log", "d.log"]);
+    assert_eq!(status(&mut ui), "3+ items");
+    ui.select("c.log");
+    ui.click("Size");
+    assert_eq!(ui.names(), ["a.log", "d.log", "c.log"]);
+    assert_eq!(
+        ui.selected(),
+        ["c.log"],
+        "the search that ran again isn't a new one"
+    );
+
+    // The Sort menu's directions search again as well.
+    ui.click("sort");
+    ui.click_menu_item("Descending");
+    assert_eq!(ui.names(), ["b.log", "c.log", "d.log"]);
+    // The direction the list already has is nothing to search again for.
+    let view = ui.view.clone();
+    ui.window(|_, cx| {
+        view.update(cx, |f, cx| {
+            f.set_ascending(false, cx);
+            assert!(!f.search_in_flight_for_test());
+        })
+    });
+    ui.click("Name");
+    assert_eq!(ui.names(), ["a.log", "b.log", "c.log"]);
+
+    // The sort stays on for the searches that follow.
+    ui.update(|f, _, cx| f.set_result_limit(2, cx));
+    assert_eq!(ui.names(), ["a.log", "b.log"]);
+    ui.update(|f, _, cx| f.set_query("[b-d].log".into(), true, cx));
+    assert_eq!(ui.names(), ["b.log", "c.log"]);
+}
+
+#[gpui_kit::test]
+fn a_sort_by_a_word_stays_with_the_names_that_have_it(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-sort-word");
+    std::fs::create_dir_all(fx.path("ledger")).unwrap();
+    for (name, size) in [
+        ("ledger.txt", 5),
+        ("my-ledger-notes.txt", 3000),
+        ("xledgerx.txt", 200),
+        // Only its folder has the word, and it is the largest of them all.
+        ("ledger/huge.bin", 9000),
+    ] {
+        std::fs::write(fx.path(name), vec![b'x'; size]).unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    let listed = |ui: &Ui| {
+        let mut names = ui.names();
+        names.sort();
+        names
+    };
+    ui.click("view-list");
+    ui.update(|f, _, cx| {
+        f.set_result_limit(2, cx);
+        f.set_query("ledger".into(), true, cx);
+    });
+    let best = listed(&ui);
+    assert_eq!(
+        best,
+        ["ledger", "ledger.txt"],
+        "the names that are the word"
+    );
+
+    // Four names have the word, so the largest two of those are listed, and
+    // not the file that is only in a folder named for it.
+    ui.click("Size");
+    assert_eq!(ui.names(), ["my-ledger-notes.txt", "xledgerx.txt"]);
+
+    // Back in the order a search starts with, the best matches are listed again.
+    ui.click("sort");
+    ui.click_menu_item("Relevance");
+    assert_eq!(listed(&ui), best);
+
+    // A list with every match in it is only put in order: the file in the
+    // folder stays, and nothing is searched again.
+    ui.update(|f, _, cx| f.set_result_limit(5, cx));
+    ui.click_without_settling("Size");
+    assert!(!ui.read(|f| f.search_in_flight_for_test()));
+    ui.settle();
+    assert_eq!(
+        ui.names(),
+        [
+            "huge.bin",
+            "my-ledger-notes.txt",
+            "xledgerx.txt",
+            "ledger.txt",
+            "ledger"
+        ]
+    );
+
+    // A sort changed while another search is on its way goes with that
+    // search, though the list on screen has every match of its own.
+    ui.update(|f, _, cx| {
+        f.set_result_limit(2, cx);
+        f.set_query("huge".into(), true, cx);
+    });
+    assert_eq!(ui.names(), ["huge.bin"]);
+    let view = ui.view.clone();
+    ui.window(|_, cx| {
+        view.update(cx, |f, cx| {
+            f.set_query("ledger".into(), true, cx);
+            f.set_ascending(true, cx);
+        })
+    });
+    ui.settle();
+    assert_eq!(ui.names(), ["ledger", "ledger.txt"], "the smallest two");
+}
+
+#[gpui_kit::test]
+fn a_list_with_loose_matches_in_it_keeps_its_items_under_a_sort(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-sort-loose");
+    std::fs::create_dir_all(fx.path("ledger")).unwrap();
+    // A file and the folder have the word in their names. The files in the
+    // folder match it by their path alone.
+    for (name, size) in [
+        ("ledger.txt", 5),
+        ("ledger/a.bin", 300),
+        ("ledger/b.bin", 200),
+        ("ledger/c.bin", 100),
+    ] {
+        std::fs::write(fx.path(name), vec![b'x'; size]).unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    let status = |ui: &mut Ui| ui.snapshot("status-text").label().unwrap().to_string();
+    ui.click("view-list");
+    ui.update(|f, _, cx| {
+        f.set_result_limit(3, cx);
+        f.set_query("ledger".into(), true, cx);
+    });
+    let best = ui.names();
+    assert!(best[..2].contains(&"ledger.txt".to_string()), "{best:?}");
+    assert!(best[..2].contains(&"ledger".to_string()), "{best:?}");
+    let loose = best[2].clone();
+    assert!(loose.ends_with(".bin"), "a file in the folder: {loose}");
+    assert_eq!(status(&mut ui), "3+ items");
+
+    // Two names don't fill three places, so a sort has nothing to choose
+    // among: the rows are put in order, and nothing is searched again.
+    ui.select(&loose);
+    ui.click_without_settling("Size");
+    assert!(!ui.read(|f| f.search_in_flight_for_test()));
+    ui.settle();
+    assert_eq!(ui.names(), [loose.as_str(), "ledger.txt", "ledger"]);
+    assert_eq!(ui.selected(), [loose.as_str()]);
+    ui.click_without_settling("Name");
+    assert!(!ui.read(|f| f.search_in_flight_for_test()));
+    ui.settle();
+    assert_eq!(ui.names(), [loose.as_str(), "ledger", "ledger.txt"]);
+}
+
+#[gpui_kit::test]
+fn results_searched_again_under_a_sort_go_back_to_best_first(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-sort-back");
+    for name in ["zebra.txt", "zebra-notes.txt", "my-zebra.txt"] {
+        std::fs::write(fx.path(name), "x").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_query("zebra".into(), true, cx));
+    let best = ui.names();
+    assert_eq!(best[0], "zebra.txt", "the name that is the word");
+
+    let by_name = ["my-zebra.txt", "zebra-notes.txt", "zebra.txt"];
+    ui.click("Name");
+    assert_eq!(ui.names(), by_name);
+    // The search runs again with the sort on, as Refresh has it do.
+    ui.press(&cmd("r"));
+    assert_eq!(ui.names(), by_name);
+
+    // Every match is listed, and they're as good a match as they were.
+    ui.click("sort");
+    ui.click_menu_item("Relevance");
+    assert_eq!(ui.names(), best);
+}
+
+#[gpui_kit::test]
+fn results_have_what_the_columns_and_groups_show_of_them(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-columns");
+    let file = fx.path("Budget.csv");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    let row = |ui: &Ui| ui.read(|f| f.rows_for_test()[0].clone());
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_query("roadmap".into(), true, cx));
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    // The index holds neither, and nothing shows them yet.
+    assert_eq!(row(&ui).entry.mode, None);
+    assert_eq!(row(&ui).entry.last_opened, None);
+
+    // Groups by a date the index doesn't hold have the date to go by.
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::LastOpened), cx));
+    assert_ne!(ui.read(|f| f.group_headers()), ["No Date"]);
+    ui.update(|f, _, cx| f.set_group_by(None, cx));
+
+    // A column added during a search is filled in.
+    ui.update(|f, _, cx| f.set_query("budget".into(), true, cx));
+    assert_eq!(ui.names(), ["Budget.csv"]);
+    assert_eq!(row(&ui).entry.last_opened, None, "nothing shows it now");
+    ui.right_click("Size");
+    ui.click_menu_item("Date Last Opened");
+    assert!(!row(&ui).opened().is_empty());
+    assert_eq!(row(&ui).entry.mode, None, "the date is all that was read");
+    ui.right_click("Size");
+    ui.click_menu_item("Permissions");
+    if cfg!(unix) {
+        assert_eq!(row(&ui).permissions().to_string(), "rw-r-----");
+    }
+    ui.right_click("Size");
+    ui.click_menu_item("Date Created");
+    // Not every file system records when a file was made.
+    if std::fs::metadata(&file).is_ok_and(|meta| meta.created().is_ok()) {
+        assert!(!row(&ui).created().is_empty());
+    }
+
+    // And so are the results of the next search.
+    ui.update(|f, _, cx| f.set_query("roadmap".into(), true, cx));
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert!(!row(&ui).opened().is_empty());
+    assert_eq!(row(&ui).entry.mode.is_some(), cfg!(unix));
+}
+
+#[gpui_kit::test]
+fn results_sorted_by_a_date_the_index_lacks_are_read_for_it(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-sort-date");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let entry = |ui: &Ui| ui.read(|f| f.rows_for_test()[0].entry.clone());
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_query("roadmap".into(), true, cx));
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert_eq!((entry(&ui).created, entry(&ui).mode), (None, None));
+
+    // No column shows the date, and the one result is every match.
+    ui.click("sort");
+    ui.click_menu_item("Date Created");
+    assert_eq!(ui.read(|f| f.current_sort().key), SortKey::Created);
+    // Not every file system records when a file was made.
+    let made = std::fs::metadata(fx.path("Roadmap.md")).unwrap().created();
+    assert_eq!(entry(&ui).created, made.ok());
+    assert_eq!(entry(&ui).mode.is_some(), cfg!(unix), "read along with it");
+}
+
+#[gpui_kit::test]
+fn a_search_from_recents_can_be_sorted_by_name(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-sort-recents");
+    for name in ["zebra.txt", "a-zebra.txt", "m-zebra.txt"] {
+        std::fs::write(fx.path(name), "x").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.update(|f, window, cx| f.navigate(Location::Recents, window, cx));
+    ui.update(|f, _, cx| f.set_query("zebra".into(), true, cx));
+    assert_eq!(ui.names()[0], "zebra.txt", "the name that is the word");
+
+    ui.click("Name");
+    assert_eq!(ui.names(), ["a-zebra.txt", "m-zebra.txt", "zebra.txt"]);
+}
+
+#[gpui_kit::test]
 fn scope_bar_controls(cx: &mut TestAppContext) {
     let fx = Fixture::new("scope-bar");
     let mut ui = Ui::open(cx, &fx.dir);

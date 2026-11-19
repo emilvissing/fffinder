@@ -7,9 +7,10 @@ use crate::app_list::AppList;
 use crate::config::{SearchCase, SearchSettings};
 use crate::entry::{FileEntry, display_name};
 use crate::kind::{self, KindFilter};
+use crate::listing::{self, SortKey, SortOrder};
 use fff_search::file_picker::FilePicker;
 use fff_search::{
-    Casing, Constraint, DirSearchConfig, FFFMode, FilePickerOptions, FrecencyTracker,
+    Casing, Constraint, DirSearchConfig, FFFMode, FilePickerOptions, FrecencyTracker, FuzzyQuery,
     FuzzySearchOptions, GitRecencyConfig, GrepConfig, GrepMode, GrepSearchOptions, MixedItemRef,
     PaginationArgs, ParserConfig, QueryParser, QueryTracker, SharedFilePicker, SharedFrecency,
     SharedQueryTracker, WatchEvent, WatchId, WatchOptions,
@@ -162,6 +163,21 @@ pub struct SearchRequest {
     pub show_hidden: bool,
     /// With [`KindFilter::Any`], leave folders out.
     pub files_only: bool,
+    /// What the hits are going to be sorted by. When more match than
+    /// `limit`, the list is then the first of every match in this order,
+    /// the largest of them all, say, and not the best `limit`. That is only
+    /// done where weak matches can't take the place of strong ones by it; a
+    /// search where they could lists its best matches whatever this says,
+    /// and [`SearchResponse::sort_chooses`] says which it was. The hits come
+    /// back best first either way, for the caller to put in order. `None`
+    /// and [`SortKey::Relevance`] ask for the best.
+    pub sort: Option<SortOrder>,
+    /// Read from the disk when each file was made and its permissions,
+    /// which the index doesn't hold. A sort by creation date reads them too.
+    pub full_metadata: bool,
+    /// Read when each hit was last opened, which takes another read. A sort
+    /// by that date reads it too.
+    pub last_opened: bool,
 }
 
 /// What the index knows about one folder's items: see [`Engine::folder_stats`].
@@ -192,6 +208,12 @@ pub struct SearchResponse {
     pub indexing: bool,
     /// More items matched than the limit let into `hits`.
     pub truncated: bool,
+    /// Whether a sort (see [`SearchRequest::sort`]) says which items `hits`
+    /// holds. In the answer to a search made with one, it did: they are the
+    /// first of the matches in its order. In the answer to a search made
+    /// without, one may: the limit cut the list, and nothing in it is a
+    /// match a sort would set aside.
+    pub sort_chooses: bool,
 }
 
 /// How `GrepRequest::patterns` match.
@@ -523,6 +545,23 @@ impl Engine {
         }
         let started = Instant::now();
         let limit = if req.limit == 0 { 500 } else { req.limit };
+        // A sort starts from the list the search makes without it. That is
+        // the answer unless a sort would choose its items: a list the limit
+        // didn't cut holds every match in any order, and one that holds a
+        // match the sort would set aside stays the best matches.
+        let sort = req.sort.filter(|order| order.key != SortKey::Relevance);
+        let unsorted = sort.map(|_| {
+            self.search(&SearchRequest {
+                sort: None,
+                full_metadata: false,
+                last_opened: false,
+                ..req.clone()
+            })
+        });
+        let unsorted = match unsorted {
+            Some(found) if !found.sort_chooses => return finish(found, req, started),
+            cut => cut,
+        };
         let indexes = self.indexes_for(req.scope.as_deref());
         let indexing = indexes.iter().any(|r| r.scanning());
         let settings = self.search_settings();
@@ -553,15 +592,18 @@ impl Engine {
         });
         let as_typed = as_typed.as_ref();
         let wide = !exact.is_empty();
+        // A sort that chooses a cut list's items chooses among every match,
+        // so it is given as many as the phrases are checked in.
+        let many = wide || sort.is_some();
 
         let parts: Vec<RootPart> = std::thread::scope(|s| {
             let handles: Vec<_> = indexes
                 .iter()
                 .map(|root| {
                     s.spawn(move || {
-                        let mut part = self.search_root(root, req, limit, wide);
+                        let mut part = self.search_root(root, req, limit, many);
                         if let Some(as_typed) = as_typed {
-                            let ranked = self.search_root(root, as_typed, limit, wide);
+                            let ranked = self.search_root(root, as_typed, limit, many);
                             keep_higher(&mut part.hits, ranked.hits);
                         }
                         part
@@ -573,10 +615,12 @@ impl Engine {
 
         let mut total_matched = 0;
         let mut total_indexed = 0;
+        let mut loose = false;
         let mut raw = Vec::new();
         for part in parts {
             total_matched += part.total_matched;
             total_indexed += part.total_indexed;
+            loose |= part.loose;
             raw.extend(part.hits);
         }
         let words: Vec<String> = fuzzy_text(&req.query)
@@ -620,19 +664,36 @@ impl Engine {
         raw.retain(|h| seen.insert(h.path.clone()));
 
         let needle = fuzzy_text(&req.query);
-        let (hits, truncated) = cut_to_limit(raw, limit, &needle, req.show_hidden);
-        SearchResponse {
+        let (hits, truncated) = match sort.zip(unsorted) {
+            Some((order, unsorted)) => {
+                match cut_in_order(raw, order, limit, &words, &needle, req.show_hidden) {
+                    Some(chosen) => chosen,
+                    // Among every match, the sort had nothing to choose.
+                    None => {
+                        let found = SearchResponse {
+                            sort_chooses: false,
+                            ..unsorted
+                        };
+                        return finish(found, req, started);
+                    }
+                }
+            }
+            None => cut_to_limit(raw, limit, &needle, req.show_hidden),
+        };
+        let found = SearchResponse {
+            sort_chooses: truncated && sort_can_choose(&hits, &words, loose),
             hits,
             total_matched,
             total_indexed,
             elapsed: started.elapsed(),
             indexing,
             truncated,
-        }
+        };
+        finish(found, req, started)
     }
 
     /// Search one root. `wide` fetches as many candidates as a one-letter
-    /// search does, for a filter the results go through afterwards.
+    /// search does, for a filter or a sort the results go through afterwards.
     fn search_root(
         &self,
         root: &RootIndex,
@@ -730,6 +791,7 @@ impl Engine {
                 folder_filters,
             };
             let parsed = QueryParser::new(config).parse(&query);
+            part.loose = loose_text(&parsed.fuzzy_query, user);
             let result = picker.fuzzy_search_directories(&parsed, options);
             part.total_matched = result.total_matched;
             for (item, score) in result.items.iter().zip(&result.scores) {
@@ -749,6 +811,7 @@ impl Engine {
                 folder_filters,
             };
             let parsed = QueryParser::new(config).parse(&query);
+            part.loose = loose_text(&parsed.fuzzy_query, user);
             let result = picker.fuzzy_search_mixed(&parsed, qt, options);
             part.total_matched = result.total_matched;
             for (item, score) in result.items.iter().zip(&result.scores) {
@@ -777,6 +840,7 @@ impl Engine {
             }
         } else {
             let parsed = QueryParser::default().parse(&query);
+            part.loose = loose_text(&parsed.fuzzy_query, user);
             let result = picker.fuzzy_search(&parsed, qt, options);
             part.total_matched = result.total_matched;
             for (item, score) in result.items.iter().zip(&result.scores) {
@@ -1445,6 +1509,9 @@ struct RootPart {
     hits: Vec<RawHit>,
     total_matched: usize,
     total_indexed: usize,
+    /// fff-search matched text loosely that isn't one of the search's
+    /// words: see [`loose_text`].
+    loose: bool,
 }
 
 struct RawHit {
@@ -1493,13 +1560,16 @@ impl RawHit {
         }
     }
 
+    /// When the index says a file last changed.
+    fn modified_time(&self) -> Option<SystemTime> {
+        (self.modified > 0).then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(self.modified))
+    }
+
     fn into_hit(self, needle: &str, show_hidden: bool) -> Option<SearchHit> {
         let entry = if self.is_dir {
             // Directory rows carry no metadata in the index.
             FileEntry::from_path(&self.path)?
         } else {
-            let meta_modified = (self.modified > 0)
-                .then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(self.modified));
             let name = display_name(&self.path);
             FileEntry {
                 kind: kind::classify(&self.path, false),
@@ -1507,7 +1577,7 @@ impl RawHit {
                 name,
                 is_dir: false,
                 size: Some(self.size),
-                modified: meta_modified,
+                modified: self.modified_time(),
                 is_symlink: false,
                 created: None,
                 mode: None,
@@ -1539,7 +1609,7 @@ impl RawHit {
 ///
 /// # Arguments
 ///
-/// * `raw` - The hits, best first
+/// * `raw` - The hits, in the order they're listed in
 /// * `limit` - The most to return
 /// * `needle` - The search's fuzzy words, for the highlights
 /// * `show_hidden` - Whether hidden files are shown
@@ -1559,6 +1629,203 @@ fn cut_to_limit(
     let hits: Vec<SearchHit> = shown.by_ref().take(limit).collect();
     let truncated = shown.next().is_some();
     (hits, truncated)
+}
+
+/// Finish a search's answer, once its hits are no more than the limit: read
+/// from the disk what the request asks to have of each, and time the search
+/// to here.
+///
+/// # Arguments
+///
+/// * `found` - The answer, with the hits the search lists
+/// * `req` - What was asked for
+/// * `started` - When the search began
+fn finish(mut found: SearchResponse, req: &SearchRequest, started: Instant) -> SearchResponse {
+    let by = |key: SortKey| req.sort.is_some_and(|order| order.key == key);
+    let metadata = req.full_metadata || by(SortKey::Created);
+    let last_opened = req.last_opened || by(SortKey::LastOpened);
+    for hit in &mut found.hits {
+        // A folder's entry was read from the disk already.
+        if metadata && !hit.entry.is_dir {
+            hit.entry.read_metadata();
+        }
+        if last_opened {
+            hit.entry.read_last_opened();
+        }
+    }
+    found.elapsed = started.elapsed();
+    found
+}
+
+/// The list a sort chooses for a search whose list the limit cut: the first
+/// `limit` of the hits [`sort_before_cut`] puts in order that can be shown.
+///
+/// # Arguments
+///
+/// * `raw` - The hits, best first
+/// * `order` - What to sort by, which isn't relevance
+/// * `limit` - The most the search returns
+/// * `words` - The search's fuzzy words, in lowercase
+/// * `needle` - The search's fuzzy words, for the highlights
+/// * `show_hidden` - Whether hidden files are shown
+///
+/// # Returns
+///
+/// The hits, best first like any answer, and whether the limit left any
+/// out. `None` when the search lists what it lists without the sort
+fn cut_in_order(
+    mut raw: Vec<RawHit>,
+    order: SortOrder,
+    limit: usize,
+    words: &[String],
+    needle: &str,
+    show_hidden: bool,
+) -> Option<(Vec<SearchHit>, bool)> {
+    let ranked = raw.len();
+    if !sort_before_cut(&mut raw, order, limit, words) {
+        return None;
+    }
+    // A sort sets matches aside: the ones without the words in their names,
+    // and the ones past the most it reads from the disk.
+    let set_aside = raw.len() < ranked;
+    let (mut hits, truncated) = cut_to_limit(raw, limit, needle, show_hidden);
+    // The hits it kept can all fit after all, as when hidden files are
+    // among them. The list then has room for matches that were set aside.
+    if set_aside && !truncated {
+        return None;
+    }
+    hits.sort_by_key(|hit| std::cmp::Reverse(hit.score));
+    Some((hits, truncated))
+}
+
+/// Whether a sort may choose which of a search's matches its list holds,
+/// going by the hits the search lists without one, where the limit has cut
+/// them. [`sort_before_cut`] keeps to the names that have every word, and a
+/// list with any other hit in it is left as the ranking made it. Either the
+/// names with the words don't fill the list, and a sort has nothing to
+/// choose, or the ranking puts something ahead of them that the sort would
+/// drop: the file opened from this search before ranks first wherever the
+/// words are in its path.
+///
+/// # Arguments
+///
+/// * `hits` - The hits the search lists, best first
+/// * `words` - The search's fuzzy words, in lowercase
+/// * `loose` - Whether fff-search matched text loosely that the words leave
+///   out ([`loose_text`]). Nothing here tells its strong matches from its
+///   weak ones
+fn sort_can_choose(hits: &[SearchHit], words: &[String], loose: bool) -> bool {
+    !loose && hits.iter().all(|hit| name_has(&hit.entry.path, words))
+}
+
+/// The most hits a sort reads from the disk to put them in order, for the
+/// dates the index doesn't hold.
+const SORT_READS: usize = 5_000;
+
+/// Put a search's hits in the order of a sort before the limit cuts the
+/// list, so that a sort by size lists the largest of every match and not the
+/// largest of the best-ranked few.
+///
+/// Words match loosely: their letters can be anywhere along the path. Sorted
+/// by size or date, the weakest of thousands of such matches would bury the
+/// items that were meant. So a search with words is sorted among the hits
+/// that have every word in their name, the ones [`rerank`] puts first, and
+/// only when there are more of those than `limit`. Otherwise nothing is
+/// done, and the search lists what it lists without the sort. Whether a
+/// sort may choose at all is for [`sort_can_choose`] to say first, from the
+/// list the search makes without it.
+///
+/// # Arguments
+///
+/// * `raw` - The hits, best first; when sorted, left with the ones the sort
+///   chooses among, in its order
+/// * `order` - What to sort by, which isn't relevance
+/// * `limit` - The most the search returns
+/// * `words` - The search's fuzzy words, in lowercase
+///
+/// # Returns
+///
+/// Whether the hits were sorted
+fn sort_before_cut(
+    raw: &mut Vec<RawHit>,
+    order: SortOrder,
+    limit: usize,
+    words: &[String],
+) -> bool {
+    let named = |hit: &RawHit| name_has(&hit.path, words);
+    if raw.iter().filter(|hit| named(hit)).count() <= limit {
+        return false;
+    }
+    raw.retain(named);
+    // A date the index doesn't hold takes a read of the hit, so only the
+    // best of those hits are read, and the sort goes without the rest.
+    let mut reads = limit.max(SORT_READS);
+    raw.retain(|hit| {
+        if !CutKey::reads_disk(hit, order.key) {
+            return true;
+        }
+        let read = reads > 0;
+        reads = reads.saturating_sub(1);
+        read
+    });
+    let mut keyed: Vec<(CutKey, String, RawHit)> = raw
+        .drain(..)
+        .map(|hit| (CutKey::of(&hit, order.key), display_name(&hit.path), hit))
+        .collect();
+    // As `listing::compare` orders the entries the hits become. The sort is
+    // stable, so hits it can't tell apart stay best first.
+    keyed.sort_by(|(a, a_name, _), (b, b_name, _)| {
+        let ord = a.cmp(b).then_with(|| listing::natural_cmp(a_name, b_name));
+        if order.ascending { ord } else { ord.reverse() }
+    });
+    raw.extend(keyed.into_iter().map(|(_, _, hit)| hit));
+    true
+}
+
+/// What [`sort_before_cut`] compares a hit by: what [`listing::compare`]
+/// reads from the entry the hit becomes, made once for each hit.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum CutKey {
+    /// Nothing but the name, which every sort ends with.
+    Name,
+    Date(Option<SystemTime>),
+    /// A folder has no size and goes before an empty file.
+    Size(u64, bool),
+    Kind(String),
+    Folder(Option<PathBuf>),
+}
+
+impl CutKey {
+    /// Whether [`CutKey::of`] reads the disk for `hit`: for the two dates
+    /// the index holds for nothing, and for when a folder last changed.
+    fn reads_disk(hit: &RawHit, key: SortKey) -> bool {
+        match key {
+            SortKey::Created | SortKey::LastOpened => true,
+            SortKey::Modified => hit.is_dir,
+            SortKey::Relevance
+            | SortKey::Name
+            | SortKey::Size
+            | SortKey::Kind
+            | SortKey::Folder => false,
+        }
+    }
+
+    fn of(hit: &RawHit, key: SortKey) -> CutKey {
+        match key {
+            SortKey::Relevance | SortKey::Name => CutKey::Name,
+            // The index holds no date for a folder.
+            SortKey::Modified if hit.is_dir => CutKey::Date(listing::dir_stamp(&hit.path)),
+            SortKey::Modified => CutKey::Date(hit.modified_time()),
+            SortKey::Size => CutKey::Size(hit.size, !hit.is_dir),
+            SortKey::Kind => CutKey::Kind(kind::kind_label(&hit.path, hit.is_dir)),
+            SortKey::Created => {
+                let created = std::fs::metadata(&hit.path).and_then(|meta| meta.created());
+                CutKey::Date(created.ok())
+            }
+            SortKey::LastOpened => CutKey::Date(crate::info::last_opened(&hit.path)),
+            SortKey::Folder => CutKey::Folder(hit.path.parent().map(Path::to_path_buf)),
+        }
+    }
 }
 
 /// What is left of a content search's time limit for the root it searches
@@ -1723,10 +1990,40 @@ fn wants_apps(req: &SearchRequest, words: &[String]) -> bool {
     req.scope.is_none() && kind && !constrained && !words.is_empty()
 }
 
+/// Whether fff-search matches text loosely, as it does words, that isn't one
+/// of the search's words ([`fuzzy_text`]), which names are checked for: a
+/// word with a line suffix, as in `main.rs:42`, which it reads as `main.rs`,
+/// and a folder name typed alone, as in `src/`. Filters such as `*.pdf`
+/// aren't matched loosely: they hold for an item or they don't.
+///
+/// # Arguments
+///
+/// * `fuzzy` - What fff-search matches loosely of the search
+/// * `user` - The search as typed
+fn loose_text(fuzzy: &FuzzyQuery, user: &str) -> bool {
+    let words = fuzzy_text(user);
+    let left_out = |text: &str| !words.split_whitespace().any(|word| word == text);
+    match fuzzy {
+        FuzzyQuery::Empty => false,
+        FuzzyQuery::Text(text) => left_out(text),
+        FuzzyQuery::Parts(parts) => parts.iter().any(|part| left_out(part)),
+    }
+}
+
 /// Whether `path`'s name holds each of `words` (lowercase) in order.
 fn name_holds(path: &Path, words: &[String]) -> bool {
     let name = display_name(path).to_lowercase();
     words.iter().all(|w| is_subsequence(w, &name))
+}
+
+/// Whether `path`'s name has each of `words` (lowercase) in it, letters in a
+/// row, which is what [`rerank`] ranks first. Without words, every name does.
+fn name_has(path: &Path, words: &[String]) -> bool {
+    if words.is_empty() {
+        return true;
+    }
+    let name = display_name(path).to_lowercase();
+    words.iter().all(|word| name.contains(word.as_str()))
 }
 
 fn is_subsequence(needle: &str, haystack: &str) -> bool {
@@ -3348,6 +3645,556 @@ mod tests {
         let (found, truncated) = cut_to_limit(hits(), 3, "env", true);
         assert_eq!(names(&found), [".env", ".envrc", "env.txt"]);
         assert!(truncated);
+    }
+
+    #[test]
+    fn a_sort_before_the_cut_stays_with_the_names_that_have_the_words() {
+        // Best first. The last one has the word only in its folder's name.
+        let hits = || -> Vec<RawHit> {
+            [
+                ("/r/tax.txt", 5),
+                ("/r/my-tax-notes.txt", 300),
+                ("/r/xtaxx.txt", 20),
+                ("/r/tax/huge.bin", 9000),
+            ]
+            .into_iter()
+            .map(|(path, size)| RawHit::file(path.into(), size, 0, None, 0))
+            .collect()
+        };
+        let names = |hits: &[RawHit]| -> Vec<String> {
+            hits.iter().map(|hit| display_name(&hit.path)).collect()
+        };
+        let largest = SortOrder {
+            key: SortKey::Size,
+            ascending: false,
+        };
+        let words = vec!["tax".to_string()];
+        // The hits a sort chooses among, or `None` when it leaves the list
+        // to the search.
+        let sorted = |limit: usize, words: &[String]| {
+            let mut raw = hits();
+            if sort_before_cut(&mut raw, largest, limit, words) {
+                return Some(names(&raw));
+            }
+            assert_eq!(names(&raw), names(&hits()), "left as they were");
+            None
+        };
+
+        // Three names have the word and two fit, so the largest are chosen
+        // among the three. The file in the folder isn't one of them.
+        assert_eq!(
+            sorted(2, &words).unwrap(),
+            ["my-tax-notes.txt", "xtaxx.txt", "tax.txt"]
+        );
+        // All three fit, and the list has room for another match.
+        assert_eq!(sorted(3, &words), None);
+
+        // Without words every hit matches as well as the next.
+        assert_eq!(
+            sorted(2, &[]).unwrap(),
+            ["huge.bin", "my-tax-notes.txt", "xtaxx.txt", "tax.txt"]
+        );
+    }
+
+    #[test]
+    fn a_list_with_more_in_it_than_names_with_the_words_is_left_to_the_ranking() {
+        let hits = |paths: &[&str]| -> Vec<SearchHit> {
+            paths
+                .iter()
+                .filter_map(|path| RawHit::file(path.into(), 0, 0, None, 0).into_hit("", true))
+                .collect()
+        };
+        let words = vec!["tax".to_string()];
+        let names = hits(&["/r/tax.txt", "/r/My-Tax-Notes.txt"]);
+        assert!(sort_can_choose(&names, &words, false));
+        // One hit that only its folder names, and the list is the ranking's:
+        // a sort would take that hit out of it.
+        let ranked = hits(&["/r/tax/opened-before.pdf", "/r/tax.txt"]);
+        assert!(!sort_can_choose(&ranked, &words, false));
+
+        // Without words every hit matches as well as the next.
+        assert!(sort_can_choose(&ranked, &[], false));
+        // Text matched loosely that the words leave out is no such search.
+        assert!(!sort_can_choose(&names, &[], true));
+        assert!(!sort_can_choose(&names, &words, true));
+    }
+
+    #[test]
+    fn text_matched_loosely_is_told_from_the_words_and_the_filters() {
+        let files = |query: &str| {
+            let parsed = QueryParser::default().parse(query);
+            loose_text(&parsed.fuzzy_query, query)
+        };
+        assert!(!files("tax report"));
+        assert!(!files("tax *.pdf !draft src/"));
+        assert!(!files("*.pdf"));
+        assert!(!files(""));
+        // fff-search reads these as `main.rs` and `10`, at a line.
+        assert!(files("main.rs:42"));
+        assert!(files("meeting 10:30"));
+
+        // Where folders can be in the results, a folder token that is the
+        // whole search is text as well.
+        let with_folders = |query: &str| {
+            let config = WithFolders {
+                only: false,
+                folder_filters: folder_tokens_filter(query),
+            };
+            let parsed = QueryParser::new(config).parse(query);
+            loose_text(&parsed.fuzzy_query, query)
+        };
+        assert!(with_folders("src/"));
+        assert!(!with_folders("src/ main"));
+        assert!(!with_folders("main"));
+    }
+
+    #[test]
+    fn names_that_arent_shown_dont_leave_a_sorted_list_short() {
+        // Best first: three names with the word, two of them hidden, and a
+        // file that only its folder names.
+        let hits = || -> Vec<RawHit> {
+            [
+                ("/r/.tax-rc", 50),
+                ("/r/.tax.env", 40),
+                ("/r/tax.txt", 5),
+                ("/r/tax/huge.bin", 9000),
+            ]
+            .into_iter()
+            .map(|(path, size)| RawHit::file(path.into(), size, 0, None, 0))
+            .collect()
+        };
+        let largest = SortOrder {
+            key: SortKey::Size,
+            ascending: false,
+        };
+        let words = vec!["tax".to_string()];
+        let chosen = |raw: Vec<RawHit>, words: &[String], show_hidden: bool| {
+            let cut = cut_in_order(raw, largest, 2, words, "tax", show_hidden)?;
+            let names: Vec<String> = cut.0.into_iter().map(|hit| hit.entry.name).collect();
+            Some((names, cut.1))
+        };
+
+        // Three names for two places: the largest two, and one is left out.
+        let shown = chosen(hits(), &words, true).unwrap();
+        assert_eq!(shown, (vec![".tax-rc".into(), ".tax.env".into()], true));
+        // With the hidden ones not shown, one name is left for two places.
+        // The search's own list has the file in the folder in the other.
+        assert_eq!(chosen(hits(), &words, false), None);
+        // Nothing is set aside where there are no words, so the one hit
+        // that can be shown is the whole list.
+        let mut all = hits();
+        all.pop();
+        let shown = chosen(all, &[], false).unwrap();
+        assert_eq!(shown, (vec!["tax.txt".into()], false));
+    }
+
+    #[test]
+    fn hits_are_sorted_before_the_cut_as_their_entries_are_listed() {
+        let hits = || -> Vec<RawHit> {
+            [
+                ("/r/b/notes10.txt", 40, 300),
+                ("/r/a/Notes2.txt", 40, 100),
+                ("/r/a/empty.md", 0, 0),
+                ("/r/c/photo.png", 7000, 200),
+                ("/r/a/photo.png", 7000, 200),
+            ]
+            .into_iter()
+            .map(|(path, size, modified)| RawHit::file(path.into(), size, modified, None, 0))
+            .collect()
+        };
+        for key in [
+            SortKey::Name,
+            SortKey::Modified,
+            SortKey::Size,
+            SortKey::Kind,
+            SortKey::Folder,
+        ] {
+            for ascending in [true, false] {
+                let order = SortOrder { key, ascending };
+                let mut raw = hits();
+                assert!(sort_before_cut(&mut raw, order, 1, &[]));
+                let entries: Vec<FileEntry> = raw
+                    .into_iter()
+                    .filter_map(|hit| hit.into_hit("", true))
+                    .map(|hit| hit.entry)
+                    .collect();
+                assert_eq!(entries.len(), 5);
+                let mut listed = entries.clone();
+                listed.sort_by(|a, b| listing::compare(a, b, order));
+                assert_eq!(entries, listed, "{order:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_sort_by_a_date_on_the_disk_reads_only_the_best_hits() {
+        // Best first: a folder, then a file, and so on.
+        let hits = || -> Vec<RawHit> {
+            (0..SORT_READS + 10)
+                .flat_map(|n| {
+                    [
+                        RawHit::dir(format!("/nowhere/folder-{n}").into(), 0),
+                        RawHit::file(format!("/nowhere/file-{n}").into(), 0, 0, None, 0),
+                    ]
+                })
+                .collect()
+        };
+        let sorted = |key: SortKey| {
+            let order = SortOrder {
+                key,
+                ascending: true,
+            };
+            let mut raw = hits();
+            assert!(sort_before_cut(&mut raw, order, 10, &[]));
+            raw
+        };
+        let has = |read: &[RawHit], name: String| {
+            let path = Path::new("/nowhere").join(name);
+            read.iter().any(|hit| hit.path == path)
+        };
+        let every = 2 * (SORT_READS + 10);
+
+        // Every hit is read for these, so the best of them all are sorted.
+        for key in [SortKey::Created, SortKey::LastOpened] {
+            let read = sorted(key);
+            assert_eq!(read.len(), SORT_READS, "{key:?}");
+            assert!(
+                has(&read, format!("file-{}", SORT_READS / 2 - 1)),
+                "{key:?}"
+            );
+            assert!(!has(&read, format!("folder-{}", SORT_READS / 2)), "{key:?}");
+        }
+        // The index holds when a file changed and not when a folder did, so
+        // every file is sorted, with the best of the folders.
+        let read = sorted(SortKey::Modified);
+        assert_eq!(read.len(), every - 10);
+        assert!(has(&read, format!("folder-{}", SORT_READS - 1)));
+        assert!(!has(&read, format!("folder-{SORT_READS}")));
+        // What the index holds takes no read, so every hit is sorted.
+        assert_eq!(sorted(SortKey::Size).len(), every);
+    }
+
+    #[test]
+    fn a_sort_chooses_the_hits_of_a_list_the_limit_cuts() {
+        let dir = std::env::temp_dir().join(format!("fff-sorted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("ledger")).unwrap();
+        // The larger a log, the longer ago it changed.
+        let now = SystemTime::now();
+        for (name, size, hours) in [
+            ("a.log", 10, 1),
+            ("b.log", 3000, 4),
+            ("c.log", 200, 3),
+            ("d.log", 50, 2),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, vec![b'x'; size]).unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(now - Duration::from_secs(hours * 3600))
+                .unwrap();
+        }
+        // Three files and a folder with a word in their names, and a file
+        // that only the folder names.
+        for (name, size) in [
+            ("ledger.txt", 5),
+            ("my-ledger-notes.txt", 3000),
+            ("xledgerx.txt", 200),
+            ("ledger/huge.bin", 9000),
+        ] {
+            std::fs::write(dir.join(name), vec![b'x'; size]).unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let find = |query: &str, key: SortKey, ascending: bool, limit: usize| {
+            let found = engine.search(&SearchRequest {
+                query: query.into(),
+                limit,
+                sort: Some(SortOrder { key, ascending }),
+                ..Default::default()
+            });
+            let names: Vec<String> = found.hits.into_iter().map(|h| h.entry.name).collect();
+            (names, found.truncated)
+        };
+        // The hits by name, as they come back best first and not sorted.
+        let chosen = |query: &str, key: SortKey, ascending: bool, limit: usize| {
+            let (mut names, _) = find(query, key, ascending, limit);
+            names.sort();
+            names
+        };
+        // What a search says of its list: whether a sort may choose its
+        // items, as the search is made without a sort and by size.
+        let may_choose = |query: &str, limit: usize| {
+            let largest = SortOrder {
+                key: SortKey::Size,
+                ascending: false,
+            };
+            [None, Some(largest)].map(|sort| {
+                let request = SearchRequest {
+                    query: query.into(),
+                    limit,
+                    sort,
+                    ..Default::default()
+                };
+                engine.search(&request).sort_chooses
+            })
+        };
+
+        // Either end of all four logs, where the best two are the same two
+        // whichever way the sort goes.
+        let logs = |key, ascending| chosen("*.log", key, ascending, 2);
+        assert_eq!(logs(SortKey::Size, false), ["b.log", "c.log"]);
+        assert_eq!(logs(SortKey::Size, true), ["a.log", "d.log"]);
+        assert_eq!(logs(SortKey::Modified, false), ["a.log", "d.log"]);
+        assert_eq!(logs(SortKey::Modified, true), ["b.log", "c.log"]);
+        assert_eq!(logs(SortKey::Name, false), ["c.log", "d.log"]);
+        assert_eq!(logs(SortKey::Name, true), ["a.log", "b.log"]);
+        assert!(find("*.log", SortKey::Size, false, 2).1, "two more match");
+        assert_eq!(may_choose("*.log", 2), [true, true]);
+        let (all, truncated) = find("*.log", SortKey::Size, false, 4);
+        assert_eq!((all.len(), truncated), (4, false));
+        assert_eq!(may_choose("*.log", 4), [false, false], "every match");
+
+        // The largest three of the four names that have the word. The file
+        // in the folder is larger than any and isn't among them, and the
+        // best match comes first, small as it is.
+        let (largest, truncated) = find("ledger", SortKey::Size, false, 3);
+        assert_eq!(largest[0], "ledger.txt");
+        assert_eq!(
+            chosen("ledger", SortKey::Size, false, 3),
+            ["ledger.txt", "my-ledger-notes.txt", "xledgerx.txt"]
+        );
+        assert!(truncated);
+        assert_eq!(may_choose("ledger", 3), [true, true]);
+        // All four fit, so the list is the one the search makes anyway. Only
+        // a search made with the sort learns that there is no fifth name.
+        assert_eq!(
+            chosen("ledger", SortKey::Size, false, 4),
+            [
+                "ledger",
+                "ledger.txt",
+                "my-ledger-notes.txt",
+                "xledgerx.txt"
+            ]
+        );
+        assert_eq!(may_choose("ledger", 4), [true, false]);
+        assert_eq!(chosen("ledger", SortKey::Size, false, 5).len(), 5);
+        assert_eq!(may_choose("ledger", 5), [false, false], "every match");
+
+        // A word with a line suffix is matched loosely and isn't one of the
+        // words a name is held to, so its list stays the best matches, alone
+        // or beside a word.
+        for query in ["ledger:7", "ledger txt:7"] {
+            let best = chosen(query, SortKey::Relevance, true, 2);
+            assert!(best.contains(&"ledger.txt".to_string()), "{query}");
+            assert_eq!(chosen(query, SortKey::Size, false, 2), best, "{query}");
+            assert_eq!(may_choose(query, 2), [false, false], "{query}");
+        }
+
+        // A folder's date is read from the disk, where the index has none.
+        let folder = CutKey::of(&RawHit::dir(dir.clone(), 0), SortKey::Modified);
+        assert!(folder == CutKey::Date(listing::dir_stamp(&dir)));
+        assert!(folder != CutKey::Date(None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Left out on Windows for the reason
+    // `a_search_remembers_what_it_opened_whatever_the_capitals` is.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_best_match_opened_before_stays_in_the_list_under_a_sort() {
+        let dir = std::env::temp_dir().join(format!("fff-sorted-opened-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tree = dir.join("tree");
+        std::fs::create_dir_all(tree.join("ledger")).unwrap();
+        // Three files and a folder with the word in their names, and the
+        // largest file of all, which only the folder names.
+        for (name, size) in [
+            ("ledger.txt", 5),
+            ("my-ledger-notes.txt", 3000),
+            ("xledgerx.txt", 200),
+            ("ledger/summary.pdf", 9000),
+        ] {
+            std::fs::write(tree.join(name), vec![b'x'; size]).unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![tree.clone()],
+            app_dirs: Vec::new(),
+            db_dir: Some(dir.join("db")),
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let find = |sort: Option<SortOrder>| {
+            let found = engine.search(&SearchRequest {
+                query: "ledger".into(),
+                limit: 3,
+                sort,
+                ..Default::default()
+            });
+            let mut names: Vec<String> = found.hits.into_iter().map(|h| h.entry.name).collect();
+            let first = names[0].clone();
+            names.sort();
+            (first, names, found.sort_chooses)
+        };
+        let largest = Some(SortOrder {
+            key: SortKey::Size,
+            ascending: false,
+        });
+
+        // Four names for three places, so the sort chooses the largest.
+        let (_, names, chooses) = find(largest);
+        assert_eq!(names, ["ledger.txt", "my-ledger-notes.txt", "xledgerx.txt"]);
+        assert!(chooses);
+
+        // Opened from this search, the file in the folder is its best match.
+        engine.track_open(&tree.join("ledger/summary.pdf"), Some("ledger"));
+        let (first, best, chooses) = find(None);
+        assert_eq!(first, "summary.pdf");
+        assert_eq!(best, ["ledger", "ledger.txt", "summary.pdf"]);
+        assert!(!chooses, "a sort would take the best match out");
+        // So the list stays the best matches whatever it is sorted by.
+        assert_eq!(find(largest), (first, best, false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sort_chooses_among_more_matches_than_a_search_ranks() {
+        let dir = std::env::temp_dir().join(format!("fff-sorted-wide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A search for two items is handed the 2,000 that changed last.
+        for n in 0..2_050 {
+            std::fs::write(dir.join(format!("new-{n:04}.log")), "x").unwrap();
+        }
+        // The largest of them all changed before any of those.
+        let old = dir.join("old.log");
+        std::fs::write(&old, vec![b'x'; 5000]).unwrap();
+        let file = std::fs::File::options().write(true).open(&old).unwrap();
+        let day = Duration::from_secs(24 * 3600);
+        file.set_modified(SystemTime::now() - day).unwrap();
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(20)));
+
+        let largest = engine.search(&SearchRequest {
+            query: "*.log".into(),
+            limit: 2,
+            sort: Some(SortOrder {
+                key: SortKey::Size,
+                ascending: false,
+            }),
+            ..Default::default()
+        });
+        let names: Vec<&str> = largest.hits.iter().map(|h| h.entry.name.as_str()).collect();
+        assert!(names.contains(&"old.log"), "{names:?}");
+        assert!(largest.truncated);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_search_reads_dates_and_permissions_only_when_asked() {
+        let dir = std::env::temp_dir().join(format!("fff-metadata-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("ledger.txt");
+        std::fs::write(&file, "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let find = |request: SearchRequest| {
+            let mut hits = engine
+                .search(&SearchRequest {
+                    query: "ledger".into(),
+                    limit: 10,
+                    ..request
+                })
+                .hits;
+            assert_eq!(hits.len(), 1);
+            hits.remove(0).entry
+        };
+        let by = |key: SortKey| {
+            Some(SortOrder {
+                key,
+                ascending: true,
+            })
+        };
+        // Not every file system records when a file was made.
+        let created = std::fs::metadata(&file).unwrap().created().ok();
+        let mode = cfg!(unix).then_some(0o640);
+
+        let plain = find(SearchRequest::default());
+        assert_eq!(
+            (plain.created, plain.mode, plain.last_opened),
+            (None, None, None),
+            "the index holds none of them"
+        );
+        let full = find(SearchRequest {
+            full_metadata: true,
+            ..Default::default()
+        });
+        assert_eq!((full.created, full.mode), (created, mode));
+        assert_eq!(full.last_opened, None);
+        assert_eq!(full.size, Some(1), "the rest is as the index has it");
+        let opened = find(SearchRequest {
+            last_opened: true,
+            ..Default::default()
+        });
+        assert!(opened.last_opened.is_some());
+        assert_eq!(opened.mode, None);
+
+        // A sort by one of the dates reads it without being asked.
+        let sorted = find(SearchRequest {
+            sort: by(SortKey::Created),
+            ..Default::default()
+        });
+        assert_eq!((sorted.created, sorted.mode), (created, mode));
+        let sorted = find(SearchRequest {
+            sort: by(SortKey::LastOpened),
+            ..Default::default()
+        });
+        assert!(sorted.last_opened.is_some());
+        assert_eq!(
+            find(SearchRequest {
+                sort: by(SortKey::Size),
+                ..Default::default()
+            })
+            .mode,
+            None
+        );
+
+        // A file that has gone since it was indexed is listed as it was.
+        std::fs::remove_file(&file).unwrap();
+        let gone = find(SearchRequest {
+            full_metadata: true,
+            last_opened: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            (gone.created, gone.mode, gone.last_opened),
+            (None, None, None)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

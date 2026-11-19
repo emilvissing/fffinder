@@ -279,6 +279,9 @@ pub struct SearchStats {
     pub elapsed: Duration,
     /// More items match than the result limit let the search list.
     pub truncated: bool,
+    /// A sort may put other items in the list than the ones it holds: see
+    /// [`fffinder_core::SearchResponse::sort_chooses`].
+    pub sort_chooses: bool,
     pub indexing: bool,
     /// A content search hit the time limit before searching every file.
     pub stopped: bool,
@@ -1344,11 +1347,13 @@ impl Finder {
                 })
                 .collect()
         };
-        // Recents and sent results keep their own order until a sort is chosen.
+        // Recents and sent results keep their own order until a sort is
+        // chosen. What a search finds there is sorted like any results.
         let keep_order = matches!(
             self.history.current(),
             Location::Recents | Location::Results { .. } | Location::Trash
-        ) && order == SortOrder::default();
+        ) && order == SortOrder::default()
+            && !self.is_searching();
         // The tree sorts each folder's items as it builds them.
         if order.key != SortKey::Relevance && !keep_order && !tree {
             let folders_first = self.config.folders_first;
@@ -1660,6 +1665,9 @@ impl Finder {
             limit,
             show_hidden: self.config.show_hidden,
             files_only: false,
+            sort: Some(self.result_sort),
+            full_metadata: self.wants_result_metadata(),
+            last_opened: self.wants_result_last_opened(),
         };
         self.searching = true;
         self.search_waiting = debounce;
@@ -1694,6 +1702,7 @@ impl Finder {
                         let stats = SearchStats {
                             elapsed: response.elapsed,
                             truncated: response.truncated,
+                            sort_chooses: response.sort_chooses,
                             indexing: response.indexing,
                             stopped: false,
                         };
@@ -1745,6 +1754,33 @@ impl Finder {
                 .ok();
             }
         });
+    }
+
+    /// The results' sort changed, and the caller puts the rows on screen in
+    /// the new order. Where the search says a sort may choose its list's
+    /// items, the sort also says which ones the result limit lets in, so the
+    /// search runs again. That isn't a new search: the rows keep their
+    /// selection and their place. Any other list has the same items whatever
+    /// the order: one the limit didn't cut holds every match, and one with
+    /// loose matches in it stays the best matches. It is searched again only
+    /// for a date it's now sorted by and wasn't read with. A contents search
+    /// lists the files it comes to first, whatever the sort.
+    ///
+    /// # Arguments
+    ///
+    /// * `had` - What [`Self::result_reads`] said before the change
+    /// * `cx` - The browser's context
+    fn result_sort_changed(&mut self, had: (bool, bool), cx: &mut Context<Self>) {
+        if self.search_contents {
+            return;
+        }
+        // The answer on screen, unless a search is on its way to replace it.
+        let answer = self.search_stats.as_ref().filter(|_| !self.searching);
+        if answer.is_some_and(|stats| !stats.sort_chooses) {
+            self.read_more_for_results(had, cx);
+        } else {
+            self.run_search(false, cx);
+        }
     }
 
     pub fn set_scope(&mut self, scope: SearchScope, cx: &mut Context<Self>) {
@@ -2479,7 +2515,9 @@ impl Finder {
             }
         };
         if self.is_searching() {
+            let read_for_results = self.result_reads();
             self.result_sort = order;
+            self.result_sort_changed(read_for_results, cx);
         } else {
             self.config.sort = order;
             self.settings_changed(cx);
@@ -2494,7 +2532,12 @@ impl Finder {
 
     pub fn set_ascending(&mut self, ascending: bool, cx: &mut Context<Self>) {
         if self.is_searching() {
-            self.result_sort.ascending = ascending;
+            // The direction the results already have is no change to search
+            // again for.
+            if self.result_sort.ascending != ascending {
+                self.result_sort.ascending = ascending;
+                self.result_sort_changed(self.result_reads(), cx);
+            }
         } else {
             self.config.sort.ascending = ascending;
             self.settings_changed(cx);
@@ -2651,6 +2694,7 @@ impl Finder {
         cx: &mut Context<Self>,
     ) {
         let before = self.config.clone();
+        let read_for_results = self.result_reads();
         let shared = settings.read(cx).config();
         self.config.copy_shared_from(shared);
         self.published.copy_shared_from(shared);
@@ -2700,6 +2744,7 @@ impl Finder {
         } else if self.config.folders_first != before.folders_first {
             self.folders_first_changed(cx);
         }
+        self.read_more_for_results(read_for_results, cx);
         cx.notify();
     }
 
@@ -3370,6 +3415,8 @@ fn content_search(
     let stats = SearchStats {
         elapsed: response.elapsed,
         truncated,
+        // A contents search lists the files it comes to first.
+        sort_chooses: false,
         indexing: response.indexing,
         stopped: response.stopped,
     };

@@ -413,6 +413,7 @@ fn find(request: &Request, engine: &Engine) -> Result<Vec<Value>, Failure> {
         limit: number(request, "limit", 100)?.max(1),
         show_hidden: true,
         files_only,
+        ..Default::default()
     });
     Ok(response
         .hits

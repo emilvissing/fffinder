@@ -151,6 +151,7 @@ impl Finder {
     /// Group the views by `key`, or stop grouping them.
     pub fn set_group_by(&mut self, key: Option<GroupKey>, cx: &mut Context<Self>) {
         let had_last_opened = self.wants_last_opened();
+        let read_for_results = self.result_reads();
         match key {
             Some(key) => {
                 if key != self.config.group_by {
@@ -166,6 +167,7 @@ impl Finder {
             // Last-opened dates are only read when something needs them.
             self.load_listing(Vec::new(), true, cx);
         }
+        self.read_more_for_results(read_for_results, cx);
         self.rebuild_rows(cx);
     }
 

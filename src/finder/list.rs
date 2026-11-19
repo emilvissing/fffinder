@@ -76,6 +76,50 @@ impl Finder {
                 && self.config.group_by == fffinder_core::GroupKey::LastOpened)
     }
 
+    /// Whether a search's results need when each was made and its
+    /// permissions, which the index doesn't hold: a column, the groups, or
+    /// the results' sort goes by them.
+    pub(super) fn wants_result_metadata(&self) -> bool {
+        self.result_sort.key == SortKey::Created
+            || self.shows_column(ListColumn::Created)
+            || self.shows_column(ListColumn::Permissions)
+            || (self.config.use_groups && self.config.group_by == fffinder_core::GroupKey::Created)
+    }
+
+    /// Whether a search's results need each item's last-opened date.
+    pub(super) fn wants_result_last_opened(&self) -> bool {
+        self.result_sort.key == SortKey::LastOpened
+            || self.shows_column(ListColumn::LastOpened)
+            || (self.config.use_groups
+                && self.config.group_by == fffinder_core::GroupKey::LastOpened)
+    }
+
+    /// What a search reads from the disk for its results as things are, for
+    /// [`Self::read_more_for_results`] to compare with once they've changed.
+    pub(super) fn result_reads(&self) -> (bool, bool) {
+        (
+            self.wants_result_metadata(),
+            self.wants_result_last_opened(),
+        )
+    }
+
+    /// A column, the groups, or the results' sort may go by something new.
+    /// If the results on screen were read without it, the search runs again
+    /// to read it. A contents search reads its files itself and has all but
+    /// the last-opened dates.
+    ///
+    /// # Arguments
+    ///
+    /// * `had` - What [`Self::result_reads`] said before the change
+    /// * `cx` - The browser's context
+    pub(super) fn read_more_for_results(&mut self, had: (bool, bool), cx: &mut Context<Self>) {
+        let (metadata, last_opened) = self.result_reads();
+        let more = (metadata && !had.0) || (last_opened && !had.1);
+        if more && self.is_searching() && !self.search_contents {
+            self.run_search(false, cx);
+        }
+    }
+
     pub(super) fn shows_column(&self, column: ListColumn) -> bool {
         self.config.list_columns.iter().any(|c| c.column == column)
     }
@@ -512,6 +556,7 @@ impl Finder {
 
     /// Show or hide a list column.
     pub(super) fn toggle_column(&mut self, column: ListColumn, cx: &mut Context<Self>) {
+        let read_for_results = self.result_reads();
         let columns = &mut self.config.list_columns;
         match columns.iter().position(|c| c.column == column) {
             Some(ix) => {
@@ -523,6 +568,7 @@ impl Finder {
             }),
         }
         self.list_columns_changed(cx);
+        self.read_more_for_results(read_for_results, cx);
     }
 
     /// Put the column at `from` where the one at `to` is.

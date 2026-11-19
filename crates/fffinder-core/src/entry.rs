@@ -70,6 +70,20 @@ impl FileEntry {
         self.last_opened = crate::info::last_opened(&self.path);
     }
 
+    /// Fill in what the search index doesn't hold for a file it found: when
+    /// the file was made, and its permissions. They're read through a link,
+    /// as [`FileEntry::from_path`] reads them. An entry whose file can't be
+    /// read, as when it has gone since it was indexed, is left as it is.
+    pub fn read_metadata(&mut self) {
+        let meta = std::fs::metadata(&self.path).or_else(|_| std::fs::symlink_metadata(&self.path));
+        let Ok(meta) = meta else {
+            return;
+        };
+        self.created = meta.created().ok();
+        self.mode = unix_mode(&meta);
+        self.readonly = meta.permissions().readonly();
+    }
+
     /// Kind description for the list view.
     pub fn kind_label(&self) -> String {
         kind::kind_label(&self.path, self.is_dir)

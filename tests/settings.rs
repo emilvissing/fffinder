@@ -92,6 +92,29 @@ fn shared_settings_show_in_every_tab_at_once(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_column_another_tab_adds_is_filled_in_for_this_tabs_results(cx: &mut TestAppContext) {
+    let fx = Fixture::new("shared-column");
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.update(|f, _, cx| f.set_query("roadmap".into(), true, cx));
+    ui.press(&cmd("t"));
+    let searching = tabs(&ui)[0].clone();
+    let opened = |ui: &Ui| {
+        searching.read_with(ui.cx, |f, _| {
+            assert_eq!(f.query(), "roadmap");
+            f.rows_for_test()[0].entry.last_opened
+        })
+    };
+    assert_eq!(opened(&ui), None, "nothing shows the date yet");
+
+    // The index doesn't hold the date, so the first tab searches again.
+    show_tab(&mut ui, 1);
+    ui.click("view-list");
+    ui.right_click("Size");
+    ui.click_menu_item("Date Last Opened");
+    assert!(opened(&ui).is_some());
+}
+
+#[gpui_kit::test]
 fn each_tab_keeps_its_own_view(cx: &mut TestAppContext) {
     let fx = Fixture::new("own-view");
     let mut ui = with_tabs(cx, &fx.dir);
