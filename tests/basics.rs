@@ -837,6 +837,31 @@ fn moving_to_the_search_field_during_a_rename_leaves_the_keyboard_there(cx: &mut
 }
 
 #[gpui_kit::test]
+fn return_ends_a_rename_in_its_own_window_with_quick_look_open(cx: &mut TestAppContext) {
+    let fx = Fixture::new("rename-quick-look");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.select("Roadmap.md");
+    ui.press("space");
+    assert!(ui.read(|f| f.quick_look_window()).is_some());
+    ui.press("f2");
+    ui.type_text("Plan");
+
+    // Quick Look's window reads this browser too, to draw the preview, and
+    // it's the last of the two to have drawn when Return arrives.
+    ui.press_after_quick_look_draws("enter");
+    ui.settle();
+    assert!(fx.path("Plan.md").exists());
+    assert!(!ui.exists("rename-input"));
+    assert!(
+        ui.files_focused(),
+        "the keys go back to the files in the window the name was edited in"
+    );
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Projects"], "the arrow keys work again");
+}
+
+#[gpui_kit::test]
 fn switching_to_another_app_leaves_a_rename_as_it_is(cx: &mut TestAppContext) {
     let fx = Fixture::new("rename-switch");
     let mut ui = Ui::open(cx, &fx.dir);

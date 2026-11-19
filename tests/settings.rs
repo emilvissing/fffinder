@@ -92,6 +92,31 @@ fn shared_settings_show_in_every_tab_at_once(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_setting_reaches_a_tab_whose_quick_look_has_just_closed(cx: &mut TestAppContext) {
+    let fx = Fixture::new("shared-quick-look");
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.select("notes.txt");
+    ui.press("space");
+    assert!(ui.read(|f| f.quick_look_window()).is_some());
+    ui.press(&cmd("t"));
+    let all = tabs(&ui);
+
+    // Quick Look's window was the last to draw the first tab's browser, and
+    // the tabs' window hasn't drawn since it closed when the other tab adds
+    // a favorite.
+    let (other, added) = (all[1].clone(), fx.path("Projects"));
+    ui.close_quick_look_and_then({
+        let added = added.clone();
+        move |cx| other.update(cx, |f, cx| f.add_favorite(added, cx))
+    });
+
+    let shown = all[0].read_with(ui.cx, |f, _| {
+        f.favorites().iter().any(|place| place.path == added)
+    });
+    assert!(shown, "the first tab's sidebar has it too");
+}
+
+#[gpui_kit::test]
 fn a_column_another_tab_adds_is_filled_in_for_this_tabs_results(cx: &mut TestAppContext) {
     let fx = Fixture::new("shared-column");
     let mut ui = with_tabs(cx, &fx.dir);

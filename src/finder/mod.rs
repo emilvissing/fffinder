@@ -565,14 +565,14 @@ impl Finder {
                     this.set_icon_size(value.start(), cx);
                 }
             }),
-            cx.subscribe_in(&search_input, window, Self::on_search_event),
-            cx.subscribe_in(&filter_input, window, Self::on_filter_event),
-            cx.subscribe_in(&nu_input, window, |this, _, event, window, cx| {
+            Self::subscribe_in_window(&search_input, window, cx, Self::on_search_event),
+            Self::subscribe_in_window(&filter_input, window, cx, Self::on_filter_event),
+            Self::subscribe_in_window(&nu_input, window, cx, |this, _, event, window, cx| {
                 if let InputEvent::PressEnter { .. } = event {
                     this.run_nu_pipeline(window, cx);
                 }
             }),
-            cx.observe_in(&settings, window, Self::adopt_settings),
+            Self::observe_in_window(&settings, window, cx, Self::adopt_settings),
             cx.observe_window_appearance(window, |this, window, cx| {
                 if this.config.appearance == fffinder_core::Appearance::System {
                     crate::theme::apply(this.config.appearance, Some(window), cx);
@@ -741,6 +741,65 @@ impl Finder {
             this.set_query(query, true, cx);
         }
         this
+    }
+
+    /// Subscribe to `emitter`'s events, with `on_event` run in `window`, the
+    /// browser's own. `Context::subscribe_in` doesn't keep the window it's
+    /// given: it runs the handler in whichever window last read the
+    /// subscriber to draw a frame, and Quick Look's window reads its browser
+    /// for the preview. A handler that moves the keyboard, as Return in the
+    /// search field does, would move it there. And once that window has
+    /// closed, no handler runs at all until the browser's own draws again.
+    pub(super) fn subscribe_in_window<Emitter, Evt>(
+        emitter: &Entity<Emitter>,
+        window: &Window,
+        cx: &mut Context<Self>,
+        mut on_event: impl FnMut(&mut Self, &Entity<Emitter>, &Evt, &mut Window, &mut Context<Self>)
+        + 'static,
+    ) -> Subscription
+    where
+        Emitter: EventEmitter<Evt>,
+        Evt: 'static,
+    {
+        let (finder, window) = (cx.entity().downgrade(), window.window_handle());
+        App::subscribe(cx, emitter, move |emitter, event, cx| {
+            Self::update_in_window(&finder, window, cx, |this, window, cx| {
+                on_event(this, &emitter, event, window, cx)
+            })
+        })
+    }
+
+    /// Observe `observed`, with `on_notify` run in `window`, the browser's
+    /// own: `Context::observe_in` looks its window up the same way.
+    fn observe_in_window<T: 'static>(
+        observed: &Entity<T>,
+        window: &Window,
+        cx: &mut Context<Self>,
+        mut on_notify: impl FnMut(&mut Self, Entity<T>, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Subscription {
+        let (finder, window) = (cx.entity().downgrade(), window.window_handle());
+        App::observe(cx, observed, move |observed, cx| {
+            Self::update_in_window(&finder, window, cx, |this, window, cx| {
+                on_notify(this, observed, window, cx)
+            })
+        })
+    }
+
+    /// Run `f` on the browser in `window`, while both are still there.
+    fn update_in_window(
+        finder: &WeakEntity<Self>,
+        window: AnyWindowHandle,
+        cx: &mut App,
+        f: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>),
+    ) {
+        let Some(finder) = finder.upgrade() else {
+            return;
+        };
+        window
+            .update(cx, |_, window, cx| {
+                finder.update(cx, |this, cx| f(this, window, cx))
+            })
+            .ok();
     }
 
     // ----- small accessors ---------------------------------------------------

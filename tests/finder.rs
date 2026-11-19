@@ -551,6 +551,70 @@ fn results_that_come_in_leave_the_keyboard_where_it_has_gone_since(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn return_moves_into_the_results_of_its_own_window_with_quick_look_open(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-return-quick-look");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.select("notes.txt");
+    ui.press("space");
+    assert!(ui.read(|f| f.quick_look_window()).is_some());
+    ui.click("search");
+    ui.type_text("roadmap");
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+
+    // Quick Look's window reads this browser too, to draw the preview, and
+    // it's the last of the two to have drawn when Return arrives.
+    ui.press_after_quick_look_draws("enter");
+    ui.settle();
+    assert!(
+        ui.files_focused(),
+        "the keyboard moved in the window Return was pressed in"
+    );
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+
+    // Quick Look's window kept its own keyboard, so Escape still closes it.
+    ui.in_quick_look(|ui| ui.press("escape"));
+    assert!(!ui.read(|f| f.quick_look_is_open()));
+}
+
+#[gpui_kit::test]
+fn return_waits_for_the_results_in_its_own_window_with_quick_look_open(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-early-return-quick-look");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.select("notes.txt");
+    ui.press("space");
+    assert!(ui.read(|f| f.quick_look_window()).is_some());
+    ui.click("search");
+    ui.type_without_settling("roadmap");
+    ui.press_after_quick_look_draws("enter");
+    assert!(!ui.files_focused(), "the results aren't in yet");
+
+    ui.settle();
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert!(
+        ui.files_focused(),
+        "the results came in, and the keyboard moved in the window Return was pressed in"
+    );
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn return_goes_on_waiting_for_the_results_when_quick_look_closes(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-early-return-quick-look-gone");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.select("notes.txt");
+    ui.press("space");
+    ui.click("search");
+    ui.type_without_settling("roadmap");
+    ui.press_after_quick_look_draws("enter");
+
+    // The wait is for the browser's window, so Quick Look's can go.
+    ui.close_quick_look();
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert!(ui.files_focused(), "the results came in");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
 fn return_before_the_results_are_in_waits_for_the_filter_too(cx: &mut TestAppContext) {
     let Some(nu) = fffinder::nushell::find_nu(None) else {
         eprintln!("nu not installed; skipping");

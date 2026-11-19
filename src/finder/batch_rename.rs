@@ -79,10 +79,8 @@ impl Finder {
         self.focus_before_dialog(window, cx);
         let input = cx.new(|cx| InputState::new(window, cx).default_value(START));
         let events =
-            cx.subscribe_in(
-                &input,
-                window,
-                |this, _, event: &InputEvent, _, cx| match event {
+            Self::subscribe_in_window(&input, window, cx, |this, _, event: &InputEvent, _, cx| {
+                match event {
                     InputEvent::Change => {
                         if let Some(batch) = this.batch.as_mut() {
                             batch.debounce = cx.spawn(async move |this, cx| {
@@ -95,8 +93,8 @@ impl Finder {
                     }
                     InputEvent::PressEnter { .. } => this.preview_batch(cx),
                     InputEvent::Focus | InputEvent::Blur => {}
-                },
-            );
+                }
+            });
         self.batch = Some(BatchRename {
             entries,
             input: input.clone(),

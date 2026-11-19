@@ -87,11 +87,17 @@ impl Finder {
             state.focus(window, cx);
             state.set_selected_range(0..stem, cx);
         });
-        let events = cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
-            InputEvent::PressEnter { .. } => this.finish_rename(window, cx),
-            InputEvent::Blur => this.rename_field_blurred(window, cx),
-            _ => {}
-        });
+        let events =
+            Self::subscribe_in_window(
+                &input,
+                window,
+                cx,
+                |this, _, event, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.finish_rename(window, cx),
+                    InputEvent::Blur => this.rename_field_blurred(window, cx),
+                    _ => {}
+                },
+            );
         self.renaming = Some(InlineRename {
             path,
             in_sidebar,

@@ -328,6 +328,81 @@ impl<'a> Ui<'a> {
         self.settle();
     }
 
+    /// Close the Quick Look window when it was the last of the two to draw,
+    /// and run `then` before the browser's window has drawn again. Until it
+    /// has, GPUI has no window on record for the browser, and on macOS a
+    /// window isn't drawn while it's minimized or behind another one.
+    pub fn close_quick_look_and_then(&mut self, then: impl FnOnce(&mut App)) {
+        let _guard = StepGuard::new("close Quick Look".into());
+        let quick_look = self
+            .read(|f| f.quick_look_window())
+            .expect("Quick Look is open");
+        let browser = self.view.entity_id();
+        // All in one update: the test platform draws every changed window
+        // at the end of each.
+        self.cx.update(|cx| {
+            cx.update_window(quick_look, |_, window, cx| {
+                window.render_frame(cx);
+                window.remove_window();
+            })
+            .expect("Quick Look's window is open");
+            assert!(
+                cx.with_window(browser, |_, _| ()).is_none(),
+                "GPUI has no window on record for the browser"
+            );
+            then(cx);
+        });
+        self.settle();
+    }
+
+    /// Press `key` in the browser's window when the Quick Look window was the
+    /// last of the two to draw, as it is whenever the system asks it for a
+    /// frame after the browser's. The key comes the way the system sends one:
+    /// with no frame drawn first, where `press` draws this window, and with
+    /// what it sets off done before the key is let go. It has to follow
+    /// another key, since GPUI draws a window before the first key after the
+    /// mouse. The key is sent bare, without the text the system types for a
+    /// letter, so this is for keys like Return. Spawned work isn't let run
+    /// afterwards.
+    pub fn press_after_quick_look_draws(&mut self, key: &str) {
+        let _guard = StepGuard::new(format!("press {key} after Quick Look draws"));
+        let quick_look = self
+            .read(|f| f.quick_look_window())
+            .expect("Quick Look is open");
+        let keystroke = self
+            .cx
+            .update(|cx| gpui_kit::Keystroke::parse_with_os(key, cx.platform_info().os))
+            .unwrap_or_else(|error| panic!("invalid test keystroke: {error}"));
+        let down = gpui_kit::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        let up = gpui_kit::KeyUpEvent { keystroke };
+        assert!(
+            self.window(|window, _| window.last_input_was_keyboard()),
+            "a key came before this one"
+        );
+        self.cx
+            .update_window(quick_look, |_, window, cx| window.render_frame(cx))
+            .expect("Quick Look's window is open");
+        // GPUI answers with the window that last drew the browser when it's
+        // asked for the browser's. Were that not Quick Look's here, the key
+        // would be like any other, and a test would pass with nothing in
+        // its way.
+        let browser = self.view.entity_id();
+        let drew_last = self
+            .cx
+            .update(|cx| cx.with_window(browser, |window, _| window.window_handle()));
+        assert_eq!(drew_last, Some(quick_look), "Quick Look's window drew last");
+        self.window(|window, cx| {
+            window.dispatch_event(down.to_platform_input(), cx);
+        });
+        self.window(|window, cx| {
+            window.dispatch_event(up.to_platform_input(), cx);
+        });
+    }
+
     /// Click without letting spawned work run afterwards, so a test can
     /// replace that work before it starts.
     pub fn click_without_settling(&mut self, id: impl Into<ElementId>) {
