@@ -523,16 +523,42 @@ impl Engine {
         // fff-search reads a quoted phrase as plain fuzzy words, which find
         // every name that has it; the names are checked for it below.
         let (query, exact) = split_quoted(&req.query);
+        // The searches `search_root` makes with folders in the results.
+        let folders =
+            req.kind == KindFilter::Folder || (req.kind == KindFilter::Any && !req.files_only);
+        let typed = fold_glob_case(&query, case);
+        // Words reach fff-search in lowercase, so a capital in one doesn't
+        // narrow the search.
         let req = &SearchRequest {
-            query: fold_glob_case(&query, case),
+            query: fold_word_case(&typed, folders),
             ..req.clone()
         };
+        // A capital is a preference instead, and only fff-search can rank by
+        // it: given `TEC` as typed, it scores `TaxExemptionController.java`
+        // for its three capitals, and given `tec` it sees a t, an e and a c
+        // like any other. So a search with such a word is made as typed as
+        // well, and each result keeps the higher of its two scores.
+        let as_typed = words_as_typed(&req.query, &typed);
+        let as_typed = (as_typed != req.query).then(|| SearchRequest {
+            query: as_typed,
+            ..req.clone()
+        });
+        let as_typed = as_typed.as_ref();
         let wide = !exact.is_empty();
 
         let parts: Vec<RootPart> = std::thread::scope(|s| {
             let handles: Vec<_> = indexes
                 .iter()
-                .map(|root| s.spawn(move || self.search_root(root, req, limit, wide)))
+                .map(|root| {
+                    s.spawn(move || {
+                        let mut part = self.search_root(root, req, limit, wide);
+                        if let Some(as_typed) = as_typed {
+                            let ranked = self.search_root(root, as_typed, limit, wide);
+                            keep_higher(&mut part.hits, ranked.hits);
+                        }
+                        part
+                    })
+                })
                 .collect();
             handles.into_iter().filter_map(|h| h.join().ok()).collect()
         });
@@ -550,7 +576,15 @@ impl Engine {
             .map(str::to_lowercase)
             .collect();
         if wants_apps(req, &words) {
-            let apps = app_hits(self.app_list().entries(), &words);
+            let mut apps = app_hits(self.app_list().entries(), &words);
+            // fff-search isn't asked about apps, so they get here what the
+            // search as typed gives a name that fits its capitals. Without
+            // it, `Safari` lists a file named `Safari.txt` ahead of the app.
+            if let Some(as_typed) = as_typed {
+                for app in &mut apps {
+                    app.score += case_fit(&display_name(&app.path), &as_typed.query);
+                }
+            }
             total_matched += apps.len();
             raw.extend(apps);
         }
@@ -1003,6 +1037,8 @@ impl Engine {
     pub fn list(&self, dirs: bool, query: Option<&str>, limit: usize) -> Vec<IndexedItem> {
         let limit = if limit == 0 { usize::MAX } else { limit };
         let threads = self.search_settings().threads;
+        // Words ignore letter case here as they do in `search`.
+        let folded = query.map(|q| fold_word_case(q, dirs));
         let mut items = Vec::new();
         for root in &self.read_indexes().roots {
             if items.len() >= limit {
@@ -1023,7 +1059,7 @@ impl Engine {
                 size,
                 modified,
             };
-            match (dirs, query.map(str::trim).filter(|q| !q.is_empty())) {
+            match (dirs, folded.as_deref().filter(|q| !q.is_empty())) {
                 // The overflow files (added since the scan) are the end of
                 // `get_files`, so they're already in it.
                 (false, None) => items.extend(
@@ -1298,6 +1334,14 @@ impl Engine {
             log::debug!("track_access {}: {err}", path.display());
             return;
         }
+        // fff-search looks a search up under the text it is given, so a
+        // search is remembered under the lowercase text `search` gives it,
+        // in the form that takes when folders can be in the results, as they
+        // can in the window.
+        let query = query.map(|q| {
+            let (query, _) = split_quoted(q);
+            fold_word_case(&fold_glob_case(&query, self.search_settings().case), true)
+        });
         let roots = self.read_indexes().roots.clone();
         for root in roots.iter().filter(|r| path.starts_with(&r.path)) {
             if let Ok(mut guard) = root.picker.write()
@@ -1305,11 +1349,11 @@ impl Engine {
             {
                 let _ = picker.update_single_file_frecency(path, tracker);
             }
-            if let Some(query) = query.filter(|q| !q.trim().is_empty())
+            if let Some(query) = query.as_deref().filter(|q| !q.is_empty())
                 && let Ok(mut qt) = self.queries.write()
                 && let Some(qt) = qt.as_mut()
             {
-                let _ = qt.track_query_completion(query.trim(), &root.path, path);
+                let _ = qt.track_query_completion(query, &root.path, path);
             }
         }
     }
@@ -1470,6 +1514,27 @@ fn app_hits(entries: &[PathBuf], words: &[String]) -> Vec<RawHit> {
         .collect()
 }
 
+/// What [`case_fit`] gives a name for each letter.
+const CASE_FIT: i32 = 5;
+
+/// About what fff-search adds to a name for the words of a search made as
+/// typed (see [`words_as_typed`]) that the name has in the same letter case:
+/// 4 points a letter, and a sixth more when they are in the name. An app is
+/// scored by [`app_hits`] as the words in lowercase score, so it is given
+/// this to stay where it ranks among the names fff-search scored.
+///
+/// # Arguments
+///
+/// * `name` - An app's name
+/// * `as_typed` - The search made as typed, which has only fuzzy words
+fn case_fit(name: &str, as_typed: &str) -> i32 {
+    as_typed
+        .split_whitespace()
+        .filter(|word| word.chars().nth(1).is_some() && is_subsequence(word, name))
+        .map(|word| word.chars().count() as i32 * CASE_FIT)
+        .sum()
+}
+
 /// Whether a search can find apps: one of every location, for folders,
 /// with `words` (its fuzzy words) and nothing else.
 fn wants_apps(req: &SearchRequest, words: &[String]) -> bool {
@@ -1533,6 +1598,27 @@ fn rerank(hit: &RawHit, words: &[String]) -> i32 {
     }
     let depth = hit.path.components().count() as i32;
     hit.score + bonus - depth * DEPTH_PENALTY
+}
+
+/// Add what the same search found when it was made another way. An item
+/// found both ways keeps the higher of its two scores.
+///
+/// # Arguments
+///
+/// * `hits` - What one search of a root found
+/// * `more` - What the other found there
+fn keep_higher(hits: &mut Vec<RawHit>, more: Vec<RawHit>) {
+    let found: HashMap<PathBuf, usize> = hits
+        .iter()
+        .enumerate()
+        .map(|(ix, hit)| (hit.path.clone(), ix))
+        .collect();
+    for hit in more {
+        match found.get(&hit.path) {
+            Some(&ix) => hits[ix].score = hits[ix].score.max(hit.score),
+            None => hits.push(hit),
+        }
+    }
 }
 
 /// fff returns `/`-separated relative paths on every OS.
@@ -1684,6 +1770,88 @@ fn fold_case(glob: &str) -> String {
         }
     }
     out
+}
+
+/// Put the words of a name search in lowercase, so that they ignore letter
+/// case. fff-search matches a word that has a capital case for case:
+/// `README` as typed never finds `readme.md`. Globs follow the letter case
+/// setting and exclusions ignore case already, so both are left alone.
+///
+/// # Arguments
+///
+/// * `query` - The search, after quoted phrases are taken out
+/// * `folders` - Whether the results can have folders. fff-search then reads
+///   `/notes/` and `src/` as words too. Otherwise they are folder filters,
+///   which ignore case from A to Z and match any other letter only as typed,
+///   so they are left alone as well
+fn fold_word_case(query: &str, folders: bool) -> String {
+    query
+        .split_whitespace()
+        .map(|token| {
+            let is_filter = token.starts_with('!')
+                || token.contains(['*', '?', '[', '{'])
+                || (!folders && (token.starts_with('/') || token.ends_with('/')));
+            match is_filter {
+                true => token.to_string(),
+                false => lowercase_word(token),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `word` with its capitals in lowercase, which makes fff-search match it in
+/// either case. fff-search matches a lowercase letter against its capital
+/// only when both are one character of the same length in UTF-8, so a word
+/// with any other capital, such as `İ`, is left as typed and still finds
+/// names spelled that way.
+fn lowercase_word(word: &str) -> String {
+    let lowered: Option<String> = word
+        .chars()
+        .map(|c| {
+            if !c.is_uppercase() {
+                return Some(c);
+            }
+            let mut lower = c.to_lowercase();
+            match (lower.next(), lower.next()) {
+                (Some(l), None)
+                    if l.is_lowercase()
+                        && l.len_utf8() == c.len_utf8()
+                        && l.to_uppercase().eq([c]) =>
+                {
+                    Some(l)
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    lowered.unwrap_or_else(|| word.to_string())
+}
+
+/// A lowercase search with its words as typed again, which is the search
+/// fff-search can rank by capitals: it gives a word that has one more for
+/// each name with the same capitals, and nothing for them once the word is
+/// in lowercase. A token with a colon stays in lowercase, where it may be a
+/// filter (`git:modified`) that it isn't as typed. So does a lone letter:
+/// fff-search ignores it, and the search would be the same one again.
+///
+/// # Arguments
+///
+/// * `lowered` - The search from [`fold_word_case`]
+/// * `typed` - The search it was made from
+fn words_as_typed(lowered: &str, typed: &str) -> String {
+    lowered
+        .split_whitespace()
+        .zip(typed.split_whitespace())
+        .map(|(lowered, typed)| {
+            let ranked = !typed.contains(':') && typed.chars().nth(1).is_some();
+            match ranked {
+                true => typed,
+                false => lowered,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Greedy case-insensitive subsequence match of `needle` in `name`, for highlighting.
@@ -1871,6 +2039,46 @@ mod tests {
     }
 
     #[test]
+    fn a_result_found_both_ways_keeps_its_higher_score() {
+        let hit = |path: &str, score| RawHit::file(path.into(), 1, 1, None, score);
+        let mut hits = vec![hit("/a/README.md", 70), hit("/b/readme.md", 70)];
+        let as_typed = vec![
+            hit("/a/README.md", 94),
+            hit("/b/readme.md", 12),
+            hit("/c/Read me.md", 30),
+        ];
+        keep_higher(&mut hits, as_typed);
+        let scores: Vec<(String, i32)> = hits
+            .iter()
+            .map(|h| (h.path.to_string_lossy().into_owned(), h.score))
+            .collect();
+        assert_eq!(
+            scores,
+            [
+                ("/a/README.md".to_string(), 94),
+                ("/b/readme.md".to_string(), 70),
+                ("/c/Read me.md".to_string(), 30),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_app_scores_for_the_capitals_it_fits() {
+        assert_eq!(case_fit("Safari.app", "Safari"), 6 * CASE_FIT);
+        assert_eq!(case_fit("Safari.app", "SAFARI"), 0);
+        assert_eq!(
+            case_fit("TextEdit.app", "TE"),
+            2 * CASE_FIT,
+            "letters apart fit too"
+        );
+        assert_eq!(
+            case_fit("Tax tables.app", "t Tax tables"),
+            9 * CASE_FIT,
+            "fff-search ignores a lone letter"
+        );
+    }
+
+    #[test]
     fn fuzzy_text_drops_constraints() {
         assert_eq!(fuzzy_text("main *.rs /src/ !test git:m"), "main");
     }
@@ -1984,6 +2192,49 @@ mod tests {
     }
 
     #[test]
+    fn words_are_searched_in_lowercase() {
+        assert_eq!(
+            fold_word_case("Main *.RS !Test /Src/ Docs/ Lib.rs:42 Git:Modified", true),
+            "main *.RS !Test /src/ docs/ lib.rs:42 git:modified"
+        );
+        assert_eq!(
+            fold_word_case("Main /Src/ Docs/", false),
+            "main /Src/ Docs/",
+            "folder filters ignore case as typed"
+        );
+        assert_eq!(
+            fold_word_case(
+                &fold_glob_case("*Tax* Budget", SearchCase::Insensitive),
+                true
+            ),
+            "*[tT][aA][xX]* budget"
+        );
+        assert_eq!(fold_word_case("ÜBER Москва", true), "über москва");
+        // Capitals fff-search can't match from lowercase: "İ" becomes two
+        // characters and "Ⱥ" a longer one, "ϴ" becomes the lowercase of "Θ",
+        // and "ℂ" has none.
+        for word in ["İSTANBUL", "ȺBC", "ϴETA", "ℂOMPLEX"] {
+            assert_eq!(fold_word_case(word, true), word);
+        }
+        assert_eq!(fold_word_case("İSTANBUL Notes", true), "İSTANBUL notes");
+    }
+
+    #[test]
+    fn words_are_searched_as_typed_too() {
+        let typed = "Main T *.RS !Test /Src/ Docs/ Lib.rs:42 Git:Modified";
+        assert_eq!(
+            words_as_typed(&fold_word_case(typed, true), typed),
+            "Main t *.RS !Test /Src/ Docs/ lib.rs:42 git:modified",
+            "but not a lone letter, or what may be a filter in lowercase"
+        );
+        assert_eq!(
+            words_as_typed(&fold_word_case(typed, false), typed),
+            "Main t *.RS !Test /Src/ Docs/ lib.rs:42 git:modified"
+        );
+        assert_eq!(words_as_typed("main tax", "main tax"), "main tax");
+    }
+
+    #[test]
     fn quoted_words_match_names_letter_for_letter() {
         let dir = std::env::temp_dir().join(format!("fff-exact-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2077,6 +2328,168 @@ mod tests {
         engine.set_search_settings(settings);
         assert_eq!(names("bduget"), Vec::<String>::new());
         assert_eq!(names("bdgt"), ["budget.txt"], "gaps still match");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capitals_in_a_word_dont_narrow_the_search() {
+        let dir = std::env::temp_dir().join(format!("fff-caps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Each spelling in its own folder, for disks that ignore case.
+        for file in [
+            "a/README.md",
+            "b/Readme.md",
+            "c/readme.md",
+            "pics/img_0001.jpg",
+            "Notes/todo.txt",
+        ] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let find = |query: &str, kind: KindFilter, files_only: bool| -> Vec<String> {
+            engine
+                .search(&SearchRequest {
+                    query: query.into(),
+                    kind,
+                    files_only,
+                    limit: 50,
+                    ..Default::default()
+                })
+                .hits
+                .into_iter()
+                .map(|h| h.entry.name)
+                .collect()
+        };
+        let names = |query: &str| find(query, KindFilter::Any, true);
+        let sorted = |mut names: Vec<String>| {
+            names.sort();
+            names
+        };
+        let set_case = |case| {
+            let mut settings = engine.search_settings();
+            settings.case = case;
+            engine.set_search_settings(settings);
+        };
+        let listed = |dirs: bool, query: &str| {
+            let items = engine.list(dirs, Some(query), 0);
+            sorted(items.iter().map(|i| display_name(&i.path)).collect())
+        };
+        let every_spelling = ["README.md", "Readme.md", "readme.md"];
+
+        assert_eq!(sorted(names("README")), every_spelling);
+        assert_eq!(names("README")[0], "README.md", "as typed comes first");
+        assert_eq!(sorted(names("Readme")), every_spelling);
+        assert_eq!(names("Readme")[0], "Readme.md", "as typed comes first");
+        assert_eq!(names("IMG_0001"), ["img_0001.jpg"]);
+        assert_eq!(names("TODO"), ["todo.txt"]);
+        assert_eq!(
+            find("NOTES", KindFilter::Any, false).first(),
+            Some(&"Notes".to_string())
+        );
+        // With folders in the results, a folder token is a word to fff-search.
+        assert_eq!(find("NOTES/", KindFilter::Folder, false), ["Notes"]);
+        assert_eq!(listed(false, "README"), every_spelling);
+        assert_eq!(listed(true, "NOTES"), ["Notes"]);
+
+        // Quoting a word is how to ask for its capitals.
+        assert_eq!(names(r#""README""#), ["README.md"]);
+        set_case(SearchCase::Insensitive);
+        assert_eq!(sorted(names(r#""README""#)), every_spelling);
+        set_case(SearchCase::Sensitive);
+        assert_eq!(names(r#""Readme""#), ["Readme.md"]);
+        assert_eq!(names(r#""readme""#), ["readme.md"]);
+        assert_eq!(
+            sorted(names("README")),
+            every_spelling,
+            "the setting isn't for words"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capitals_say_which_names_come_first() {
+        let dir = std::env::temp_dir().join(format!("fff-humps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for file in ["a/UserSettingsController.java", "b/user_service.rb"] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let names = |query: &str| -> Vec<String> {
+            engine
+                .search(&SearchRequest {
+                    query: query.into(),
+                    files_only: true,
+                    limit: 50,
+                    ..Default::default()
+                })
+                .hits
+                .into_iter()
+                .map(|h| h.entry.name)
+                .collect()
+        };
+
+        // Both names have a u, an s and a c in that order, and fff-search
+        // likes the second more until it is told which letters are capitals.
+        assert_eq!(
+            names("USC"),
+            ["UserSettingsController.java", "user_service.rb"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // What a search opened is filed under the root as it was given, and looked
+    // up under the root as fff-search spells it. For a temporary folder on
+    // Windows the two differ (see `scope_follows_the_base_spelling`).
+    #[cfg(not(windows))]
+    #[test]
+    fn a_search_remembers_what_it_opened_whatever_the_capitals() {
+        let dir = std::env::temp_dir().join(format!("fff-opened-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tree = dir.join("tree");
+        for file in ["a/README.md", "b/readme.md"] {
+            let path = tree.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![tree.clone()],
+            app_dirs: Vec::new(),
+            db_dir: Some(dir.join("db")),
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let first = |query: &str| {
+            let request = SearchRequest {
+                query: query.into(),
+                limit: 50,
+                ..Default::default()
+            };
+            engine.search(&request).hits.swap_remove(0).entry.name
+        };
+
+        assert_eq!(first("README"), "README.md");
+        engine.track_open(&tree.join("b/readme.md"), Some("README"));
+        assert_eq!(first("README"), "readme.md", "opened from this search");
+        assert_eq!(first("Readme"), "readme.md", "in any letter case");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2226,6 +2639,46 @@ mod tests {
 
         engine.set_app_dirs(&[]);
         assert!(at(&find("safari", KindFilter::Any, false), "Safari.app").is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_capital_keeps_an_app_ahead_of_other_items_with_its_name() {
+        let dir = std::env::temp_dir().join(format!("fff-app-caps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("Users/me");
+        let apps = dir.join("Applications");
+        std::fs::create_dir_all(apps.join("Safari.app")).unwrap();
+        std::fs::create_dir_all(home.join("Web/Safari")).unwrap();
+        for file in ["Safari.txt", "Web/Safari/History.db"] {
+            std::fs::write(home.join(file), "x").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![home.clone()],
+            app_dirs: vec![apps.clone()],
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let names = |query: &str| -> Vec<String> {
+            let request = SearchRequest {
+                query: query.into(),
+                limit: 20,
+                ..Default::default()
+            };
+            let hits = engine.search(&request).hits;
+            hits.into_iter().map(|h| h.entry.name).collect()
+        };
+
+        // fff-search gives the file and the folder more for the capital, and
+        // it never sees the app.
+        for query in ["safari", "Safari"] {
+            let found = names(query);
+            assert_eq!(found[0], "Safari.app", "{query}: {found:?}");
+            assert!(found.contains(&"Safari.txt".to_string()), "{found:?}");
+            assert!(found.contains(&"Safari".to_string()), "{found:?}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

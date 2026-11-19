@@ -99,6 +99,23 @@ fn searches_by_name_and_returns_to_browsing(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_capital_in_a_search_word_doesnt_narrow_it(cx: &mut TestAppContext) {
+    let fx = Fixture::new("capitals");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("f"));
+    ui.type_text("ATLAS");
+    let found = ui.names();
+    assert!(
+        found.contains(&"Project Atlas.txt".to_string()),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&"atlas".to_string()),
+        "folders match too: {found:?}"
+    );
+}
+
+#[gpui_kit::test]
 fn arrow_keys_select_in_each_view(cx: &mut TestAppContext) {
     let fx = Fixture::new("arrows");
     let mut ui = Ui::open(cx, &fx.dir);

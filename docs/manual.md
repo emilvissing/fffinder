@@ -353,11 +353,13 @@ While a search is active, the scope bar shows:
 
 Cmd+/ shows this table in the app.
 
-Unquoted words match fzf-style: their letters must appear in order somewhere in the path inside the search location, with gaps allowed, folder names included. So `taxexemptionc` also finds `token/exemption/coding/TaxHandler.java`. Quote a word to match it only in the name, letters in a row. Fuzzy words and quoted words both ignore letter case; quoted words and globs follow **Letter case in searches** in [Settings › Search engine](#search-engine).
+Unquoted words match fzf-style: their letters must appear in order somewhere in the path inside the search location, with gaps allowed, folder names included. So `taxexemptionc` also finds `token/exemption/coding/TaxHandler.java`. Quote a word to match it only in the name, letters in a row.
+
+Unquoted words ignore letter case, so `README` also finds `readme.md`. Quoted words and globs follow **Letter case in searches** in [Settings › Search engine](#search-engine). Set to Smart, as it is at first, `"README"` finds only names that have `README` in capitals.
 
 ### Ranking and limits
 
-fff-search ranks results, and fffinder re-ranks them so name matches come first, shallow paths come before deep ones, and nothing inside `.app` or `.framework` bundles shows. When a word matches files exactly, typo-only matches are dropped. With **Allow typos** off in [Settings › Search engine](#search-engine), they're always dropped. Apps from the app folders rank as one item wherever their folder is, so "safari" or "term" puts Safari or Terminal ahead of a file with the same words in its name.
+fff-search ranks results, and fffinder re-ranks them so name matches come first, shallow paths come before deep ones, and nothing inside `.app` or `.framework` bundles shows. A capital letter in a word is a preference: names that fit the capitals rank higher, so `README` lists `README.md` ahead of `readme.md`, and the initials `TEC` favor `TaxExemptionController.java`. When a word matches files exactly, typo-only matches are dropped. With **Allow typos** off in [Settings › Search engine](#search-engine), they're always dropped. Apps from the app folders rank as one item wherever their folder is, so "safari" or "term" puts Safari or Terminal ahead of a file with the same words in its name.
 
 A search shows at most `result_limit` items (500 by default; **Results shown** in [Settings › Search engine](#search-engine)). With a filter on, it fetches up to 5,000 so the filter has enough to work with. Opening a file from search results records it, so files you open often rank higher for the same search later.
 
