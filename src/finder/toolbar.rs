@@ -1038,6 +1038,12 @@ fn actions_menu(
     )
     .separator()
     .item(
+        PopupMenuItem::new("Save Search…")
+            .icon(Lucide::FolderCog)
+            .disabled(!finder.is_searching())
+            .action(Box::new(SaveSearch)),
+    )
+    .item(
         PopupMenuItem::new("Filter with Nushell…")
             .icon(Lucide::Funnel)
             .action(Box::new(ToggleFilter)),
@@ -1090,6 +1096,7 @@ mod tests {
             query: query.into(),
             in_folder: false,
             contents: false,
+            smart: None,
         };
         Visit {
             location: Location::Folder(path.into()),

@@ -140,6 +140,21 @@ impl Finder {
             )
             .child(div().flex_1())
             .child(
+                Button::new("save-smart-folder")
+                    .ghost()
+                    .xsmall()
+                    .icon(Lucide::FolderCog)
+                    .label("Save")
+                    .tooltip_with_action(
+                        "Save this search as a Smart Folder",
+                        &SaveSearch,
+                        Some(FINDER),
+                    )
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.save_search(&SaveSearch, window, cx)
+                    })),
+            )
+            .child(
                 div()
                     .id("filter-toggle")
                     .p(ui(3.))

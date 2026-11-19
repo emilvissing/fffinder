@@ -893,16 +893,19 @@ impl Finder {
             .into_any_element()
     }
 
-    /// Whether the Smart Folder's search and filter are what's showing.
+    /// Whether the Smart Folder's search is the one showing.
     fn smart_is_active(&self, ix: usize) -> bool {
-        self.smart_folders().get(ix).is_some_and(|folder| {
-            self.is_searching()
-                && self.query() == folder.query
-                && self.filter_text() == folder.filter.as_deref().unwrap_or("")
-        })
+        self.smart_folders()
+            .get(ix)
+            .is_some_and(|folder| self.shows_smart_folder(folder))
     }
 
-    /// A saved search; active while its search and filter are showing.
+    #[doc(hidden)]
+    pub fn smart_is_active_for_test(&self, ix: usize) -> bool {
+        self.smart_is_active(ix)
+    }
+
+    /// A saved search; active while its whole search is showing.
     fn smart_row(&self, ix: usize, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let pal = palette(cx);

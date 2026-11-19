@@ -427,6 +427,9 @@ pub struct Finder {
     filtering: bool,
     /// Rows before the filter, for the status bar.
     unfiltered_len: usize,
+    /// What the Smart Folder that's open searches with, and what the window
+    /// searched with before it (see filter.rs).
+    smart_folder_setup: Option<filter::SmartFolderSetup>,
     /// The user's Nushell environment, when "use Nushell's colors and
     /// editor" is on (see nu_env.rs).
     nu_env: Option<Arc<crate::nu_env::NuEnv>>,
@@ -665,6 +668,7 @@ impl Finder {
             filter_error: None,
             filtering: false,
             unfiltered_len: 0,
+            smart_folder_setup: None,
             terminals: None,
             terminals_task: Task::ready(()),
             nu_env: None,
@@ -1570,6 +1574,10 @@ impl Finder {
                 if matches!(&self.enter_results, Some((_, at_key)) if *at_key != selection) {
                     self.enter_results = None;
                 }
+                // Emptying the field ends the search, as `end_search` does.
+                if value.trim().is_empty() {
+                    self.leave_smart_folder(window, cx);
+                }
                 self.set_query(value, false, cx);
             }
             InputEvent::PressEnter { .. } => {
@@ -1772,6 +1780,9 @@ impl Finder {
     }
 
     fn end_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Before the words go, so the folder's rows come back under the
+        // window's own filter, and what was selected in them is found again.
+        self.leave_smart_folder(window, cx);
         if self.is_searching() {
             self.search_input
                 .update(cx, |s, cx| s.set_value("", window, cx));
@@ -1786,6 +1797,10 @@ impl Finder {
             query: self.query.clone(),
             in_folder: self.scope == SearchScope::Folder,
             contents: self.search_contents,
+            smart: self
+                .smart_folder_setup
+                .is_some()
+                .then(|| (self.config.kind_filter, self.filter.clone())),
         })
     }
 
@@ -1794,12 +1809,22 @@ impl Finder {
     /// as Escape there takes an empty field to have no search to end. No
     /// search is showing when this is called.
     fn restore_search(&mut self, search: SavedSearch, window: &mut Window, cx: &mut Context<Self>) {
-        self.scope = if search.in_folder {
+        let scope = if search.in_folder {
             SearchScope::Folder
         } else {
             SearchScope::Computer
         };
-        self.search_contents = search.contents;
+        match search.smart {
+            // A Smart Folder's search comes back whole, and ends like one:
+            // what it searches with lasts no longer than it does.
+            Some((kind, filter)) => {
+                self.enter_smart_folder(kind, scope, search.contents, filter, window, cx);
+            }
+            None => {
+                self.scope = scope;
+                self.search_contents = search.contents;
+            }
+        }
         self.search_input
             .update(cx, |s, cx| s.set_value(search.query.clone(), window, cx));
         self.set_query(search.query, true, cx);
@@ -3703,6 +3728,7 @@ impl Render for Finder {
             .on_action(cx.listener(Self::go_to_folder))
             .on_action(cx.listener(Self::search_help))
             .on_action(cx.listener(Self::toggle_filter))
+            .on_action(cx.listener(Self::save_search))
             .on_action(cx.listener(|this, _: &OpenInEditor, window, cx| {
                 let paths = this
                     .selected_entries()

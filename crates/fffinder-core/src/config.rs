@@ -422,6 +422,40 @@ pub struct SmartFolder {
     pub filter: Option<String>,
 }
 
+impl SmartFolder {
+    /// Say everything the saved search goes by, such as `names matching “log”
+    /// in “Projects”, kind Image, where size > 10kb`.
+    ///
+    /// # Returns
+    ///
+    /// The description, worded to follow "Shows" in a sentence
+    pub fn summary(&self) -> String {
+        let finds = if self.contents {
+            "files containing"
+        } else {
+            "names matching"
+        };
+        let place = match &self.scope {
+            Some(folder) => format!("in “{}”", crate::entry::display_name(folder)),
+            None => "on This Computer".to_string(),
+        };
+        let mut parts = vec![format!("{finds} “{}” {place}", self.query)];
+        // A contents search looks in files of every kind.
+        if self.kind != KindFilter::Any && !self.contents {
+            parts.push(format!("kind {}", self.kind.label()));
+        }
+        match self.filter.as_deref().map(str::trim) {
+            None | Some("") => {}
+            // A pipeline isn't a condition, so "where" wouldn't read.
+            Some(pipeline) if pipeline.starts_with('|') => {
+                parts.push(format!("filtered with {pipeline}"));
+            }
+            Some(condition) => parts.push(format!("where {condition}")),
+        }
+        parts.join(", ")
+    }
+}
+
 /// `value` clamped to `(min, max)`, or `default` when it isn't a number.
 pub fn in_range(value: f32, (min, max): (f32, f32), default: f32) -> f32 {
     if value.is_finite() {
@@ -924,6 +958,53 @@ mod tests {
             ViewMode::Columns,
             "a tab keeps its own view"
         );
+    }
+
+    #[test]
+    fn a_smart_folders_summary_says_everything_it_searches_by() {
+        let by_name = SmartFolder {
+            name: "Logs".into(),
+            query: "log".into(),
+            ..Default::default()
+        };
+        assert_eq!(by_name.summary(), "names matching “log” on This Computer");
+
+        let narrowed = SmartFolder {
+            kind: KindFilter::Image,
+            scope: Some(PathBuf::from("/work/Projects")),
+            filter: Some("size > 10kb".into()),
+            ..by_name.clone()
+        };
+        assert_eq!(
+            narrowed.summary(),
+            "names matching “log” in “Projects”, kind Image, where size > 10kb"
+        );
+
+        // A contents search looks in every kind of file, whatever the menu
+        // was left on.
+        let contents = SmartFolder {
+            contents: true,
+            ..narrowed.clone()
+        };
+        assert_eq!(
+            contents.summary(),
+            "files containing “log” in “Projects”, where size > 10kb"
+        );
+
+        let pipeline = SmartFolder {
+            filter: Some(" | sort-by size --reverse | first 2 ".into()),
+            ..by_name.clone()
+        };
+        assert_eq!(
+            pipeline.summary(),
+            "names matching “log” on This Computer, filtered with | sort-by size --reverse | first 2"
+        );
+
+        let blank_filter = SmartFolder {
+            filter: Some("  ".into()),
+            ..by_name.clone()
+        };
+        assert_eq!(blank_filter.summary(), by_name.summary());
     }
 
     #[test]

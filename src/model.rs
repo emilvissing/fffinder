@@ -123,6 +123,10 @@ pub struct SavedSearch {
     pub in_folder: bool,
     /// It looked inside files, not at their names.
     pub contents: bool,
+    /// The kind and the Nushell filter it had from a Smart Folder. Those end
+    /// with a Smart Folder's search, so they come back with it. `None` for
+    /// any other search, which runs again with the ones chosen by then.
+    pub smart: Option<(fffinder_core::KindFilter, String)>,
 }
 
 /// What the window is called while it shows a search for `words`.
@@ -701,6 +705,7 @@ mod tests {
             query: query.into(),
             in_folder: false,
             contents: false,
+            smart: None,
         })
     }
 

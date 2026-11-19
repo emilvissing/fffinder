@@ -7,14 +7,16 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use fffinder_core::{FileEntry, SmartFolder};
+use fffinder_core::{FileEntry, KindFilter, SmartFolder};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -25,6 +27,28 @@ use crate::nushell;
 
 /// Search results fetched while a filter is on, so it has enough to work with.
 pub const FILTER_SEARCH_LIMIT: usize = 5000;
+
+/// What a window searches with besides the words: the kind, the scope, Name
+/// or Contents, and the filter with its bar.
+struct SearchSetup {
+    kind: KindFilter,
+    scope: SearchScope,
+    contents: bool,
+    filter: String,
+    filter_open: bool,
+}
+
+/// The search setup of the Smart Folder that's open, and the window's own,
+/// which it took the place of and which comes back when its search ends.
+pub(super) struct SmartFolderSetup {
+    before: SearchSetup,
+    /// As the Smart Folder set it. A part that differs by the time the
+    /// search ends was changed by hand, and stays as it was changed.
+    opened: SearchSetup,
+    /// The folder the Smart Folder was saved to search, when it couldn't be
+    /// found and This Computer is searched in its place.
+    missing: Option<PathBuf>,
+}
 
 impl Finder {
     pub(super) fn on_filter_event(
@@ -204,9 +228,13 @@ impl Finder {
         })
     }
 
+    /// Save `folder`, in place of one with the same name if there is one,
+    /// which keeps its row where it was in the sidebar.
     pub fn add_smart_folder(&mut self, folder: SmartFolder, cx: &mut Context<Self>) {
-        self.config.smart_folders.retain(|f| f.name != folder.name);
-        self.config.smart_folders.push(folder);
+        let folders = &mut self.config.smart_folders;
+        let at = folders.iter().position(|f| f.name == folder.name);
+        folders.retain(|f| f.name != folder.name);
+        folders.insert(at.unwrap_or(folders.len()), folder);
         self.settings_changed(cx);
         cx.notify();
     }
@@ -217,28 +245,162 @@ impl Finder {
         cx.notify();
     }
 
+    /// Whether `folder`'s search is the one showing, all of it: the words,
+    /// the kind, the place, Name or Contents, and the filter. Two that differ
+    /// in any of those are never both the one showing.
+    pub(super) fn shows_smart_folder(&self, folder: &SmartFolder) -> bool {
+        let Some(mut showing) = self.current_smart_folder(folder.name.clone()) else {
+            return false;
+        };
+        // One whose folder couldn't be found searches This Computer in its
+        // place, and that is its search until the scope is changed by hand.
+        let missing = self
+            .smart_folder_setup
+            .as_ref()
+            .and_then(|setup| setup.missing.as_ref());
+        if showing.scope.is_none() && missing.is_some() && missing == folder.scope.as_ref() {
+            showing.scope = folder.scope.clone();
+        }
+        showing == *folder
+    }
+
+    fn search_setup(&self, cx: &App) -> SearchSetup {
+        SearchSetup {
+            kind: self.config.kind_filter,
+            scope: self.scope,
+            contents: self.search_contents,
+            // As the bar's field has it, which is the filter but for the
+            // pause before what's typed there is applied.
+            filter: self.filter_input.read(cx).value().trim().to_string(),
+            filter_open: self.filter_open,
+        }
+    }
+
+    /// Put `filter` in the bar's field and apply it, with the bar open or
+    /// closed.
+    fn replace_filter(
+        &mut self,
+        filter: String,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.filter_open = open;
+        // What was typed there a moment ago would be applied over it.
+        self.filter_debounce = Task::ready(());
+        self.filter_input
+            .update(cx, |s, cx| s.set_value(filter.clone(), window, cx));
+        self.set_filter(filter, cx);
+        // A bar that goes away may have the keyboard in its field, and keys
+        // pressed in a field that isn't drawn go nowhere.
+        let field = self.filter_input.read(cx).focus_handle(cx);
+        if field.is_focused(window) && !self.filter_bar_open() {
+            self.focus_files(window, cx);
+        }
+    }
+
     /// Run a saved search: its place, kind, filter, and words.
     pub fn open_smart_folder(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(folder) = self.config.smart_folders.get(ix).cloned() else {
             return;
         };
-        if let Some(scope) = folder.scope.as_ref().filter(|s| s.is_dir()) {
-            self.navigate(Location::Folder(scope.clone()), window, cx);
-            self.scope = SearchScope::Folder;
-        } else {
-            self.end_search(window, cx);
-            self.scope = SearchScope::Computer;
-        }
-        self.config.kind_filter = folder.kind;
-        self.search_contents = folder.contents;
+        let (scope, missing) = match folder.scope.as_ref().filter(|s| s.is_dir()) {
+            Some(scope) => {
+                self.navigate(Location::Folder(scope.clone()), window, cx);
+                (SearchScope::Folder, None)
+            }
+            None => {
+                // The search is wider than the one that was saved, which
+                // the results alone wouldn't show.
+                if let Some(missing) = &folder.scope {
+                    window.push_notification(
+                        (
+                            gpui_kit::component::notification::NotificationType::Warning,
+                            format!(
+                                "{} can’t be found, so “{}” is searching This Computer",
+                                missing.display(),
+                                folder.name
+                            ),
+                        ),
+                        cx,
+                    );
+                }
+                self.end_search(window, cx);
+                (SearchScope::Computer, folder.scope.clone())
+            }
+        };
         let filter = folder.filter.unwrap_or_default();
-        self.filter_open = !filter.is_empty();
-        self.filter_input
-            .update(cx, |s, cx| s.set_value(filter.clone(), window, cx));
-        self.set_filter(filter, cx);
+        self.enter_smart_folder(folder.kind, scope, folder.contents, filter, window, cx);
+        // The sidebar marks it as the one showing all the same.
+        if let Some(setup) = &mut self.smart_folder_setup {
+            setup.missing = missing;
+        }
         self.search_input
             .update(cx, |s, cx| s.set_value(folder.query.clone(), window, cx));
         self.set_query(folder.query, true, cx);
+        cx.notify();
+    }
+
+    /// Search with a Smart Folder's kind, scope, Name or Contents, and filter
+    /// until the search ends, and then with the window's own again (see
+    /// [`Self::leave_smart_folder`]). No search is showing when this is
+    /// called: the one before has ended, and with it a Smart Folder that was
+    /// open, so what the window searches with by now is its own.
+    pub(super) fn enter_smart_folder(
+        &mut self,
+        kind: KindFilter,
+        scope: SearchScope,
+        contents: bool,
+        filter: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.search_setup(cx);
+        self.scope = scope;
+        self.config.kind_filter = kind;
+        // Opening a Smart Folder isn't choosing a kind for the searches after
+        // it or for the next tab, so there's nothing to publish.
+        self.published.kind_filter = kind;
+        self.search_contents = contents;
+        let open = !filter.is_empty();
+        self.replace_filter(filter, open, window, cx);
+        self.smart_folder_setup = Some(SmartFolderSetup {
+            before,
+            opened: self.search_setup(cx),
+            missing: None,
+        });
+    }
+
+    /// The search a Smart Folder ran is ending: the window gets back the kind,
+    /// scope, Name or Contents, and filter it had before, so the saved ones
+    /// don't stay on for the folders and searches after it. A part that was
+    /// changed by hand while the Smart Folder was open stays as changed.
+    pub(super) fn leave_smart_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(SmartFolderSetup { before, opened, .. }) = self.smart_folder_setup.take() else {
+            return;
+        };
+        let now = self.search_setup(cx);
+        // Set as they are, not through their setters, which would search
+        // again for words that are about to go.
+        if now.kind == opened.kind {
+            self.config.kind_filter = before.kind;
+            // No more of a choice to publish than the Smart Folder's was.
+            self.published.kind_filter = before.kind;
+        }
+        if now.scope == opened.scope {
+            self.scope = before.scope;
+        }
+        if now.contents == opened.contents {
+            self.search_contents = before.contents;
+        }
+        if now.filter == opened.filter && now.filter_open == opened.filter_open {
+            // Through the filter's own setter, which knows what else to
+            // forget. It starts the search over when the filter goes on or
+            // off, and the end of the search, which comes next, calls that
+            // off.
+            self.replace_filter(before.filter, before.filter_open, window, cx);
+        }
+        // The toolbar shows the scope even when nothing is searched.
         cx.notify();
     }
 
@@ -247,7 +409,6 @@ impl Finder {
     pub(super) fn render_filter_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
-        let searching = self.is_searching();
         let error = self.filter_error.clone();
         v_flex()
             .flex_shrink_0()
@@ -291,19 +452,6 @@ impl Finder {
                     )
                     .when(self.filtering, |this| {
                         this.child(Spinner::new().xsmall().color(muted))
-                    })
-                    .when(searching, |this| {
-                        this.child(
-                            Button::new("save-smart-folder")
-                                .small()
-                                .ghost()
-                                .icon(Lucide::FolderCog)
-                                .label("Save")
-                                .tooltip("Save this search and filter as a Smart Folder")
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.save_smart_folder_dialog(window, cx)
-                                })),
-                        )
                     })
                     .child(
                         Button::new("close-filter")

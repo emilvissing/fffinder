@@ -119,7 +119,7 @@ A new window opens where the last one was, at the same size, on the same display
 
 Text that doesn't fit is cut short with an ellipsis. Rest the mouse on it to see all of it in a tooltip. This works for names and every other cell in the list, list headers, names in the other views, sidebar rows, path bar crumbs, and tab titles. File names and folder paths lose their middle, so the start and the extension both stay visible.
 
-A button's tooltip says what the button does. When a keyboard shortcut does the same, the tooltip shows the keys after the name. That goes for Back, Forward, the four view buttons, Show Sidebar and Hide Sidebar, the tab bar's + and the × of the tab that is showing, Filter with Nushell and Search Syntax in the scope bar, the close buttons of the filter bar and the Nushell panel, the sidebar's gear, and Quick Look's buttons.
+A button's tooltip says what the button does. When a keyboard shortcut does the same, the tooltip shows the keys after the name. That goes for Back, Forward, the four view buttons, Show Sidebar and Hide Sidebar, the tab bar's + and the × of the tab that is showing, Save, Filter with Nushell, and Search Syntax in the scope bar, the close buttons of the filter bar and the Nushell panel, the sidebar's gear, and Quick Look's buttons.
 
 The file area shows a message when there is nothing to list:
 
@@ -200,7 +200,7 @@ The sidebar has four sections:
 - **Smart Folders** lists saved searches. It appears once you save one. See [Filters and Smart Folders](#filters-and-smart-folders).
 - **Locations** lists your home folder, iCloud Drive or other cloud drives, mounted volumes and servers, and ends with the **Trash**. Removable disks and servers have an eject button. See [Volumes and servers](#volumes-and-servers) and [The Trash](#the-trash).
 
-Click a row to open it. Cmd+click or middle-click a row to open it in a new tab. The current folder's row is highlighted.
+Click a row to open it. Cmd+click or middle-click a row to open it in a new tab. The current folder's row is highlighted, and so is a Smart Folder while its search is the one showing.
 
 Right-click a Favorites or Locations row for:
 
@@ -331,7 +331,7 @@ Type in the search field (Cmd+F) to search. Searches start 50 ms after you stop 
 
 From the first letter, the file area shows placeholders in place of the items it was showing, until the results are in. It does the same when you switch between Name and Contents. After that, the results stay while a search runs again, as when you type on, and so does No Results. A contents search can take seconds, so while one runs again No Results reads Searching… instead. Results for other words start at the top with nothing selected, and so do the results after you switch between This Computer and the folder, between Name and Contents, or to another kind. A search that runs again as it is, as with Refresh or while the index is being built, keeps what's selected and stays scrolled where it was. When you end a search, with Escape or by emptying the search field, the window is back where it was before the search: the same items are selected, and the view is scrolled to the same place. If you chose another view during the search, it also scrolls to the selected item.
 
-Going somewhere else ends a search, and Back returns to it. That goes for opening a folder from the results, Show in Enclosing Folder, a click in the sidebar or the path bar, Go to Folder, and Enclosing Folder (Cmd+Up). The search comes back as you left it: the same words, in This Computer or the folder, by Name or Contents. Both choices stay as that search had them for what you search next, so **Search Only in "Folder name"** is on after a search in the folder comes back, and off after one in This Computer. It runs again, so the results are the ones there are now, from the top. If you came back from a folder that is one of the results, it is selected, and the view scrolls to it. Back during a search ends it and stays in the folder it was made in, and Forward brings it back. So from a folder opened from the results, Back leads to the results, then to the folder you searched from, then to the place before that, and Forward leads through the same three again. A search that comes back uses the kind and the Nushell filter chosen now, and its results are in relevance order. A search ended with Escape or by emptying the search field isn't one that Back or Forward returns to.
+Going somewhere else ends a search, and Back returns to it. That goes for opening a folder from the results, Show in Enclosing Folder, a click in the sidebar or the path bar, Go to Folder, and Enclosing Folder (Cmd+Up). The search comes back as you left it: the same words, in This Computer or the folder, by Name or Contents. Both choices stay as that search had them for what you search next, so **Search Only in "Folder name"** is on after a search in the folder comes back, and off after one in This Computer. It runs again, so the results are the ones there are now, from the top. If you came back from a folder that is one of the results, it is selected, and the view scrolls to it. Back during a search ends it and stays in the folder it was made in, and Forward brings it back. So from a folder opened from the results, Back leads to the results, then to the folder you searched from, then to the place before that, and Forward leads through the same three again. A search that comes back uses the kind and the Nushell filter chosen now, and its results are in relevance order. A [Smart Folder](#filters-and-smart-folders)'s search is the exception: it comes back with its own kind and filter, and nothing it searches with stays on after it. A search ended with Escape or by emptying the search field isn't one that Back or Forward returns to.
 
 To search one part of the tree, open its folder and turn on **Search Only in "Folder name"**, the folder button left of the search field, before or while you search. From a terminal, `--here` does the same: `fffinder ~/src --query readme --here`.
 
@@ -343,6 +343,7 @@ While a search is active, the scope bar shows the controls below. A click on Thi
 | "Folder name" | Search only the folder you were in. Folders outside the search locations get a temporary index the first time. |
 | Name | Match file and folder names. |
 | Contents | Search inside files. Results show the first matching line, and a result's [text preview](#previews-and-quick-look) opens at that line. Letter case, the largest file searched, and the time limit are set in [Settings › Search engine](#search-engine). |
+| Save | Save the search as a [Smart Folder](#filters-and-smart-folders) (Cmd+S). |
 | Funnel | Open the Nushell filter bar (Cmd+Alt+F). |
 | (i) | Show the Search Syntax dialog (Cmd+/). |
 | Kind menu | Any Kind, Folder, Document, Image, Movie, Audio, Code, or Archive. Disabled for contents searches. A kind of file goes by the extension, so a name without one, such as `README` or `Makefile`, is found only with Any Kind. Document covers text, PDFs, word processor, spreadsheet, and presentation files, and data such as CSV, JSON, and settings files. An extension you type narrows the kind: with Image, `logo *.svg` finds only the SVG images, and `logo *.txt` finds nothing. |
@@ -654,7 +655,11 @@ Or start with `|` to use a whole pipeline, which must keep the `path` column:
 
 The filter runs 400 ms after you stop typing, or right away when you press Return. The status bar counts how many items pass. Errors show in red below the bar. The close button removes the filter, and so does Cmd+Alt+F. Escape empties the field, which turns the filter off, and Escape in an empty field gives the keyboard to the files. The bar stays open either way.
 
-While searching, the filter bar's **Save** button opens "Save Smart Folder". Name it, and the search, its scope folder, the kind, Name or Contents, and the filter are saved in the sidebar under Smart Folders. Clicking a Smart Folder runs the search again with the filter, so it stays up to date.
+A Smart Folder is a saved search. While searching, **Save** in the scope bar opens "Save Smart Folder", and so do Cmd+S, "Save Search…" in the Actions menu, and "Save Search…" in the Edit menu. With no search showing, Cmd+S says there is nothing to save yet, and the Actions menu's item is off. The dialog says what it saves: the words, Name or Contents, the scope folder or This Computer, a Name search's kind unless it's Any Kind, and the filter when one is on. Name it, and it's saved in the sidebar under Smart Folders. A name that a Smart Folder already has replaces that one, in the same place in the sidebar. The dialog says so before you save, and its button reads Replace. With no name, the button is off.
+
+Clicking a Smart Folder runs the search again with the filter, so it stays up to date. Its row is highlighted while its whole search is showing. Change the words, the kind, or anything else it was saved with, and the search is no longer the Smart Folder's, so the highlight goes. If its scope folder can't be found, it searches This Computer instead and says so, and its row is highlighted all the same.
+
+A Smart Folder's kind, scope, Name or Contents, and filter stay on until its search ends, whatever words you type meanwhile. When it ends, because you went to another folder, pressed Escape, or emptied the search field, the window searches the way it did before, and its own filter is back if it had one. Anything you changed by hand while the Smart Folder was open stays as you changed it. Back and Forward return to the search with the Smart Folder's kind and filter, and those end with it again. Opening a Smart Folder doesn't change the kind that new tabs and windows start with.
 
 ## Renaming several items
 
@@ -794,7 +799,7 @@ While fffinder has the terminal, anything it would print to stderr goes to `term
 | --- | --- |
 | fffinder | Settings… (Cmd+,), Rescan Index, Empty Trash…, Quit fffinder (Cmd+Q) |
 | File | New Window (Cmd+N), New Tab (Cmd+T), New Folder, New File… (Cmd+Alt+N), Open, Open in Editor, Quick Look, Explore Data (Cmd+Space), Get Info (Cmd+I), Rename…, Duplicate (Cmd+D), Make Alias (macOS) or Create Shortcut (Windows), Make Symbolic Link, Compress, Extract, Move to Trash, Put Back, Delete Immediately…, Close Window (Cmd+W) |
-| Edit | Undo (text fields, or the latest file operation when the files have focus), Redo (text fields, or the latest Undo when the files have focus), Cut, Copy, Paste (text fields, or items when the files have focus), Move Items Here, Copy Path, Copy as Nushell List, Select All Items, Find, Filter with Nushell, Search Syntax… |
+| Edit | Undo (text fields, or the latest file operation when the files have focus), Redo (text fields, or the latest Undo when the files have focus), Cut, Copy, Paste (text fields, or items when the files have focus), Move Items Here, Copy Path, Copy as Nushell List, Select All Items, Find, Save Search…, Filter with Nushell, Search Syntax… |
 | View | as Icons, as List, as Columns, as Gallery, Toggle Sidebar, Sidebar as List, Sidebar as Tree, Toggle Preview Pane, Show/Hide Hidden Files, Keep Folders on Top, Use Groups, Toggle Light/Dark, Refresh |
 | Go | Back, Forward, Enclosing Folder, Recents, Home, Trash, Go to Folder…, Connect to Server… (Cmd+K) |
 | Window | Show Previous Tab, Show Next Tab, Move Tab to New Window, Split View (Cmd+Backslash), Copy to Other Pane (F5), Move to Other Pane (F6) |
@@ -861,7 +866,7 @@ Your actions, then **Edit Actions…** and **Reload Actions**. See [Nushell acti
 - **Sort and View Options**: Sort By (Relevance, Name, Date Modified, Date Created, Size, Kind), Ascending, Descending, Keep Folders on Top, Show Hidden Files, Group By.
 - **List header** (right-click a column header in the list view): the columns, Keep Folders on Top, Calculate All Sizes, Reset Columns.
 - **Nushell**: Open Nushell Here, Run a Pipeline… (or Hide Pipeline Panel when it is open), Nushell Actions, Copy as Nushell List.
-- **Actions** (…): New Folder, New File…, New Tab, Split View, Preview Pane, Quick Look, Get Info, Rename…, Copy Path, Show in Enclosing Folder (in search results, Recents, and results sent from Nushell), Show in Finder, Add Folder to Sidebar, Move to Trash, Delete Immediately…, Undo, Redo, Filter with Nushell…, Go to Folder…, Connect to Server…, Search Syntax…, Settings…. On Linux and Windows, where GPUI shows no menu bar, this menu, the context menus, and the keyboard shortcuts reach the menu bar's commands.
+- **Actions** (…): New Folder, New File…, New Tab, Split View, Preview Pane, Quick Look, Get Info, Rename…, Copy Path, Show in Enclosing Folder (in search results, Recents, and results sent from Nushell), Show in Finder, Add Folder to Sidebar, Move to Trash, Delete Immediately…, Undo, Redo, Save Search…, Filter with Nushell…, Go to Folder…, Connect to Server…, Search Syntax…, Settings…. On Linux and Windows, where GPUI shows no menu bar, this menu, the context menus, and the keyboard shortcuts reach the menu bar's commands.
 
 ## Keyboard shortcuts
 
@@ -888,6 +893,7 @@ Back, Forward, Enclosing Folder, Move to Trash, and Open each have Finder's shor
 | Cmd+Backslash | Split view on or off |
 | Cmd+F | Search |
 | Cmd+Alt+F | Filter with Nushell |
+| Cmd+S | Save the search as a Smart Folder |
 | Cmd+/ | Search syntax |
 | Cmd+[, Alt+Left | Back |
 | Cmd+], Alt+Right | Forward |
@@ -1093,7 +1099,7 @@ Every tab and window shows a change to a setting at once, with these exceptions,
 | `expand_to_open_folder` | `true` | The folder tree opens down to the folder the window shows. |
 | `ask_for_full_disk_access` | `true` | On macOS, when fffinder starts without Full Disk Access, wait to index and ask for it first. |
 | `appearance` | `"system"` | `system`, `light`, or `dark`. |
-| `kind_filter` | `"any"` | The search Kind menu: `any`, `folder`, `document`, `image`, `movie`, `audio`, `code`, `archive`. |
+| `kind_filter` | `"any"` | The search Kind menu: `any`, `folder`, `document`, `image`, `movie`, `audio`, `code`, `archive`. The kind a Smart Folder sets while it's open isn't saved here. |
 | `result_limit` | `500` | Maximum results shown for a search. |
 | `terminals` | `{}` | The "Open Nushell Here" terminal per system, keyed `macos`, `linux`, `windows`. Each has `app` (a terminal id, or `custom`) and `command` (for `custom`, with `{dir}` and `{nu}`). A missing entry means Automatic. |
 | `smart_folders` | `[]` | Saved searches: `name`, `query`, `kind`, `scope` (a folder, or null for every location), `contents`, and `filter`. |

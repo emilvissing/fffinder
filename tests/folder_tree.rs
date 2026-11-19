@@ -9,7 +9,7 @@ use fffinder::disk_access::{Access, Checked};
 use fffinder::finder::{NodeKey, Section};
 use fffinder::model::Location;
 use fffinder::system::SystemCall;
-use fffinder_core::SidebarMode;
+use fffinder_core::{SidebarMode, SmartFolder};
 use gpui_kit::{Modifiers, MouseButton, TestAppContext, point, px};
 use std::time::Duration;
 
@@ -164,6 +164,45 @@ fn arrows_move_through_the_tree_as_in_explorer(cx: &mut TestAppContext) {
 /// Whether the browser's folder tree has the keyboard.
 fn tree_focused(ui: &mut Ui) -> bool {
     ui.update(|f, window, _| f.tree_focused_for_test(window))
+}
+
+#[gpui_kit::test]
+fn the_arrows_go_on_past_a_smart_folder_whose_folder_is_gone(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tree-smart-gone");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.cx.update(|cx| cx.set_global(Checked(Access::Granted)));
+    // Two Smart Folders above the one place under Locations. The second
+    // was saved for a folder that isn't there.
+    let (first, gone) = (
+        SmartFolder {
+            name: "Atlas".into(),
+            query: "atlas".into(),
+            ..Default::default()
+        },
+        SmartFolder {
+            name: "Roadmaps".into(),
+            query: "roadmap".into(),
+            scope: Some(fx.path("gone")),
+            ..Default::default()
+        },
+    );
+    let place = fffinder_core::places::favorite_for(&fx.dir);
+    ui.update(|f, _, cx| {
+        f.set_locations_for_test(vec![place]);
+        f.add_smart_folder(first, cx);
+        f.add_smart_folder(gone, cx);
+        f.set_sidebar_mode(SidebarMode::Tree, cx);
+    });
+    ui.click(("loc", 0usize));
+    assert!(tree_focused(&mut ui));
+
+    // Up opens the Smart Folder above, which searches This Computer in place
+    // of its folder. It's the line the keyboard is on all the same, so the
+    // next Up goes on from it, not from the place below once more.
+    ui.press("up");
+    assert_eq!(ui.read(|f| f.query().to_string()), "roadmap");
+    ui.press("up");
+    assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
 }
 
 #[gpui_kit::test]

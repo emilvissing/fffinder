@@ -48,7 +48,7 @@ The manual lists [every `fff` command](docs/manual.md#the-fff-nushell-module).
 ### Inside the app
 
 - **The Nushell panel.** Ctrl+` runs a pipeline with the selected files as `$in`. Each row has `name`, `path`, `type`, `kind`, `size`, and `modified`, so `where size > 1mb | sort-by modified` works on them.
-- **Filters.** Cmd+Alt+F narrows a folder or search results with a `where` condition such as `size > 10mb and modified > 2024-01-01`. Save a search and its filter in the sidebar as a Smart Folder.
+- **Filters.** Cmd+Alt+F narrows a folder or search results with a `where` condition such as `size > 10mb and modified > 2024-01-01`. Cmd+S saves a search, with its filter, in the sidebar as a Smart Folder.
 - **Batch rename.** F2 with several items selected renames them with a closure, such as `{|f| $f.name | str downcase }`, and shows every new name before anything changes.
 - **Your own actions.** Commands you export from `actions.nu` in the settings folder appear in the context menu and get the selection on `$in`. The first run writes a few starters, such as Count Lines and Find Duplicates.
 - **Your Nushell environment.** With "Use Nushell's file colors and editor" on in Settings, file names use your `LS_COLORS` and "Open in Editor" uses your `buffer_editor`.

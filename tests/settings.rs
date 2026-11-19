@@ -6,7 +6,7 @@ mod common;
 use common::{Fixture, Open, Ui, cmd};
 use fffinder::finder::Finder;
 use fffinder::settings;
-use fffinder_core::{ListColumn, SortKey, ViewMode};
+use fffinder_core::{KindFilter, ListColumn, SmartFolder, SortKey, ViewMode};
 use gpui_kit::{Entity, TestAppContext};
 
 fn with_tabs<'a>(cx: &'a mut TestAppContext, dir: &'a std::path::Path) -> Ui<'a> {
@@ -155,6 +155,55 @@ fn each_tab_keeps_its_own_view(cx: &mut TestAppContext) {
     // The next tab starts with the view chosen last.
     ui.press(&cmd("t"));
     assert_eq!(view(&ui, 2), ViewMode::Gallery);
+}
+
+#[gpui_kit::test]
+fn a_smart_folders_kind_isnt_saved_or_the_next_tabs(cx: &mut TestAppContext) {
+    let fx = Fixture::new("smart-kind");
+    let mut ui = with_tabs(cx, &fx.dir);
+    let saved = SmartFolder {
+        name: "Atlas pictures".into(),
+        query: "atlas".into(),
+        kind: KindFilter::Image,
+        ..Default::default()
+    };
+    ui.update(|f, _, cx| f.add_smart_folder(saved, cx));
+    ui.click(("smart", 0usize));
+    assert_eq!(ui.read(|f| f.config().kind_filter), KindFilter::Image);
+
+    // Choosing a view saves this tab's settings, and the kind isn't one the
+    // tab chose.
+    ui.click("view-list");
+    let saved = ui.cx.update(settings::current);
+    assert_eq!(saved.view_mode, ViewMode::List);
+    assert_eq!(saved.kind_filter, KindFilter::Any);
+
+    ui.press(&cmd("t"));
+    let kind = tabs(&ui)[1].read_with(ui.cx, |f, _| f.config().kind_filter);
+    assert_eq!(kind, KindFilter::Any);
+
+    // One picked from the Kind menu is chosen, and is saved like any other.
+    ui.view = tabs(&ui)[1].clone();
+    ui.click("search");
+    ui.type_text("atlas");
+    ui.click("kind");
+    ui.click_menu_item("Folder");
+    assert_eq!(
+        ui.cx.update(settings::current).kind_filter,
+        KindFilter::Folder
+    );
+
+    // The first tab gets its own kind back when the Smart Folder's search
+    // ends, and that's no more of a choice than the Smart Folder's kind was:
+    // going to the folder saves the tab's settings, and the kind chosen last
+    // is still the second tab's.
+    show_tab(&mut ui, 0);
+    ui.go_to(&fx.path("Projects"));
+    assert_eq!(ui.read(|f| f.config().kind_filter), KindFilter::Any);
+    assert_eq!(
+        ui.cx.update(settings::current).kind_filter,
+        KindFilter::Folder
+    );
 }
 
 #[gpui_kit::test]

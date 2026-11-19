@@ -856,11 +856,29 @@ impl Finder {
         true
     }
 
-    /// Name and save the current search and filter as a Smart Folder.
-    pub(super) fn save_smart_folder_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.is_searching() {
-            return;
+    /// Save Search, from its key, a menu, or the scope bar. Outside a search
+    /// there is nothing to save, and saying so beats doing nothing.
+    pub(super) fn save_search(
+        &mut self,
+        _: &SaveSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_searching() {
+            self.save_smart_folder_dialog(window, cx);
+        } else {
+            window.push_notification(
+                (
+                    gpui_kit::component::notification::NotificationType::Warning,
+                    "Search for something first, then save it as a Smart Folder",
+                ),
+                cx,
+            );
         }
+    }
+
+    /// Name and save the current search, with its filter, as a Smart Folder.
+    fn save_smart_folder_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_before_dialog(window, cx);
         let query = self.query.clone();
         let input = cx.new(|cx| InputState::new(window, cx).default_value(query));
@@ -875,13 +893,27 @@ impl Finder {
             }
             let (ok_input, button_input) = (input.clone(), input.clone());
             let ok_view = view.clone();
-            let summary = {
+            let muted = cx.theme().muted_foreground;
+            // The dialog is drawn again as the name is typed, so it can say
+            // what saving under that name would do.
+            let name = input.read(cx).value().trim().to_string();
+            let (summary, replaces) = {
                 let finder = view.read(cx);
-                let mut parts = vec![format!("“{}”", finder.query)];
-                if !finder.filter_text().is_empty() {
-                    parts.push(format!("where {}", finder.filter_text()));
-                }
-                parts.join(" ")
+                (
+                    finder
+                        .current_smart_folder(String::new())
+                        .map(|search| format!("Shows {}. Kept up to date.", search.summary())),
+                    finder.smart_folders().iter().any(|f| f.name == name),
+                )
+            };
+            let note = |id: &'static str, text: String| {
+                div()
+                    .id(id)
+                    .aria_label(SharedString::from(text.clone()))
+                    .text_size(ui(11.))
+                    .text_color(muted)
+                    .child(text)
+                    .test_support()
             };
             dialog
                 .title("Save Smart Folder")
@@ -890,12 +922,15 @@ impl Finder {
                     v_flex()
                         .gap(ui(8.))
                         .child(Input::new(&input).id("smart-name"))
-                        .child(
-                            div()
-                                .text_size(ui(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("Shows {summary}, kept up to date.")),
-                        ),
+                        .when_some(summary, |this, summary| {
+                            this.child(note("smart-summary", summary))
+                        })
+                        .when(replaces, |this| {
+                            this.child(note(
+                                "smart-exists",
+                                format!("“{name}” is already a Smart Folder. Saving replaces it."),
+                            ))
+                        }),
                 )
                 .on_ok(move |_, window, cx| {
                     ok_view.update(cx, |this, cx| {
@@ -907,17 +942,21 @@ impl Finder {
                         .child(
                             DialogClose::new().child(Button::new("smart-cancel").label("Cancel")),
                         )
-                        .child(Button::new("smart-save").primary().label("Save").on_click(
-                            window.listener_for(
-                                &view,
-                                move |this: &mut Finder, _: &ClickEvent, window, cx| {
-                                    if this.submit_smart_folder(&button_input, window, cx) {
-                                        window.close_dialog(cx);
-                                        this.focus_files(window, cx);
-                                    }
-                                },
-                            ),
-                        )),
+                        .child(
+                            Button::new("smart-save")
+                                .primary()
+                                .label(if replaces { "Replace" } else { "Save" })
+                                .disabled(name.is_empty())
+                                .on_click(window.listener_for(
+                                    &view,
+                                    move |this: &mut Finder, _: &ClickEvent, window, cx| {
+                                        if this.submit_smart_folder(&button_input, window, cx) {
+                                            window.close_dialog(cx);
+                                            this.focus_files(window, cx);
+                                        }
+                                    },
+                                )),
+                        ),
                 )
         });
     }
@@ -935,8 +974,10 @@ impl Finder {
         let Some(folder) = self.current_smart_folder(name.clone()) else {
             return true;
         };
+        let replaced = self.smart_folders().iter().any(|f| f.name == name);
         self.add_smart_folder(folder, cx);
-        window.push_notification(format!("Saved “{name}” in the sidebar"), cx);
+        let saved = if replaced { "Replaced" } else { "Saved" };
+        window.push_notification(format!("{saved} “{name}” in the sidebar"), cx);
         true
     }
 

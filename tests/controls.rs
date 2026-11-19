@@ -10,7 +10,7 @@ use fffinder::finder::{AppState, PickerOptions, SearchScope};
 use fffinder::model::Location;
 use fffinder::system::SystemCall;
 use fffinder_core::terminals::{Launch, Terminal};
-use fffinder_core::{Appearance, GroupKey, KindFilter, SortKey, ViewMode};
+use fffinder_core::{Appearance, GroupKey, KindFilter, SmartFolder, SortKey, ViewMode};
 use gpui_kit::Action as _;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::kbd::Kbd;
@@ -344,6 +344,7 @@ fn every_command_a_tooltip_names_has_keys_to_show(cx: &mut TestAppContext) {
         NewTab.boxed_clone(),
         CloseWindow.boxed_clone(),
         ToggleFilter.boxed_clone(),
+        SaveSearch.boxed_clone(),
         SearchHelp.boxed_clone(),
         ShowSettings.boxed_clone(),
         ToggleNuPanel.boxed_clone(),
@@ -632,6 +633,7 @@ fn every_menu_bar_action_has_a_handler(cx: &mut TestAppContext) {
         ToggleNuPanel.boxed_clone(),
         OpenInNushell.boxed_clone(),
         ToggleFilter.boxed_clone(),
+        SaveSearch.boxed_clone(),
         OpenInEditor.boxed_clone(),
         MoveItemsHere.boxed_clone(),
         PutBack.boxed_clone(),
@@ -3074,6 +3076,10 @@ fn nushell_filter_and_smart_folders(cx: &mut TestAppContext) {
     assert_eq!(ui.names(), ["big.log"]);
     ui.click("save-smart-folder");
     assert!(ui.dialog_open());
+    assert_eq!(
+        ui.snapshot("smart-summary").label(),
+        Some("Shows names matching “log” on This Computer, where size > 10kb. Kept up to date.")
+    );
     ui.type_text("Big logs");
     ui.click("smart-save");
     assert!(!ui.dialog_open());
@@ -3094,15 +3100,437 @@ fn nushell_filter_and_smart_folders(cx: &mut TestAppContext) {
     ui.click("search");
     ui.press("escape");
     assert!(!ui.read(|f| f.is_searching()));
+    ui.select("notes.txt");
 
     // The sidebar runs it again: search, filter, and all.
     ui.click(("smart", 0usize));
     assert_eq!(ui.read(|f| f.query().to_string()), "log");
     assert_eq!(ui.read(|f| f.filter_text().to_string()), "size > 10kb");
     assert_eq!(ui.names(), ["big.log"]);
+
+    // Its filter ends with its search, and the folder is back as it was:
+    // listed whole, with the same item selected.
+    ui.click("search");
+    ui.press("escape");
+    assert_eq!(ui.read(|f| f.filter_text().to_string()), "");
+    assert!(!ui.exists("filter-input"));
+    assert_eq!(ui.names().len(), 5);
+    assert_eq!(ui.selected(), ["notes.txt"]);
+
+    // Back ends its search the same way.
+    ui.click(("smart", 0usize));
+    assert_eq!(ui.names(), ["big.log"]);
+    ui.press(&cmd("["));
+    assert!(!ui.read(|f| f.is_searching()));
+    assert_eq!(ui.names().len(), 5);
+    assert_eq!(ui.selected(), ["notes.txt"]);
     ui.right_click(("smart", 0usize));
     ui.click_menu_item("Remove from Sidebar");
     assert!(ui.read(|f| f.smart_folders().is_empty()));
+}
+
+/// A Smart Folder for folders named like `atlas` in Projects, with a filter.
+fn atlas_folders(fx: &Fixture) -> SmartFolder {
+    SmartFolder {
+        name: "Atlas folders".into(),
+        query: "atlas".into(),
+        kind: KindFilter::Folder,
+        scope: Some(fx.path("Projects")),
+        contents: false,
+        filter: Some("size > 1kb".into()),
+    }
+}
+
+/// The kind, scope, Name or Contents, and filter the window searches with.
+fn search_setup(ui: &Ui) -> (KindFilter, SearchScope, bool, String) {
+    ui.read(|f| {
+        (
+            f.config().kind_filter,
+            f.search_scope(),
+            f.searches_contents(),
+            f.filter_text().to_string(),
+        )
+    })
+}
+
+#[gpui_kit::test]
+fn a_search_is_saved_from_the_scope_bar(cx: &mut TestAppContext) {
+    let fx = Fixture::new("smart-save");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("atlas");
+    assert!(!ui.exists("filter-input"), "no filter bar is open");
+
+    ui.click("save-smart-folder");
+    assert!(ui.dialog_open());
+    ui.type_text("Atlas");
+    ui.click("smart-save");
+    assert!(!ui.dialog_open());
+    assert_eq!(
+        ui.read(|f| f.smart_folders().to_vec()),
+        [SmartFolder {
+            name: "Atlas".into(),
+            query: "atlas".into(),
+            kind: KindFilter::Any,
+            scope: None,
+            contents: false,
+            filter: None,
+        }]
+    );
+}
+
+#[gpui_kit::test]
+fn going_elsewhere_from_a_smart_folder_leaves_its_search_setup_behind(cx: &mut TestAppContext) {
+    let fx = Fixture::new("smart-leave");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let saved = atlas_folders(&fx);
+    ui.update(|f, _, cx| f.add_smart_folder(saved, cx));
+    let own = search_setup(&ui);
+    assert_eq!(
+        own,
+        (KindFilter::Any, SearchScope::Computer, false, String::new())
+    );
+
+    ui.click(("smart", 0usize));
+    assert_eq!(ui.folder(), Some(fx.path("Projects")));
+    assert_eq!(
+        search_setup(&ui),
+        (
+            KindFilter::Folder,
+            SearchScope::Folder,
+            false,
+            "size > 1kb".to_string()
+        )
+    );
+    assert!(ui.exists("filter-input"));
+
+    // Another folder is listed whole: no kind, no filter, and the next
+    // search is this window's own again.
+    ui.go_to(&fx.dir);
+    assert_eq!(search_setup(&ui), own);
+    assert!(!ui.exists("filter-input"), "the filter bar went with it");
+    assert_eq!(ui.names().len(), 4);
+}
+
+#[gpui_kit::test]
+fn emptying_the_search_field_leaves_a_smart_folder_too(cx: &mut TestAppContext) {
+    let fx = Fixture::new("smart-leave-field");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // One that searches inside files, everywhere.
+    let saved = SmartFolder {
+        name: "Plain notes".into(),
+        query: "plain".into(),
+        contents: true,
+        filter: Some("size > 1kb".into()),
+        ..Default::default()
+    };
+    ui.update(|f, _, cx| f.add_smart_folder(saved, cx));
+    let own = search_setup(&ui);
+    ui.select("notes.txt");
+
+    ui.click(("smart", 0usize));
+    assert!(ui.read(|f| f.searches_contents()));
+    assert_eq!(ui.folder().as_deref(), Some(fx.dir.as_path()));
+
+    ui.click("search");
+    ui.press("escape");
+    assert!(!ui.read(|f| f.is_searching()));
+    assert_eq!(search_setup(&ui), own);
+    assert!(!ui.exists("filter-input"));
+    assert_eq!(ui.selected(), ["notes.txt"], "the folder is as it was left");
+}
+
+#[gpui_kit::test]
+fn what_is_changed_by_hand_in_a_smart_folder_stays_after_it(cx: &mut TestAppContext) {
+    let fx = Fixture::new("smart-leave-changed");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let saved = atlas_folders(&fx);
+    ui.update(|f, _, cx| f.add_smart_folder(saved, cx));
+    ui.click(("smart", 0usize));
+
+    // A kind picked from the menu and a filter typed in the bar are choices
+    // of their own, the filter even before the pause it's applied after is
+    // over. The scope is still the Smart Folder's, and goes with it.
+    ui.click("kind");
+    ui.click_menu_item("Document");
+    ui.click("filter-input");
+    ui.press(&cmd("a"));
+    ui.type_without_settling("size > 2kb");
+
+    ui.go_to(&fx.dir);
+    assert_eq!(
+        search_setup(&ui),
+        (
+            KindFilter::Document,
+            SearchScope::Computer,
+            false,
+            "size > 2kb".to_string()
+        )
+    );
+    assert!(ui.exists("filter-input"));
+}
+
+#[gpui_kit::test]
+fn back_and_forward_return_to_a_smart_folders_whole_search(cx: &mut TestAppContext) {
+    let fx = Fixture::new("smart-back");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let saved = atlas_folders(&fx);
+    ui.update(|f, _, cx| f.add_smart_folder(saved, cx));
+    let own = search_setup(&ui);
+    ui.click(("smart", 0usize));
+    let smart = search_setup(&ui);
+    assert_ne!(smart, own);
+
+    // Going elsewhere ends its search. Back returns to all of it, not only
+    // to its words: the kind and the filter went with it, so they come back
+    // with it.
+    ui.go_to(&fx.dir);
+    assert_eq!(search_setup(&ui), own);
+    ui.press(&cmd("["));
+    assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
+    assert_eq!(ui.folder(), Some(fx.path("Projects")));
+    assert_eq!(search_setup(&ui), smart);
+    assert!(ui.exists("filter-input"));
+    assert!(ui.read(|f| f.smart_is_active_for_test(0)));
+
+    // Back from it ends it in its folder, and it's left behind like the
+    // first time.
+    ui.press(&cmd("["));
+    assert!(!ui.read(|f| f.is_searching()));
+    assert_eq!(ui.folder(), Some(fx.path("Projects")));
+    assert_eq!(search_setup(&ui), own);
+    assert!(!ui.exists("filter-input"));
+
+    // Forward runs it again, and Escape leaves it again.
+    ui.press(&cmd("]"));
+    assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
+    assert_eq!(search_setup(&ui), smart);
+    ui.click("search");
+    ui.press("escape");
+    assert!(!ui.read(|f| f.is_searching()));
+    assert_eq!(search_setup(&ui), own);
+}
+
+#[gpui_kit::test]
+fn a_filter_still_being_typed_doesnt_replace_a_smart_folders(cx: &mut TestAppContext) {
+    let fx = Fixture::new("smart-typed-filter");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let saved = atlas_folders(&fx);
+    ui.update(|f, _, cx| f.add_smart_folder(saved, cx));
+    ui.press(&cmd("alt-f"));
+
+    // The filter bar applies what's typed after a pause, and the click comes
+    // before the pause is over.
+    ui.type_without_settling("size > 5kb");
+    ui.click(("smart", 0usize));
+    assert_eq!(ui.read(|f| f.filter_text().to_string()), "size > 1kb");
+
+    // It was the window's own filter all the same, and is back as one.
+    ui.go_to(&fx.dir);
+    assert_eq!(ui.read(|f| f.filter_text().to_string()), "size > 5kb");
+    assert!(ui.exists("filter-input"));
+}
+
+#[gpui_kit::test]
+fn the_keyboard_stays_in_the_window_when_a_smart_folder_takes_the_filter_bar_away(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("smart-filter-keys");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // One with a filter and one without, both in Projects.
+    let filtered = atlas_folders(&fx);
+    let plain = SmartFolder {
+        name: "Atlas".into(),
+        filter: None,
+        ..filtered.clone()
+    };
+    ui.update(|f, _, cx| {
+        f.add_smart_folder(filtered, cx);
+        f.add_smart_folder(plain, cx);
+    });
+
+    // Its bar goes when its search ends, here with the keyboard in it.
+    ui.click(("smart", 0usize));
+    ui.click("filter-input");
+    ui.press(&cmd("["));
+    assert!(!ui.read(|f| f.is_searching()));
+    assert!(!ui.exists("filter-input"));
+    assert!(ui.files_focused());
+
+    // The window's own bar goes when a Smart Folder with no filter comes
+    // back, and keys still reach the window after that.
+    ui.click(("smart", 1usize));
+    ui.press(&cmd("["));
+    ui.press(&cmd("alt-f"));
+    assert!(ui.exists("filter-input"));
+    ui.press(&cmd("]"));
+    assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
+    assert!(!ui.exists("filter-input"));
+    assert!(ui.files_focused());
+    ui.press(&cmd("["));
+    assert!(!ui.read(|f| f.is_searching()));
+    assert!(ui.exists("filter-input"), "the window's own bar is back");
+}
+
+#[gpui_kit::test]
+fn save_search_is_on_a_key_and_in_the_actions_menu(cx: &mut TestAppContext) {
+    let fx = Fixture::new("smart-save-key");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // Outside a search there is nothing to save: the key says so, and the
+    // menu's item is off.
+    ui.press(&cmd("s"));
+    assert!(!ui.dialog_open());
+    assert_eq!(ui.notification_count(), 1);
+    ui.click("actions");
+    ui.click_menu_item("Save Search…");
+    assert!(!ui.dialog_open());
+    assert_eq!(ui.notification_count(), 1, "the item did nothing");
+    ui.press("escape");
+
+    ui.click("search");
+    ui.type_text("atlas");
+    ui.press(&cmd("s"));
+    assert!(ui.dialog_open(), "from the search field");
+    ui.click("smart-cancel");
+    assert!(!ui.dialog_open());
+
+    ui.click("actions");
+    ui.click_menu_item("Save Search…");
+    assert!(ui.dialog_open());
+}
+
+#[gpui_kit::test]
+fn the_save_dialog_says_what_is_saved_and_what_it_replaces(cx: &mut TestAppContext) {
+    let fx = Fixture::new("smart-dialog");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // One to replace, ahead of another in the sidebar.
+    let (first, second) = (
+        SmartFolder {
+            name: "Docs".into(),
+            query: "notes".into(),
+            ..Default::default()
+        },
+        atlas_folders(&fx),
+    );
+    ui.update(|f, _, cx| {
+        f.add_smart_folder(first, cx);
+        f.add_smart_folder(second, cx);
+    });
+    ui.click("search");
+    ui.type_text("road");
+    ui.click("scope-folder");
+    ui.click("kind");
+    ui.click_menu_item("Document");
+
+    ui.click("save-smart-folder");
+    let folder = fx.dir.file_name().unwrap().to_string_lossy();
+    assert_eq!(
+        ui.snapshot("smart-summary").label(),
+        Some(
+            format!("Shows names matching “road” in “{folder}”, kind Document. Kept up to date.")
+                .as_str()
+        )
+    );
+    // The name starts as the words, which no Smart Folder is called.
+    assert!(!ui.exists("smart-exists"));
+    assert_eq!(ui.snapshot("smart-save").label(), Some("Save"));
+
+    // Nothing is saved without a name: the button is off, and Return does
+    // nothing.
+    ui.press(&cmd("a"));
+    ui.press("backspace");
+    assert_eq!(ui.snapshot("smart-save").disabled(), Some(true));
+    ui.press("enter");
+    ui.click("smart-save");
+    assert!(ui.dialog_open());
+    assert_eq!(ui.read(|f| f.smart_folders().len()), 2);
+
+    ui.type_text("Docs");
+    assert!(ui.exists("smart-exists"), "one is called that already");
+    assert_eq!(ui.snapshot("smart-save").label(), Some("Replace"));
+    ui.click("smart-save");
+    assert!(!ui.dialog_open());
+    let saved = ui.read(|f| f.smart_folders().to_vec());
+    assert_eq!(saved.len(), 2);
+    assert_eq!(
+        saved[0],
+        SmartFolder {
+            name: "Docs".into(),
+            query: "road".into(),
+            kind: KindFilter::Document,
+            scope: Some(fx.dir.clone()),
+            contents: false,
+            filter: None,
+        },
+        "replaced where it was in the sidebar"
+    );
+}
+
+#[gpui_kit::test]
+fn only_the_smart_folder_whose_search_is_showing_is_marked(cx: &mut TestAppContext) {
+    let fx = Fixture::new("smart-active");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // The same words, for any kind and for folders.
+    let any_kind = SmartFolder {
+        name: "Atlas".into(),
+        query: "atlas".into(),
+        ..Default::default()
+    };
+    let folders = SmartFolder {
+        name: "Atlas folders".into(),
+        kind: KindFilter::Folder,
+        ..any_kind.clone()
+    };
+    ui.update(|f, _, cx| {
+        f.add_smart_folder(any_kind, cx);
+        f.add_smart_folder(folders, cx);
+    });
+    let marked =
+        |ui: &Ui| ui.read(|f| (f.smart_is_active_for_test(0), f.smart_is_active_for_test(1)));
+    assert_eq!(marked(&ui), (false, false));
+
+    ui.click(("smart", 0usize));
+    assert_eq!(marked(&ui), (true, false));
+    ui.click(("smart", 1usize));
+    assert_eq!(marked(&ui), (false, true));
+
+    // Searched inside files instead, it's neither one's search.
+    ui.click("by-contents");
+    assert_eq!(marked(&ui), (false, false));
+}
+
+#[gpui_kit::test]
+fn a_smart_folder_whose_folder_is_gone_says_it_searches_everywhere(cx: &mut TestAppContext) {
+    let fx = Fixture::new("smart-gone");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // The same search twice: for a folder that isn't there, and for Projects.
+    let (gone, there) = (
+        SmartFolder {
+            scope: Some(fx.path("gone")),
+            ..atlas_folders(&fx)
+        },
+        SmartFolder {
+            name: "Atlas in Projects".into(),
+            ..atlas_folders(&fx)
+        },
+    );
+    ui.update(|f, _, cx| {
+        f.add_smart_folder(gone, cx);
+        f.add_smart_folder(there, cx);
+    });
+    let marked =
+        |ui: &Ui| ui.read(|f| (f.smart_is_active_for_test(0), f.smart_is_active_for_test(1)));
+
+    ui.click(("smart", 0usize));
+    assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
+    assert_eq!(ui.read(|f| f.search_scope()), SearchScope::Computer);
+    assert_eq!(ui.notification_count(), 1);
+    // It's the one that's open all the same, so the sidebar marks it, and
+    // not the other, whose folder was found. A scope chosen by hand makes
+    // the search neither one's.
+    assert_eq!(marked(&ui), (true, false));
+    ui.click("scope-folder");
+    assert_eq!(marked(&ui), (false, false));
 }
 
 #[gpui_kit::test]

@@ -89,6 +89,7 @@ actions!(
         Choose,
         ToggleAppearance,
         ToggleFilter,
+        SaveSearch,
         OpenInEditor,
         PreviewTextBigger,
         PreviewTextSmaller,
@@ -192,6 +193,7 @@ fn key_table(mac: bool, cx: &App) -> Vec<KeyBinding> {
         key("secondary-shift-d", ToggleAppearance, &finder, cx),
         key("secondary-/", SearchHelp, &finder, cx),
         key("secondary-alt-f", ToggleFilter, &finder, cx),
+        key("secondary-s", SaveSearch, &finder, cx),
         // File views.
         key("up", MoveUp, &files, cx),
         key("down", MoveDown, &files, cx),
@@ -433,6 +435,7 @@ pub fn set_menus(cx: &mut App) {
             MenuItem::action("Select All Items", SelectAll),
             MenuItem::separator(),
             MenuItem::action("Find", FocusSearch),
+            MenuItem::action("Save Search…", SaveSearch),
             MenuItem::action("Filter with Nushell", ToggleFilter),
             MenuItem::action("Search Syntax…", SearchHelp),
         ]),
