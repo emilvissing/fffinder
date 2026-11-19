@@ -340,7 +340,7 @@ While a search is active, the scope bar shows the controls below. A click on Thi
 | This Computer | Search every search location (set in Settings). |
 | "Folder name" | Search only the folder you were in. Folders outside the search locations get a temporary index the first time. |
 | Name | Match file and folder names. |
-| Contents | Search inside files. Results show the first matching line. Letter case, the largest file searched, and the time limit are set in [Settings › Search engine](#search-engine). |
+| Contents | Search inside files. Results show the first matching line, and a result's [text preview](#previews-and-quick-look) opens at that line. Letter case, the largest file searched, and the time limit are set in [Settings › Search engine](#search-engine). |
 | Funnel | Open the Nushell filter bar (Cmd+Alt+F). |
 | (i) | Show the Search Syntax dialog (Cmd+/). |
 | Kind menu | Any Kind, Folder, Document, Image, Movie, Audio, Code, or Archive. Disabled for contents searches. A kind of file goes by the extension, so a name without one, such as `README` or `Makefile`, is found only with Any Kind. Document covers text, PDFs, word processor, spreadsheet, and presentation files, and data such as CSV, JSON, and settings files. An extension you type narrows the kind: with Image, `logo *.svg` finds only the SVG images, and `logo *.txt` finds nothing. |
@@ -406,11 +406,11 @@ Previews appear in the gallery, in the column view's last column, and in Quick L
 | Folders | The folder icon and how many items it holds. |
 | Zip, `.tar`, `.tar.gz`, `.tgz` | A table of what's inside: each item's path and size, up to 200 items, with the count below. |
 | TrueType and OpenType fonts (`.ttf`, `.otf`, `.ttc`) | The family name, the alphabet, digits, and a sample line, drawn in the font itself. |
-| Markdown (`.md`, `.markdown`) | Rendered: headings, lists, links, tables, and code blocks. Text can be selected. |
+| Markdown (`.md`, `.markdown`) | Rendered: headings, lists, links, tables, and code blocks. Text can be selected. It opens at its top in the results of a contents search too, with nothing highlighted. |
 | CSV, TSV, JSON, JSONL, TOML, YAML, XML, INI, EML, ICS, VCF, XML plists | Their text, like other code: colored where a grammar knows the format, which ICS and VCF have none of. Quick Look can also [explore their data](#exploring-data). |
 | SQLite, XLSX, ODS, MessagePack, binary plists | Opened with Nushell's `open` and shown as a table of up to 200 rows, with "Opened with Nushell" and the row count below. A database shows its tables. Files over 50 MB are skipped. Quick Look can also [explore their data](#exploring-data). |
 | `.nu` scripts and NUON files | Colored the way `nu-highlight` colors them with your `color_config`. |
-| Code and other text | The first 64 KB, marked "preview truncated" when longer. Code in the languages bat's grammars know (Rust, Python, JavaScript, C and C++, Go, Java, shell, HTML, CSS, SQL, TOML, YAML, CSV, INI, and nearly two hundred more, found by extension, by names like `Makefile`, or by a `#!` line) is colored with a light or dark theme to match the window. Files with lines over 2,000 characters, such as minified JavaScript, stay plain. |
+| Code and other text | The first 64 KB, marked "preview truncated" when longer. Code in the languages bat's grammars know (Rust, Python, JavaScript, C and C++, Go, Java, shell, HTML, CSS, SQL, TOML, YAML, CSV, INI, and nearly two hundred more, found by extension, by names like `Makefile`, or by a `#!` line) is colored with a light or dark theme to match the window. Files with lines over 2,000 characters, such as minified JavaScript, stay plain. In the results of a contents search, the preview opens at the matching line the list shows instead of at the top of the file. That line is highlighted and drawn in the plain text color, so that it reads on the highlight, and up to two lines before it stay in view. Structured text and `.nu` scripts do the same. A match past the first 64 KB isn't in the preview, which then opens at its end, where "preview truncated" says which line the match is on. If the file has changed since the search and the line reads differently, the preview opens at its top with nothing highlighted. |
 | Anything else | The file's icon. |
 
 Nushell previews give up after 10 seconds and show the icon. They need `nu`; without it, databases, spreadsheets, and the other binary formats show their icon, and Quick Look has no explore mode.

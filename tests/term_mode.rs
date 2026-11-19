@@ -7,7 +7,7 @@ mod common;
 
 use common::{Fixture, Open, Ui, cmd};
 use fffinder::finder::QuickLookMode;
-use gpui_kit::TestAppContext;
+use gpui_kit::{TestAppContext, px};
 
 /// A browser in term mode on `fx`, with `nu` for explore mode.
 fn open_term<'a>(cx: &'a mut TestAppContext, fx: &Fixture) -> Option<Ui<'a>> {
@@ -104,6 +104,42 @@ fn a_broken_file_explains_itself_in_the_dialog(cx: &mut TestAppContext) {
     assert!(!ui.exists("explore-failure"), "Space shows the text");
     ui.press("space");
     assert!(!ui.dialog_open(), "and Space again closes it");
+}
+
+#[gpui_kit::test]
+fn the_dialog_opens_at_the_line_a_contents_search_found(cx: &mut TestAppContext) {
+    let fx = Fixture::new("term-match");
+    let lines: String = (1..=400)
+        .map(|ix| match ix {
+            300 => "line 300 needle-zebra\n".to_string(),
+            _ => format!("line {ix}\n"),
+        })
+        .collect();
+    std::fs::write(fx.path("log.txt"), lines).unwrap();
+    fffinder::term::pretend_active_for_tests();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+
+    // Where the dialog has a file's first line.
+    ui.select("notes.txt");
+    ui.press("space");
+    assert!(ui.dialog_open());
+    let first_line = ui.snapshot("preview-text").bounds().top();
+    ui.press("space");
+    assert!(!ui.dialog_open());
+
+    ui.click("search");
+    ui.type_text("needle-zebra");
+    ui.click("by-contents");
+    ui.select("log.txt");
+    ui.press("space");
+    assert!(ui.dialog_open());
+    let around = ui.snapshot("preview-match");
+    let top = around.bounds().top();
+    assert!(
+        around.visible() && top <= first_line && top > first_line - px(40.),
+        "the lines around the match are at the top of the preview: {top:?}, not {first_line:?}"
+    );
 }
 
 #[gpui_kit::test]

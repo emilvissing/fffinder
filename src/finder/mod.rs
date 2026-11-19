@@ -287,6 +287,15 @@ pub struct SearchStats {
     pub stopped: bool,
 }
 
+/// The line a content search found first in a file, which its row shows.
+pub(super) struct ContentHit {
+    /// The line's number, counted from 1.
+    pub(super) line: u64,
+    /// The line as the row has it: without the space at its ends, and cut
+    /// short when it's long.
+    pub(super) text: String,
+}
+
 /// Tells a content search to stop when it's dropped: when the next search
 /// starts, when the search ends, and when its tab closes. Dropping the
 /// search's task isn't enough, as that only stops waiting for the answer.
@@ -336,6 +345,8 @@ pub struct Finder {
     scope: SearchScope,
     search_contents: bool,
     results: Vec<Row>,
+    /// The line a content search found first in each file in `results`.
+    content_hits: HashMap<PathBuf, ContentHit>,
     search_stats: Option<SearchStats>,
     searching: bool,
     /// The search hasn't started yet: it's waiting for a pause in typing.
@@ -599,6 +610,7 @@ impl Finder {
             scope: SearchScope::Computer,
             search_contents: false,
             results: Vec::new(),
+            content_hits: HashMap::new(),
             search_stats: None,
             searching: false,
             search_waiting: false,
@@ -833,6 +845,13 @@ impl Finder {
 
     pub fn is_searching(&self) -> bool {
         !self.query.is_empty()
+    }
+
+    /// The line the content search on screen found first in `path`: the
+    /// one its row shows, and where its preview opens. `None` for an item
+    /// that isn't one of that search's results.
+    pub(super) fn content_hit(&self, path: &Path) -> Option<&ContentHit> {
+        self.content_hits.get(path)
     }
 
     /// Items come from many folders (a search, Recents, sent results), so
@@ -1538,6 +1557,7 @@ impl Finder {
             self.search_task = Task::ready(());
             self.search_abort = AbortOnDrop::default();
             self.results.clear();
+            self.content_hits.clear();
             self.search_stats = None;
             self.searching = false;
             self.search_waiting = false;
@@ -1610,6 +1630,7 @@ impl Finder {
     /// matching line under Folder, so they go and placeholders show.
     fn drop_stale_results(&mut self, cx: &mut Context<Self>) {
         self.results.clear();
+        self.content_hits.clear();
         self.search_stats = None;
         self.selection.clear();
         self.rebuild_rows(cx);
@@ -1684,7 +1705,7 @@ impl Finder {
                 })
                 .ok();
             }
-            let (rows, stats) = cx
+            let (rows, hits, stats) = cx
                 .background_spawn(async move {
                     if contents {
                         content_search(&engine, &query, scope, request.limit, &abort)
@@ -1706,7 +1727,7 @@ impl Finder {
                             indexing: response.indexing,
                             stopped: false,
                         };
-                        (rows, stats)
+                        (rows, HashMap::new(), stats)
                     }
                 })
                 .await;
@@ -1718,6 +1739,7 @@ impl Finder {
                     this.searching = false;
                     let retry = stats.indexing;
                     this.results = rows;
+                    this.content_hits = hits;
                     this.search_stats = Some(stats);
                     // Only for the first answer to a new search. One that
                     // runs again leaves the selection and the scroll alone.
@@ -3369,7 +3391,8 @@ impl Finder {
     }
 }
 
-/// Content search: one row per matching file, showing the first matching line.
+/// Content search: one row per matching file, showing the first matching line,
+/// and that line by file, for the file's preview to open at.
 /// It ends early, with part of the rows, once `abort` is set.
 fn content_search(
     engine: &Engine,
@@ -3377,7 +3400,7 @@ fn content_search(
     scope: Option<PathBuf>,
     limit: usize,
     abort: &Arc<AtomicBool>,
-) -> (Vec<Row>, SearchStats) {
+) -> (Vec<Row>, HashMap<PathBuf, ContentHit>, SearchStats) {
     let request = GrepRequest {
         patterns: vec![query.to_string()],
         scope,
@@ -3393,6 +3416,7 @@ fn content_search(
     let response = engine.grep_cancellable(&request, Some(abort));
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
+    let mut lines = HashMap::new();
     // Two things tell that files were left out, and each misses a case. The
     // engine says so when it stopped with files unsearched, which it didn't
     // if the file too many was the last one there is. And that file is
@@ -3408,8 +3432,9 @@ fn content_search(
                 truncated = true;
                 break;
             }
-            let line = format!("{}: {}", hit.line, hit.text.trim());
-            rows.push(Row::new(entry, Vec::new(), Some(line)));
+            let (line, text) = (hit.line, hit.text.trim().to_string());
+            rows.push(Row::new(entry, Vec::new(), Some(format!("{line}: {text}"))));
+            lines.insert(hit.path, ContentHit { line, text });
         }
     }
     let stats = SearchStats {
@@ -3420,7 +3445,7 @@ fn content_search(
         indexing: response.indexing,
         stopped: response.stopped,
     };
-    (rows, stats)
+    (rows, lines, stats)
 }
 
 impl Render for Finder {
@@ -3935,12 +3960,46 @@ mod tests {
         });
         assert!(engine.wait_ready(Duration::from_secs(10)));
         let abort = Arc::new(AtomicBool::new(false));
-        let (rows, _) = content_search(&engine, "needle", None, 500, &abort);
+        let (rows, _, _) = content_search(&engine, "needle", None, 500, &abort);
         assert_eq!(rows.len(), 200);
 
         abort.store(true, Ordering::Relaxed);
-        let (rows, _) = content_search(&engine, "needle", None, 500, &abort);
+        let (rows, _, _) = content_search(&engine, "needle", None, 500, &abort);
         assert!(rows.len() < 50, "{} rows", rows.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_content_search_tells_the_line_each_file_matched_first() {
+        let dir =
+            std::env::temp_dir().join(format!("fffinder-content-line-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("notes.txt"),
+            "one\ntwo\n  the needle\nfour\nneedle again\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("other.txt"), "nothing to find\n").unwrap();
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let abort = Arc::new(AtomicBool::new(false));
+        let (rows, lines, _) = content_search(&engine, "needle", None, 500, &abort);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].detail.as_ref(), "3: the needle");
+        let hit = &lines[&rows[0].entry.path];
+        assert_eq!(
+            (hit.line, hit.text.as_str()),
+            (3, "the needle"),
+            "the line the row shows"
+        );
+        assert_eq!(lines.len(), 1, "only files that are listed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3962,13 +4021,13 @@ mod tests {
         });
         assert!(engine.wait_ready(Duration::from_secs(10)));
         let abort = Arc::new(AtomicBool::new(false));
-        let (rows, stats) = content_search(&engine, "needle", None, 11, &abort);
+        let (rows, _, stats) = content_search(&engine, "needle", None, 11, &abort);
         assert_eq!(rows.len(), 11);
         assert!(!stats.truncated, "all eleven are listed");
 
         // The file that doesn't fit is the last one there is. The engine has
         // then looked inside every file, and only the file itself tells.
-        let (rows, stats) = content_search(&engine, "needle", None, 10, &abort);
+        let (rows, _, stats) = content_search(&engine, "needle", None, 10, &abort);
         assert_eq!(rows.len(), 10);
         assert!(stats.truncated);
         let _ = std::fs::remove_dir_all(&dir);
@@ -4005,7 +4064,7 @@ mod tests {
         });
         assert!(engine.wait_ready(Duration::from_secs(10)));
         let abort = Arc::new(AtomicBool::new(false));
-        let (rows, stats) = content_search(&engine, "needle", Some(folder.clone()), 2, &abort);
+        let (rows, _, stats) = content_search(&engine, "needle", Some(folder.clone()), 2, &abort);
         assert!(rows.len() <= 2);
         assert!(
             stats.truncated,
@@ -4015,7 +4074,7 @@ mod tests {
 
         // With room for them, the folder's files are all found behind the
         // twenty that come first.
-        let (rows, stats) = content_search(&engine, "needle", Some(folder), 10, &abort);
+        let (rows, _, stats) = content_search(&engine, "needle", Some(folder), 10, &abort);
         assert_eq!(rows.len(), 3);
         assert!(!stats.truncated);
         let _ = std::fs::remove_dir_all(&dir);

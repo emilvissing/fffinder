@@ -9,7 +9,7 @@
 use super::explore::{QuickLookMode, mode_buttons};
 use super::pdf::Surface;
 use super::views::file_icon;
-use super::{AppState, Finder};
+use super::{AppState, ContentHit, Finder};
 use crate::actions::{
     ExploreBack, ExploreInto, MoveDown, MoveLeft, MoveRight, MoveUp, NextPdfPage,
     PreviewTextBigger, PreviewTextReset, PreviewTextSmaller, PreviousPdfPage, QUICK_LOOK,
@@ -21,6 +21,7 @@ use crate::theme::ui;
 use fffinder_core::config::{DEFAULT_PREVIEW_FONT_SIZE, FONT_SIZE_RANGE};
 use fffinder_core::{FileEntry, FileKind, ViewMode, format};
 use gpui_kit::TestSupportExt as _;
+use gpui_kit::base::ScrollBounce;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -31,7 +32,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::cell::Cell;
 use std::io::Read as _;
+use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +43,12 @@ const TEXT_LIMIT: usize = 64 * 1024;
 const TABLE_ROWS: usize = 200;
 /// Font files bigger than this aren't loaded to show them.
 const FONT_LIMIT: u64 = 50_000_000;
+/// A preview that opens at a matching line keeps up to this many of the
+/// lines before it in view.
+const MATCH_CONTEXT_LINES: usize = 2;
+/// The most those lines may add up to, in bytes. Long lines wrap, and would
+/// push the match out of a small preview.
+const MATCH_CONTEXT_BYTES: usize = 160;
 
 #[derive(Clone)]
 pub enum Preview {
@@ -355,6 +364,18 @@ impl Finder {
             .get(&entry.path)
             .cloned()
             .unwrap_or(Preview::Loading)
+    }
+
+    /// The line of `path`'s preview that's marked as what the content
+    /// search found, as the preview has it.
+    #[doc(hidden)]
+    pub fn preview_match_for_test(&self, path: &Path) -> Option<String> {
+        let (Preview::Text { text, .. } | Preview::Code { text, .. }) = self.previews.get(path)?
+        else {
+            return None;
+        };
+        let mark = hit_range(text, self.content_hit(path)?)?;
+        Some(text[mark].to_string())
     }
 
     /// Space or Cmd+Y: show the selected item in Quick Look, a structured
@@ -986,60 +1007,37 @@ fn preview_body(
         } else {
             format!("{items} items")
         })),
-        Preview::Text { text, truncated } => div()
-            .size_full()
-            .bg(theme.muted)
-            .p(ui(12.))
-            .overflow_y_scrollbar()
-            // The wrapper's ID, so that each file has its own scroll position.
-            .id(("text-preview", super::views::path_id(&entry.path)))
-            .font_family(theme.mono_font_family.clone())
-            .text_size(ui(text_size))
-            // The scrollbar wrapper hides its own element from UI tests, so
-            // the text inside is the observed one.
-            .child(div().id("preview-text").test_support().child(text))
-            .when(truncated, |this| {
-                this.child(
-                    div()
-                        .pt(ui(8.))
-                        .text_color(theme.muted_foreground)
-                        .child("… (preview truncated)"),
-                )
-            })
-            .into_any_element(),
+        Preview::Text { text, truncated } => text_preview(
+            ("text-preview", super::views::path_id(&entry.path)),
+            text,
+            Vec::new(),
+            truncated,
+            finder.content_hit(&entry.path),
+            text_size,
+            cx,
+        ),
         Preview::Code {
             text,
             mut spans,
             comments,
             truncated,
-        } => div()
-            .size_full()
-            .bg(theme.muted)
-            .p(ui(12.))
-            .overflow_y_scrollbar()
-            // The wrapper's ID, so that each file has its own scroll position.
-            .id(("code-preview", super::views::path_id(&entry.path)))
-            .font_family(theme.mono_font_family.clone())
-            .text_size(ui(text_size))
-            .child({
-                let comment = HighlightStyle {
-                    color: Some(theme.muted_foreground),
-                    ..Default::default()
-                };
-                spans.extend(comments.into_iter().map(|range| (range, comment)));
-                spans.sort_by_key(|(range, _)| range.start);
-                let text = StyledText::new(text).with_highlights(spans);
-                div().id("preview-text").test_support().child(text)
-            })
-            .when(truncated, |this| {
-                this.child(
-                    div()
-                        .pt(ui(8.))
-                        .text_color(theme.muted_foreground)
-                        .child("… (preview truncated)"),
-                )
-            })
-            .into_any_element(),
+        } => {
+            let comment = HighlightStyle {
+                color: Some(theme.muted_foreground),
+                ..Default::default()
+            };
+            spans.extend(comments.into_iter().map(|range| (range, comment)));
+            spans.sort_by_key(|(range, _)| range.start);
+            text_preview(
+                ("code-preview", super::views::path_id(&entry.path)),
+                text,
+                spans,
+                truncated,
+                finder.content_hit(&entry.path),
+                text_size,
+                cx,
+            )
+        }
         Preview::Table {
             columns,
             rows,
@@ -1104,6 +1102,267 @@ fn preview_body(
     }
 }
 
+/// The colors and marks of a preview's text, by the bytes they cover, in
+/// order and apart.
+type Spans = Vec<(Range<usize>, HighlightStyle)>;
+
+/// The text of a text or code preview, scrolling when it's longer than its
+/// space. `hit` is the line a content search found in the file: it's marked,
+/// and the preview opens with it in view rather than at the file's start.
+fn text_preview(
+    id: (&'static str, usize),
+    text: SharedString,
+    spans: Spans,
+    truncated: bool,
+    hit: Option<&ContentHit>,
+    text_size: f32,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let mark = hit.and_then(|hit| hit_range(&text, hit));
+    // A long file's match can be past the part of it that was read.
+    let beyond = truncated && hit.is_some_and(|hit| line_range(&text, hit.line).is_none());
+    let spans = match &mark {
+        Some(mark) => with_mark(spans, mark, palette(cx).highlight),
+        None => spans,
+    };
+    let note = truncated.then(|| {
+        let note = SharedString::from(match hit.filter(|_| beyond) {
+            Some(ContentHit { line, .. }) => {
+                format!("… (preview truncated; the match on line {line} is further down)")
+            }
+            None => "… (preview truncated)".to_string(),
+        });
+        div()
+            .id("preview-note")
+            .aria_label(note.clone())
+            .pt(ui(8.))
+            .text_color(theme.muted_foreground)
+            .child(note)
+            .test_support()
+    });
+    let body = div()
+        .size_full()
+        .bg(theme.muted)
+        .p(ui(12.))
+        .font_family(theme.mono_font_family.clone())
+        .text_size(ui(text_size));
+    let block = |id: &'static str, text: SharedString, spans: Spans| {
+        div()
+            .id(id)
+            .test_support()
+            .child(StyledText::new(text).with_highlights(spans))
+    };
+    // Where the lines kept in view above the match begin. A match in a
+    // file's first lines needs no scrolling to.
+    let start = mark
+        .map(|mark| context_start(&text, mark.start))
+        .filter(|start| *start > 0);
+    let Some(hit) = hit.filter(|_| start.is_some() || beyond) else {
+        return body
+            .overflow_y_scrollbar()
+            // The wrapper's ID, so that each file has its own scroll position.
+            .id(id)
+            // The scrollbar wrapper hides its own element from UI tests, so
+            // the text inside is the observed one.
+            .child(block("preview-text", text, spans))
+            .children(note)
+            .into_any_element();
+    };
+    let mut blocks = match start {
+        // In two blocks, so that the second can be scrolled to. A block
+        // starts on a new line, as the line break between the two did.
+        Some(start) => {
+            let (first, second) = split_spans(spans, start);
+            vec![
+                block("preview-text", text[..start - 1].into(), first),
+                block("preview-match", text[start..].into(), second),
+            ]
+        }
+        // The match isn't here to scroll to, so the note that says so is.
+        None => vec![block("preview-text", text, spans)],
+    };
+    blocks.extend(note);
+    MatchScroll {
+        id: id.into(),
+        line: hit.line,
+        body,
+        blocks: blocks.into_iter().map(|b| b.into_any_element()).collect(),
+    }
+    .into_any_element()
+}
+
+/// The bytes of line `line` of `text`, counted from 1, without its line
+/// break. `None` when the text has no such line.
+fn line_range(text: &str, line: u64) -> Option<Range<usize>> {
+    let mut start = 0;
+    let mut number = 0;
+    for piece in text.split_inclusive('\n') {
+        number += 1;
+        if number == line {
+            return Some(start..start + piece.trim_end_matches(['\n', '\r']).len());
+        }
+        start += piece.len();
+    }
+    None
+}
+
+/// The bytes of the line a content search found, in `text`. `None` when the
+/// text has no such line, or has other words there: the file was changed
+/// after it was searched or read, and the mark would be on the wrong line.
+fn hit_range(text: &str, hit: &ContentHit) -> Option<Range<usize>> {
+    line_range(text, hit.line).filter(|line| {
+        text[line.clone()]
+            .trim_start()
+            .starts_with(hit.text.as_str())
+    })
+}
+
+/// Where a preview that opens at the line starting at `line_start` begins
+/// what it shows: a few lines earlier, so the match isn't right under the
+/// preview's edge, or at the line itself when those before it are long.
+fn context_start(text: &str, line_start: usize) -> usize {
+    let mut start = line_start;
+    for _ in 0..MATCH_CONTEXT_LINES {
+        // A line starts after the line break that ends the one before it.
+        let Some(before) = text[..start].strip_suffix('\n') else {
+            break;
+        };
+        let line_before = before.rfind('\n').map_or(0, |at| at + 1);
+        if line_start - line_before > MATCH_CONTEXT_BYTES {
+            break;
+        }
+        start = line_before;
+    }
+    start
+}
+
+/// `spans` with the text in `mark` drawn as a match: on `color`, and in the
+/// preview's own text color whatever colored it before. A grammar picks its
+/// colors for the preview's background, and on the mark some are hard to
+/// read, gray comments in the dark theme most of all. Weight and slant stay.
+fn with_mark(spans: Spans, mark: &Range<usize>, color: Hsla) -> Spans {
+    let marked = |style: HighlightStyle| HighlightStyle {
+        background_color: Some(color),
+        color: None,
+        ..style
+    };
+    let mut out = Vec::with_capacity(spans.len() + 3);
+    // How far into the mark `out` has got.
+    let mut at = mark.start;
+    for (range, style) in spans {
+        // The parts of the span before the mark, in it, and after it.
+        let before = range.start..range.end.min(mark.start);
+        let inside = range.start.max(at)..range.end.min(mark.end);
+        let after = range.start.max(mark.end)..range.end;
+        if !before.is_empty() {
+            out.push((before, style));
+        }
+        if !inside.is_empty() {
+            // Text between two spans has no style but the mark's.
+            if at < inside.start {
+                out.push((at..inside.start, marked(HighlightStyle::default())));
+            }
+            at = inside.end;
+            out.push((inside, marked(style)));
+        }
+        if !after.is_empty() {
+            if at < mark.end {
+                out.push((at..mark.end, marked(HighlightStyle::default())));
+                at = mark.end;
+            }
+            out.push((after, style));
+        }
+    }
+    if at < mark.end {
+        out.push((at..mark.end, marked(HighlightStyle::default())));
+    }
+    out
+}
+
+/// `spans` for a text drawn in two blocks, the second from the line that
+/// starts at `start`. The first block's spans stay where they are, the
+/// second's are counted from `start`, and a span over both is cut in two.
+/// The line break before `start` is in neither block.
+fn split_spans(spans: Spans, start: usize) -> (Spans, Spans) {
+    let (mut first, mut second) = (Vec::new(), Vec::new());
+    for (range, style) in spans {
+        let before = range.start..range.end.min(start - 1);
+        let after = range.start.max(start)..range.end;
+        if !before.is_empty() {
+            first.push((before, style));
+        }
+        if !after.is_empty() {
+            second.push((after.start - start..after.end - start, style));
+        }
+    }
+    (first, second)
+}
+
+/// A text preview that opens with a matching line in view. The kit's
+/// scrollbar wrapper, which every other text preview scrolls in, keeps its
+/// scroll handle to itself, so this is that wrapper built here around a
+/// handle that can be told where to go. `body` scrolls, and of the `blocks`
+/// in it the second is the one that goes to the top.
+#[derive(IntoElement)]
+struct MatchScroll {
+    /// Made from the file's path, like the wrapper's, so that each file has
+    /// its own scroll position.
+    id: ElementId,
+    /// The matching line. The preview goes to it once, and again only when
+    /// another line takes its place.
+    line: u64,
+    body: Div,
+    blocks: Vec<AnyElement>,
+}
+
+/// What a [`MatchScroll`] keeps for as long as it's drawn.
+#[derive(Default)]
+struct MatchScrollState {
+    handle: ScrollHandle,
+    /// The matching line the preview has gone to.
+    at: Cell<Option<u64>>,
+}
+
+impl RenderOnce for MatchScroll {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let mut new = false;
+        let state = window.use_keyed_state(self.id.clone(), cx, |_, _| {
+            new = true;
+            MatchScrollState::default()
+        });
+        let state = state.read(cx);
+        let handle = state.handle.clone();
+        // A handle goes to an item from where its area was last laid out,
+        // which a new handle's never was: it would overshoot by the area's
+        // distance from the top of the window. So the first frame draws the
+        // area empty, and the text comes with the next, already in place.
+        if new {
+            window.request_animation_frame();
+        } else if state.at.replace(Some(self.line)) != Some(self.line) {
+            handle.scroll_to_top_of_item(1);
+        }
+        let area = self
+            .body
+            .id((self.id.clone(), "area"))
+            .overflow_y_scroll()
+            .restrict_scroll_to_axis()
+            .track_scroll(&handle)
+            .when(!new, |this| this.children(self.blocks));
+        div()
+            .id(self.id.clone())
+            .size_full()
+            .relative()
+            .flex()
+            .flex_col()
+            .overflow_y_hidden()
+            // The wrapper's way with the wheel: the area's alone while it
+            // can scroll, with a bounce at either end on a Mac.
+            .child(ScrollBounce::new((self.id, "bounce"), &handle, area))
+            .vertical_scrollbar(&handle)
+    }
+}
+
 /// A file's icon, centered, with an optional line under it.
 fn icon_with_caption(
     entry: &FileEntry,
@@ -1154,10 +1413,14 @@ fn table_cell(text: SharedString, width: f32) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's `test` attribute would replace the standard one.
-    use super::{Preview, load_preview};
+    use super::{
+        ContentHit, Preview, context_start, hit_range, line_range, load_preview, split_spans,
+        with_mark,
+    };
     use crate::nushell;
     use fffinder_core::FileEntry;
     use fffinder_core::ops::Progress;
+    use gpui_kit::{FontWeight, HighlightStyle, Hsla, blue, red, yellow};
 
     /// Runs only where `nu` is installed.
     #[test]
@@ -1225,6 +1488,216 @@ mod tests {
             Preview::Text { .. }
         ));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_matching_line_is_found_by_its_number() {
+        let text = "first\nsecond line\n\nlast, cut off";
+        assert_eq!(line_range(text, 1), Some(0..5));
+        assert_eq!(line_range(text, 2).map(|at| &text[at]), Some("second line"));
+        assert_eq!(line_range(text, 3).map(|at| &text[at]), Some(""));
+        assert_eq!(
+            line_range(text, 4).map(|at| &text[at]),
+            Some("last, cut off"),
+            "where the preview stopped reading"
+        );
+        assert_eq!(line_range(text, 5), None, "past what was read");
+        assert_eq!(line_range(text, 0), None, "lines count from 1");
+        assert_eq!(line_range("only\n", 2), None, "a line break ends a line");
+        assert_eq!(line_range("", 1), None);
+
+        // Both characters of a Windows line break stay out of the line.
+        let dos = "one\r\ntwo\r\nthree\r\n";
+        assert_eq!(line_range(dos, 2).map(|at| &dos[at]), Some("two"));
+
+        // Lines go by their line breaks, however many bytes a letter takes.
+        let wide = "naïve café\n日本語のテキスト\nend\n";
+        assert_eq!(
+            line_range(wide, 2).map(|at| &wide[at]),
+            Some("日本語のテキスト")
+        );
+        assert_eq!(line_range(wide, 3).map(|at| &wide[at]), Some("end"));
+    }
+
+    #[test]
+    fn a_line_is_marked_only_while_it_reads_as_the_search_found_it() {
+        let hit = |line, text: &str| ContentHit {
+            line,
+            text: text.to_string(),
+        };
+        let text = "one\n    let needle = 2;  \r\nthree\n";
+        // The search hands a line on without the space at its ends.
+        assert_eq!(
+            hit_range(text, &hit(2, "let needle = 2;")).map(|at| &text[at]),
+            Some("    let needle = 2;  ")
+        );
+        assert!(
+            hit_range(text, &hit(2, "let needle")).is_some(),
+            "a long line is cut short by the search, not by the preview"
+        );
+
+        // The file was changed after it was searched, or after it was read.
+        assert_eq!(
+            hit_range(text, &hit(3, "let needle = 2;")),
+            None,
+            "another line is there now"
+        );
+        assert_eq!(hit_range(text, &hit(9, "let needle = 2;")), None);
+    }
+
+    #[test]
+    fn a_preview_opens_a_little_above_its_match() {
+        let line_start = |text: &str, line| line_range(text, line).unwrap().start;
+        let text = "one\ntwo\nthree\nfour\nfive\n";
+        assert_eq!(
+            context_start(text, line_start(text, 5)),
+            line_start(text, 3),
+            "two lines stay above the match"
+        );
+        assert_eq!(context_start(text, line_start(text, 3)), 0);
+        assert_eq!(
+            context_start(text, line_start(text, 2)),
+            0,
+            "one is all there is"
+        );
+        assert_eq!(context_start(text, 0), 0);
+
+        // Long lines wrap, and enough of them would push the match out.
+        let long = "x".repeat(200);
+        let text = format!("short\n{long}\nabove\nmatch\n");
+        assert_eq!(
+            context_start(&text, line_start(&text, 4)),
+            line_start(&text, 3),
+            "only the short line above"
+        );
+        let text = format!("short\n{long}\nmatch\n");
+        assert_eq!(
+            context_start(&text, line_start(&text, 3)),
+            line_start(&text, 3)
+        );
+    }
+
+    fn colored(color: Hsla) -> HighlightStyle {
+        HighlightStyle {
+            color: Some(color),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_marked_line_is_in_plain_text_color_on_the_mark() {
+        let mark = yellow();
+        let plain = HighlightStyle {
+            background_color: Some(mark),
+            ..Default::default()
+        };
+        let bold = |style: HighlightStyle| HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..style
+        };
+        assert_eq!(
+            with_mark(Vec::new(), &(4..9), mark),
+            [(4..9, plain)],
+            "plain text has the mark alone"
+        );
+        // A span before the mark, one over its start, a gap, one over its
+        // end, and one after it.
+        let spans = vec![
+            (0..2, colored(red())),
+            (3..6, colored(blue())),
+            (8..12, bold(colored(red()))),
+            (14..16, colored(blue())),
+        ];
+        assert_eq!(
+            with_mark(spans, &(4..10), mark),
+            [
+                (0..2, colored(red())),
+                (3..4, colored(blue())),
+                (4..6, plain),
+                (6..8, plain),
+                (8..10, bold(plain)),
+                (10..12, bold(colored(red()))),
+                (14..16, colored(blue())),
+            ],
+            "the colors go and the weight stays"
+        );
+        let on_red = HighlightStyle {
+            background_color: Some(red()),
+            ..colored(blue())
+        };
+        assert_eq!(
+            with_mark(vec![(0..6, on_red)], &(2..4), mark),
+            [(0..2, on_red), (2..4, plain), (4..6, on_red)],
+            "the mark shows over a background the text had"
+        );
+
+        // Wherever the mark falls, the bytes in it change their color for
+        // the mark, the others keep their style, and the spans stay in order
+        // and apart, as drawing them needs.
+        let style_at = |spans: &[(std::ops::Range<usize>, HighlightStyle)], at: usize| {
+            let style = spans.iter().find(|(range, _)| range.contains(&at));
+            style.map(|(_, style)| *style).unwrap_or_default()
+        };
+        let layouts = [
+            vec![],
+            vec![0..6, 6..12],
+            vec![0..3, 3..7, 7..12],
+            vec![2..4, 6..9],
+            vec![1..2, 5..6, 10..11],
+        ];
+        for layout in layouts {
+            let styles = [colored(red()), bold(colored(blue()))];
+            let spans: Vec<_> = layout.into_iter().zip(styles.into_iter().cycle()).collect();
+            for start in 0..12 {
+                for end in start + 1..=12 {
+                    let out = with_mark(spans.clone(), &(start..end), mark);
+                    for at in 0..12 {
+                        let mut expected = style_at(&spans, at);
+                        if (start..end).contains(&at) {
+                            expected.color = None;
+                            expected.background_color = Some(mark);
+                        }
+                        assert_eq!(
+                            style_at(&out, at),
+                            expected,
+                            "byte {at}, marking {start}..{end} of {spans:?}"
+                        );
+                    }
+                    assert!(
+                        out.iter().all(|(range, _)| !range.is_empty())
+                            && out.windows(2).all(|two| two[0].0.end <= two[1].0.start),
+                        "marking {start}..{end} of {spans:?} gave {out:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spans_follow_a_text_cut_in_two_at_a_line() {
+        // "one\ntwo\nthree", cut where "three" starts.
+        let spans = vec![
+            (0..3, colored(red())),
+            (4..10, colored(blue())),
+            (10..13, colored(red())),
+        ];
+        let (first, second) = split_spans(spans, 8);
+        assert_eq!(
+            first,
+            [(0..3, colored(red())), (4..7, colored(blue()))],
+            "up to the line break"
+        );
+        assert_eq!(
+            second,
+            [(0..2, colored(blue())), (2..5, colored(red()))],
+            "counted from the cut"
+        );
+
+        let (first, second) = split_spans(vec![(7..8, colored(red()))], 8);
+        assert!(
+            first.is_empty() && second.is_empty(),
+            "the line break is in neither part"
+        );
     }
 
     #[test]

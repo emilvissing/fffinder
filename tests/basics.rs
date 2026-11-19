@@ -1007,6 +1007,258 @@ fn quick_look_shows_each_file_from_its_first_line(cx: &mut TestAppContext) {
     assert_eq!(back, top, "a.rs is not where b.rs was left");
 }
 
+/// Files for a contents search for `needle-zebra`: it's far down `log.txt`
+/// and `main.rs`, in the second line of `near.txt`, and past what a preview
+/// reads of `long.txt`.
+fn files_with_a_match(name: &str) -> Fixture {
+    let fx = Fixture::new(name);
+    let lines = |count: usize, at: usize, rest: &str| -> String {
+        (1..=count)
+            .map(|ix| match ix == at {
+                true => format!("line {ix} needle-zebra\n"),
+                false => format!("line {ix}{rest}\n"),
+            })
+            .collect()
+    };
+    std::fs::write(fx.path("log.txt"), lines(400, 300, "")).unwrap();
+    std::fs::write(fx.path("near.txt"), lines(400, 2, "")).unwrap();
+    let filler = " of a file that goes on for longer than a preview reads";
+    std::fs::write(fx.path("long.txt"), lines(3000, 2500, filler)).unwrap();
+    let code: String = (1..=400)
+        .map(|ix| match ix {
+            250 => "// needle-zebra\n".to_string(),
+            _ => format!("fn line_{ix}() {{}}\n"),
+        })
+        .collect();
+    std::fs::write(fx.path("main.rs"), code).unwrap();
+    fx
+}
+
+/// The line marked in the selected item's preview.
+fn marked_line(ui: &Ui) -> Option<String> {
+    let path = ui.read(|f| f.selected_entries()[0].path.clone());
+    ui.read(|f| f.preview_match_for_test(&path))
+}
+
+#[gpui_kit::test]
+fn a_preview_opens_at_the_line_a_contents_search_found(cx: &mut TestAppContext) {
+    let fx = files_with_a_match("pane-match");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("shift-p"));
+    ui.click("search");
+    ui.type_text("needle-zebra");
+    ui.click("by-contents");
+    assert_eq!(ui.names().len(), 4, "{:?}", ui.names());
+    // How far below the top of the preview pane an element is.
+    let below_top = |ui: &mut Ui, id: &'static str| {
+        ui.snapshot(id).bounds().top() - ui.snapshot("preview-pane").bounds().top()
+    };
+
+    ui.select("log.txt");
+    assert_eq!(marked_line(&ui).as_deref(), Some("line 300 needle-zebra"));
+    let top = below_top(&mut ui, "preview-match");
+    assert!(
+        ui.snapshot("preview-match").visible() && top >= px(0.) && top < px(40.),
+        "the lines around the match are at the top of the preview: {top:?}"
+    );
+
+    // A search that runs again leaves the preview where it's being read.
+    let pane = ui.snapshot("preview-pane").bounds();
+    let inside = point(pane.center().x, pane.top() + px(100.));
+    ui.scroll_point(inside, point(px(0.), px(-150.)));
+    let read_at = below_top(&mut ui, "preview-match");
+    assert!(read_at < top - px(100.), "scrolled on from the match");
+    ui.update(|f, _, cx| f.run_search(false, cx));
+    assert_eq!(below_top(&mut ui, "preview-match"), read_at);
+
+    // A match in a file's first lines shows without scrolling.
+    ui.select("near.txt");
+    assert_eq!(marked_line(&ui).as_deref(), Some("line 2 needle-zebra"));
+    assert!(!ui.exists("preview-match"));
+    let unscrolled = below_top(&mut ui, "preview-text");
+    assert!(unscrolled > px(0.), "{unscrolled:?}");
+
+    // Code opens at its match too, and so does a file gone back to.
+    ui.select("main.rs");
+    assert_eq!(marked_line(&ui).as_deref(), Some("// needle-zebra"));
+    assert_eq!(below_top(&mut ui, "preview-match"), top);
+    ui.select("log.txt");
+    assert_eq!(
+        below_top(&mut ui, "preview-match"),
+        top,
+        "at the match, not where it was left"
+    );
+
+    // A match past what the preview read can't be shown. The preview opens
+    // at the note that says where it is.
+    ui.select("long.txt");
+    assert_eq!(marked_line(&ui), None);
+    assert!(!ui.exists("preview-match"));
+    let note = ui.snapshot("preview-note");
+    assert_eq!(
+        note.label(),
+        Some("… (preview truncated; the match on line 2500 is further down)")
+    );
+    assert!(note.visible(), "the note is in view: {note:?}");
+
+    // Without the search, the file opens at its top with nothing marked.
+    ui.press("escape");
+    ui.press("escape");
+    assert!(!ui.read(|f| f.is_searching()));
+    ui.select("log.txt");
+    assert_eq!(marked_line(&ui), None);
+    assert!(!ui.exists("preview-match"));
+    assert_eq!(below_top(&mut ui, "preview-text"), unscrolled);
+}
+
+#[gpui_kit::test]
+fn a_preview_goes_to_another_line_the_search_finds_in_the_same_file(cx: &mut TestAppContext) {
+    let fx = Fixture::new("gallery-match");
+    let lines: String = (1..=400)
+        .map(|ix| match ix {
+            100 => "line 100 needle-quokka\n".to_string(),
+            300 => "line 300 needle-quokka-two\n".to_string(),
+            _ => format!("line {ix}\n"),
+        })
+        .collect();
+    std::fs::write(fx.path("log.txt"), lines).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-gallery");
+    ui.click("search");
+    ui.type_text("needle-quokka");
+    ui.click("by-contents");
+    // The gallery shows the one result without it being clicked.
+    assert_eq!(ui.selected(), ["log.txt"]);
+    assert_eq!(marked_line(&ui).as_deref(), Some("line 100 needle-quokka"));
+    let top = ui.snapshot("preview-match").bounds().top();
+    let above = ui.snapshot("preview-text").bounds().size.height;
+
+    // Cmd+F selects the words, so these take their place.
+    ui.press(&cmd("f"));
+    ui.type_text("needle-quokka-two");
+    assert_eq!(ui.selected(), ["log.txt"]);
+    assert_eq!(
+        marked_line(&ui).as_deref(),
+        Some("line 300 needle-quokka-two")
+    );
+    assert_eq!(ui.snapshot("preview-match").bounds().top(), top);
+    assert!(
+        ui.snapshot("preview-text").bounds().size.height > above * 2.,
+        "scrolled on to the other line"
+    );
+}
+
+#[gpui_kit::test]
+fn a_preview_marks_no_line_when_the_file_changed_after_the_search(cx: &mut TestAppContext) {
+    let fx = files_with_a_match("changed-match");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("shift-p"));
+    ui.click("search");
+    ui.type_text("needle-zebra");
+    ui.click("by-contents");
+    let text_top = |ui: &mut Ui| ui.snapshot("preview-text").bounds().top();
+    ui.select("near.txt");
+    let unscrolled = text_top(&mut ui);
+
+    // Ten lines more above the match, written once the search has read the
+    // file. Its row goes on saying line 300, which is "line 290" now.
+    let found = std::fs::read_to_string(fx.path("log.txt")).unwrap();
+    let changed = format!("{}{found}", "one more\n".repeat(10));
+    std::fs::write(fx.path("log.txt"), changed).unwrap();
+    ui.select("log.txt");
+    assert!(ui.read(|f| f.has_preview_for_test(&fx.path("log.txt"))));
+    assert_eq!(marked_line(&ui), None, "line 300 is another line now");
+    assert!(!ui.exists("preview-match"));
+    assert_eq!(text_top(&mut ui), unscrolled, "the file opens at its top");
+}
+
+#[gpui_kit::test]
+fn quick_look_opens_at_the_line_a_contents_search_found(cx: &mut TestAppContext) {
+    let fx = files_with_a_match("quick-look-match");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.click("search");
+    ui.type_text("needle-zebra");
+    ui.click("by-contents");
+
+    // Opened on a result, and following the browser to another.
+    ui.select("main.rs");
+    ui.press("space");
+    for name in ["main.rs", "log.txt"] {
+        ui.select(name);
+        let around = ui.in_quick_look(|ui| ui.snapshot("preview-match"));
+        let top = around.bounds().top();
+        assert!(
+            around.visible() && top >= px(0.) && top < px(40.),
+            "the lines around {name}'s match are at the top of Quick Look: {top:?}"
+        );
+    }
+
+    // Bigger text is still the same file, so it stays where it's being read.
+    ui.in_quick_look(|ui| {
+        let text_top = |ui: &mut Ui| ui.snapshot("preview-text").bounds().top();
+        ui.scroll_point(point(px(200.), px(100.)), point(px(0.), px(-150.)));
+        let read_at = text_top(ui);
+        ui.click("ql-text-bigger");
+        assert_eq!(text_top(ui), read_at, "log.txt kept its place");
+    });
+
+    ui.select("long.txt");
+    ui.in_quick_look(|ui| {
+        assert!(!ui.exists("preview-match"));
+        let note = ui.snapshot("preview-note");
+        assert_eq!(
+            note.label(),
+            Some("… (preview truncated; the match on line 2500 is further down)")
+        );
+        assert!(note.visible(), "the note is in view: {note:?}");
+    });
+}
+
+/// A preview that opens at a line draws its area empty for one frame, so it
+/// has to ask for the next frame itself. In Quick Look's window nothing else
+/// does, and the text would wait there for the next event.
+#[gpui_kit::test]
+fn a_preview_that_opens_at_a_line_shows_its_text_in_the_next_frame(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+    let fx = files_with_a_match("quick-look-frame");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.click("search");
+    ui.type_text("needle-zebra");
+    ui.click("by-contents");
+    // Both files are shown once, so that log.txt's preview is read by the
+    // time it's clicked again.
+    ui.select("log.txt");
+    ui.press("space");
+    let top = ui.in_quick_look(|ui| ui.snapshot("preview-match").bounds().top());
+    ui.select("near.txt");
+
+    // The click `Ui::select` makes, without the frame the harness draws
+    // after every step: Quick Look's window has drawn once, as the browser's
+    // selection changed.
+    let names = ui.names();
+    let ix = names.iter().position(|name| name == "log.txt").unwrap();
+    let view = ui.view.clone();
+    ui.window(|window, cx| {
+        view.update(cx, |f, cx| {
+            f.click_row(ix, Default::default(), 1, window, cx)
+        })
+    });
+    let quick_look = ui.read(|f| f.quick_look_window());
+    let browser = std::mem::replace(&mut ui.handle, quick_look.expect("Quick Look is open"));
+    let around = |ui: &mut Ui| {
+        ui.window(|window, _| window.try_find("preview-match").map(|m| m.bounds().top()))
+    };
+    assert_eq!(around(&mut ui), None, "the first frame has no text yet");
+    // What the platform does when the window's next frame is due.
+    ui.window(|window, cx| window.simulate_next_frame(cx));
+    assert_eq!(around(&mut ui), Some(top), "the text is at the match");
+    ui.handle = browser;
+}
+
 #[gpui_kit::test]
 fn a_table_preview_starts_at_its_left_edge_however_far_the_last_one_was_scrolled(
     cx: &mut TestAppContext,
