@@ -343,7 +343,7 @@ While a search is active, the scope bar shows the controls below. A click on Thi
 | Contents | Search inside files. Results show the first matching line. Letter case, the largest file searched, and the time limit are set in [Settings › Search engine](#search-engine). |
 | Funnel | Open the Nushell filter bar (Cmd+Alt+F). |
 | (i) | Show the Search Syntax dialog (Cmd+/). |
-| Kind menu | Any Kind, Folder, Document, Image, Movie, Audio, Code, or Archive. Disabled for contents searches. |
+| Kind menu | Any Kind, Folder, Document, Image, Movie, Audio, Code, or Archive. Disabled for contents searches. A kind of file goes by the extension, so a name without one, such as `README` or `Makefile`, is found only with Any Kind. Document covers text, PDFs, word processor, spreadsheet, and presentation files, and data such as CSV, JSON, and settings files. An extension you type narrows the kind: with Image, `logo *.svg` finds only the SVG images, and `logo *.txt` finds nothing. |
 
 ### Search syntax
 

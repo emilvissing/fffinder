@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Broad file category. Drives icon choice and the search "Kind" filter.
+/// Broad file category. Drives icon choice and what a preview shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FileKind {
@@ -58,7 +58,8 @@ impl FileKind {
     }
 }
 
-/// The search scope bar's "Kind" picker. Groups several [`FileKind`]s.
+/// The search scope bar's "Kind" picker. A kind is a list of extensions
+/// ([`KindFilter::extensions`]), close to one [`FileKind`] or to several.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KindFilter {
@@ -112,27 +113,38 @@ impl KindFilter {
         })
     }
 
-    pub fn matches(self, kind: FileKind) -> bool {
+    /// Whether the file at `path` is of this kind. Its extension alone says
+    /// so, and [`Self::extensions`] is the one list of them, so a search
+    /// asks fff only for files that this accepts. No file is a folder: a
+    /// search for folders reads them from the index and never asks here.
+    pub fn accepts(self, path: &Path) -> bool {
         match self {
             KindFilter::Any => true,
-            KindFilter::Folder => kind == FileKind::Folder,
-            KindFilter::Document => matches!(kind, FileKind::Pdf | FileKind::Text | FileKind::Data),
-            KindFilter::Image => kind == FileKind::Image,
-            KindFilter::Movie => kind == FileKind::Video,
-            KindFilter::Audio => kind == FileKind::Audio,
-            KindFilter::Code => kind == FileKind::Code,
-            KindFilter::Archive => kind == FileKind::Archive,
+            KindFilter::Folder => false,
+            KindFilter::Document
+            | KindFilter::Image
+            | KindFilter::Movie
+            | KindFilter::Audio
+            | KindFilter::Code
+            | KindFilter::Archive => self.extensions().contains(&extension(path).as_str()),
         }
     }
 
-    /// Extensions passed to fff as `*.ext` constraints (ORed together).
+    /// The extensions of this kind's files, in lowercase: the one list that
+    /// [`Self::accepts`] goes by, and that a search with no extension typed
+    /// passes to fff as `*.ext` constraints (ORed together).
     pub fn extensions(self) -> &'static [&'static str] {
         match self {
             KindFilter::Any | KindFilter::Folder => &[],
+            // What `classify` takes for a PDF, text or data, and
+            // presentations, which it has no kind for. Of the data, the
+            // binary stores (`sqlite`, `db`, `parquet`) and lockfiles are
+            // left out: among documents they would only be in the way.
             KindFilter::Document => &[
                 "pdf", "txt", "md", "markdown", "rtf", "doc", "docx", "odt", "pages", "csv", "tsv",
-                "xlsx", "xls", "numbers", "ppt", "pptx", "key", "epub", "tex", "org", "rst",
-                "json", "toml", "yaml", "yml", "xml",
+                "xlsx", "xls", "ods", "numbers", "ppt", "pptx", "odp", "key", "epub", "tex", "org",
+                "rst", "adoc", "log", "json", "jsonl", "nuon", "toml", "yaml", "yml", "xml", "ini",
+                "plist", "ron", "env", "conf", "cfg",
             ],
             KindFilter::Image => &[
                 "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif", "svg",
@@ -146,14 +158,16 @@ impl KindFilter {
                 "midi",
             ],
             KindFilter::Code => &[
-                "rs", "c", "h", "cpp", "cc", "hpp", "cs", "go", "py", "rb", "js", "mjs", "ts",
-                "tsx", "jsx", "java", "kt", "swift", "m", "zig", "lua", "php", "nu", "sh", "bash",
-                "zsh", "fish", "ps1", "html", "css", "scss", "sql", "vue", "svelte", "dart", "ex",
-                "hs", "ml", "scala", "jl",
+                "rs", "c", "h", "cpp", "cc", "hpp", "cs", "go", "py", "rb", "js", "mjs", "cjs",
+                "ts", "tsx", "jsx", "java", "kt", "swift", "m", "mm", "zig", "lua", "php", "pl",
+                "r", "nu", "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "html", "htm", "css",
+                "scss", "sass", "less", "sql", "vue", "svelte", "dart", "ex", "exs", "erl", "hs",
+                "ml", "clj", "scala", "jl", "vim", "el", "nim", "wgsl", "glsl", "metal", "proto",
+                "graphql", "cmake", "mk",
             ],
             KindFilter::Archive => &[
                 "zip", "tar", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "dmg", "iso", "pkg",
-                "deb", "rpm", "jar", "whl",
+                "deb", "rpm", "jar", "whl", "crate",
             ],
         }
     }
@@ -344,10 +358,64 @@ mod tests {
 
     #[test]
     fn kind_filter_groups() {
-        assert!(KindFilter::Document.matches(FileKind::Pdf));
-        assert!(!KindFilter::Document.matches(FileKind::Image));
-        assert!(KindFilter::Any.matches(FileKind::Folder));
+        let accepts = |kind: KindFilter, name: &str| kind.accepts(Path::new(name));
+        assert!(accepts(KindFilter::Document, "a.pdf"));
+        assert!(accepts(KindFilter::Document, "deck.PPTX"));
+        assert!(accepts(KindFilter::Document, "notes.log"));
+        assert!(!accepts(KindFilter::Document, "a.png"));
+        assert!(!accepts(KindFilter::Document, "x.sqlite"));
+        assert!(!accepts(KindFilter::Document, "README"), "no extension");
+        assert!(accepts(KindFilter::Any, "README"));
+        assert!(!accepts(KindFilter::Folder, "a.pdf"));
         assert_eq!(KindFilter::from_name("movie"), Some(KindFilter::Movie));
+    }
+
+    #[test]
+    fn a_kinds_extensions_are_what_classify_takes_for_that_kind() {
+        let of = |ext: &str| classify(Path::new(&format!("x.{ext}")), false);
+        for (filter, kind) in [
+            (KindFilter::Image, FileKind::Image),
+            (KindFilter::Movie, FileKind::Video),
+            (KindFilter::Audio, FileKind::Audio),
+            (KindFilter::Code, FileKind::Code),
+            (KindFilter::Archive, FileKind::Archive),
+        ] {
+            for ext in filter.extensions() {
+                assert_eq!(of(ext), kind, "{ext}");
+            }
+        }
+        // Document is three of `classify`'s kinds, and presentations, which
+        // it has no kind for.
+        for ext in KindFilter::Document.extensions() {
+            let presentation = ["ppt", "pptx", "odp", "key"].contains(ext);
+            assert!(
+                matches!(of(ext), FileKind::Pdf | FileKind::Text | FileKind::Data) || presentation,
+                "{ext}"
+            );
+        }
+        // `classify` has no list to walk the other way round, so a few of
+        // its extensions stand for the rest.
+        for (filter, name) in [
+            (KindFilter::Code, "page.htm"),
+            (KindFilter::Code, "api.proto"),
+            (KindFilter::Code, "run.bat"),
+            (KindFilter::Archive, "fff-search-0.11.0.crate"),
+            (KindFilter::Document, "events.jsonl"),
+            (KindFilter::Document, "table.nuon"),
+        ] {
+            assert!(filter.accepts(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_extension_is_in_one_kind_only_and_in_lowercase() {
+        let mut seen = std::collections::HashSet::new();
+        for kind in KindFilter::ALL {
+            for ext in kind.extensions() {
+                assert!(seen.insert(*ext), "{ext} is listed twice");
+                assert_eq!(*ext, ext.to_ascii_lowercase(), "accepts compares lowercase");
+            }
+        }
     }
 
     #[test]

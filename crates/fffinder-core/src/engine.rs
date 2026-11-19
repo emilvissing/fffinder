@@ -673,10 +673,7 @@ impl Engine {
         } else {
             user.to_string()
         };
-        for ext in req.kind.extensions() {
-            query.push_str(" *.");
-            query.push_str(ext);
-        }
+        query.push_str(&kind_tokens(req.kind, user));
         if let Some(glob) = &scope_glob {
             query.push(' ');
             query.push_str(glob);
@@ -784,8 +781,7 @@ impl Engine {
             part.total_matched = result.total_matched;
             for (item, score) in result.items.iter().zip(&result.scores) {
                 let path = join_rel(&base, &item.relative_path(picker));
-                let kind = kind::classify(&path, false);
-                if in_scope(&path) && req.kind.matches(kind) && name_ok(&display_name(&path)) {
+                if in_scope(&path) && req.kind.accepts(&path) && name_ok(&display_name(&path)) {
                     part.hits.push(RawHit::file(
                         path,
                         item.size,
@@ -1866,6 +1862,56 @@ impl ParserConfig for WithFolders {
             && (token.starts_with('/') || token.ends_with('/'));
         is_filter.then_some(Constraint::PathSegment(folder))
     }
+}
+
+/// The tokens that keep a search to the files of one kind, to go after the
+/// typed ones: the kind's extensions, each as `*.ext`. fff-search takes the
+/// extensions in a search as alternatives, though, so beside a typed `*.svg`
+/// they would bring back every image. A search with a typed extension gets
+/// none of them. It gets an exclusion for each typed extension the kind
+/// doesn't have instead, so Image finds only the SVG files of `*.svg *.txt`
+/// and nothing for `*.txt`. Were those files left to the check on each hit,
+/// they would use up the hits fff-search is asked for.
+///
+/// # Arguments
+///
+/// * `kind` - The kind searched for
+/// * `user` - What was typed, as fff-search is given it
+///
+/// # Returns
+///
+/// The tokens, each after a space; none for Any Kind and Folder, which have
+/// no extensions
+fn kind_tokens(kind: KindFilter, user: &str) -> String {
+    let mut tokens = String::new();
+    let extensions = kind.extensions();
+    if extensions.is_empty() {
+        return tokens;
+    }
+    let parsed = QueryParser::default().parse(user);
+    let typed: Vec<&str> = parsed
+        .constraints
+        .iter()
+        .filter_map(|constraint| match constraint {
+            Constraint::Extension(ext) => Some(*ext),
+            _ => None,
+        })
+        .collect();
+    if typed.is_empty() {
+        for ext in extensions {
+            tokens.push_str(" *.");
+            tokens.push_str(ext);
+        }
+    }
+    for ext in typed {
+        // A kind goes by a file's extension alone, so one name stands for
+        // every file that has this one.
+        if !kind.accepts(Path::new(&format!("x.{ext}"))) {
+            tokens.push_str(" !*.");
+            tokens.push_str(ext);
+        }
+    }
+    tokens
 }
 
 /// Take the quoted phrases out of a name search, `"tax exemption"` and the
@@ -3005,6 +3051,129 @@ mod tests {
         assert_eq!(res.hits[0].line, 1);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_kind_goes_by_extension_and_a_typed_extension_narrows_it() {
+        let dir = std::env::temp_dir().join(format!("fff-kinds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("brand")).unwrap();
+        for file in [
+            "deck.pptx",
+            "page.htm",
+            "notes.log",
+            "icon.svg",
+            "mark.JPG",
+            "brand/logo.svg",
+            "brand/logo.png",
+            "brand/logo.txt",
+        ] {
+            std::fs::write(dir.join(file), "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let find_in = |query: &str, kind: KindFilter, scope: Option<&str>| {
+            let request = SearchRequest {
+                query: query.into(),
+                scope: scope.map(|folder| dir.join(folder)),
+                kind,
+                limit: 50,
+                ..Default::default()
+            };
+            let hits = engine.search(&request).hits;
+            let mut names: Vec<String> = hits.into_iter().map(|h| h.entry.name).collect();
+            names.sort();
+            names
+        };
+        let find = |query: &str, kind: KindFilter| find_in(query, kind, None);
+
+        // A kind is its list of extensions, whatever `kind::classify` makes
+        // of a file: it has no kind of its own for a presentation.
+        assert_eq!(find("deck", KindFilter::Document), ["deck.pptx"]);
+        assert_eq!(find("page", KindFilter::Code), ["page.htm"]);
+        assert_eq!(find("notes", KindFilter::Document), ["notes.log"]);
+        assert_eq!(find("mark", KindFilter::Image), ["mark.JPG"]);
+
+        // fff-search takes extensions as alternatives, and a typed one isn't
+        // an alternative to the kind's.
+        assert_eq!(find("logo", KindFilter::Image), ["logo.png", "logo.svg"]);
+        assert_eq!(find("logo *.svg", KindFilter::Image), ["logo.svg"]);
+        assert_eq!(find("logo *.SVG", KindFilter::Image), ["logo.svg"]);
+        assert_eq!(find("*.svg", KindFilter::Image), ["icon.svg", "logo.svg"]);
+        assert_eq!(
+            find_in("*.svg", KindFilter::Image, Some("brand")),
+            ["logo.svg"]
+        );
+        assert_eq!(find("logo *.txt", KindFilter::Image), Vec::<String>::new());
+        assert_eq!(find("logo *.svg *.txt", KindFilter::Image), ["logo.svg"]);
+        assert_eq!(find("logo *.txt", KindFilter::Document), ["logo.txt"]);
+        // An exclusion is no extension to keep to, so the kind's still apply.
+        assert_eq!(find("logo !*.png", KindFilter::Image), ["logo.svg"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_typed_extension_takes_the_place_of_the_kinds_own() {
+        let image = |typed: &str| kind_tokens(KindFilter::Image, typed);
+        let all = image("logo");
+        assert!(all.starts_with(" *.png *.jpg "), "{all}");
+        assert_eq!(image("logo *.svg"), "");
+        assert_eq!(image("*.SVG"), "");
+        // One the kind doesn't have is excluded, or fff-search would return
+        // its files in place of the kind's.
+        assert_eq!(image("logo *.svg *.txt"), " !*.txt");
+        assert_eq!(image("logo *.txt"), " !*.txt");
+        assert_eq!(image("*.tar.gz"), " !*.tar.gz");
+        assert_eq!(kind_tokens(KindFilter::Archive, "*.tar.gz"), "");
+        // No extensions to keep to: an exclusion, an escaped token and globs.
+        for typed in [
+            "",
+            "logo !*.png",
+            r"logo \*.svg",
+            "*.test.*",
+            "art/**/*.svg",
+            "*.{svg,txt}",
+        ] {
+            assert_eq!(image(typed), all, "{typed}");
+        }
+        assert_eq!(kind_tokens(KindFilter::Any, "logo *.svg"), "");
+        assert_eq!(kind_tokens(KindFilter::Folder, "logo *.txt"), "");
+    }
+
+    #[test]
+    fn another_typed_extension_doesnt_crowd_out_the_kinds_files() {
+        let dir = std::env::temp_dir().join(format!("fff-kinds-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // More text files than the 2,000 hits fff-search is asked for, each
+        // a better match for "logo" than the one image.
+        for n in 0..2100 {
+            std::fs::write(dir.join(format!("logo-{n:04}.txt")), "").unwrap();
+        }
+        std::fs::write(dir.join("lzzzozzzgzzzo.svg"), "").unwrap();
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(20)));
+        let found = engine.search(&SearchRequest {
+            query: "logo *.txt *.svg".into(),
+            kind: KindFilter::Image,
+            limit: 50,
+            ..Default::default()
+        });
+        let names: Vec<String> = found.hits.into_iter().map(|h| h.entry.name).collect();
+        assert_eq!(names, ["lzzzozzzgzzzo.svg"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
