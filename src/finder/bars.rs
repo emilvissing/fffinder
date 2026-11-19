@@ -71,6 +71,21 @@ impl Finder {
             .border_b_1()
             .border_color(border)
             .text_size(ui(12.))
+            // A press on the bar would give the keyboard to the browser as a
+            // whole, where typed letters and the arrow keys go nowhere. It
+            // stays where it is instead, so the search field goes on taking
+            // letters after a click on Contents. The files get it when the
+            // browser as a whole already has it, or something outside this
+            // browser does, like split view's other pane.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    if this.focus.is_focused(window) || !this.focus.contains_focused(window, cx) {
+                        this.focus_files(window, cx);
+                    }
+                    window.prevent_default();
+                }),
+            )
             .child(div().text_color(muted).child("Search:"))
             .child(
                 chip(

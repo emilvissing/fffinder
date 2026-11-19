@@ -575,6 +575,202 @@ fn scope_bar_tooltips_name_their_shortcuts(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn typing_goes_on_in_the_search_field_after_a_click_in_the_scope_bar(cx: &mut TestAppContext) {
+    let fx = Fixture::new("scope-bar-typing");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("a");
+    // A letter after each click spells the word out.
+    for (control, letter, typed) in [
+        ("by-contents", "t", "at"),
+        ("by-name", "l", "atl"),
+        ("scope-folder", "a", "atla"),
+        ("scope-computer", "s", "atlas"),
+    ] {
+        ui.click(control);
+        ui.type_text(letter);
+        assert_eq!(
+            ui.read(|f| f.query().to_string()),
+            typed,
+            "typed after a click on {control}"
+        );
+    }
+
+    // Down Arrow moves from the field into what the click found.
+    ui.click("by-contents");
+    ui.press("down");
+    assert!(ui.files_focused());
+    assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_click_in_the_scope_bar_leaves_the_keyboard_in_the_files(cx: &mut TestAppContext) {
+    let fx = Fixture::new("scope-bar-files");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("atlas");
+    ui.press("down");
+    assert!(ui.files_focused());
+    for control in ["scope-folder", "scope-computer", "by-name", "by-contents"] {
+        ui.click(control);
+        assert!(ui.files_focused(), "after a click on {control}");
+    }
+
+    // The arrow keys still move through what the last click found.
+    assert!(ui.selected().is_empty());
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_click_in_the_scope_bar_leaves_the_keyboard_in_the_filter_field(cx: &mut TestAppContext) {
+    use gpui_kit::component::WindowExt as _;
+    let fx = Fixture::new("scope-bar-filter");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("atlas");
+    // The funnel opens the filter bar with the keyboard in its field.
+    ui.click("filter-toggle");
+    ui.click("by-contents");
+    assert!(ui.read(|f| f.searches_contents()));
+    let typing_in = ui.window(|window, cx| window.focused_input(cx).map(|field| field.value(cx)));
+    assert_eq!(
+        typing_in.as_deref(),
+        Some(""),
+        "the filter field, which is empty, has the keyboard"
+    );
+}
+
+#[gpui_kit::test]
+fn a_click_in_the_scope_bar_gives_the_files_a_keyboard_that_was_nowhere(cx: &mut TestAppContext) {
+    let fx = Fixture::new("scope-bar-nowhere");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("atlas");
+    // A click on the status bar leaves the keyboard with no part of the
+    // window: the search field has lost it, and the files don't have it.
+    ui.click("status-text");
+    ui.type_text("x");
+    assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
+    assert!(!ui.files_focused());
+
+    ui.click("by-contents");
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_click_in_the_scope_bar_ends_a_rename_with_the_keyboard_in_the_files(cx: &mut TestAppContext) {
+    let fx = Fixture::new("scope-bar-rename");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("roadmap");
+    ui.press("down");
+    ui.press("f2");
+    assert!(ui.exists("rename-input"));
+    ui.type_text("Plan");
+
+    // The keyboard is in the name's field, which doesn't outlive the click:
+    // what was typed is kept, as after a click anywhere else, and the files
+    // have the keyboard again.
+    ui.click("scope-folder");
+    assert_eq!(ui.read(|f| f.search_scope()), SearchScope::Folder);
+    assert!(!ui.exists("rename-input"));
+    assert!(fx.path("Plan.md").exists());
+    assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn the_kind_menu_gives_the_keyboard_back_to_the_search_field(cx: &mut TestAppContext) {
+    let fx = Fixture::new("scope-bar-kind");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let query = |ui: &Ui| ui.read(|f| f.query().to_string());
+    ui.click("search");
+    ui.type_text("at");
+
+    ui.click("kind");
+    ui.click_menu_item("Folder");
+    ui.type_text("l");
+    assert_eq!(query(&ui), "atl", "typed after choosing a kind");
+
+    ui.click("kind");
+    assert!(ui.menu_open());
+    ui.press("escape");
+    assert!(!ui.menu_open());
+    ui.type_text("a");
+    assert_eq!(query(&ui), "atla", "typed after closing the menu");
+
+    // A click elsewhere in the bar closes the menu and does its own work.
+    ui.click("kind");
+    assert!(ui.menu_open());
+    ui.click("scope-folder");
+    assert!(!ui.menu_open());
+    assert_eq!(ui.read(|f| f.search_scope()), SearchScope::Folder);
+    ui.type_text("s");
+    assert_eq!(
+        query(&ui),
+        "atlas",
+        "typed after a click with the menu open"
+    );
+}
+
+#[gpui_kit::test]
+fn closing_search_syntax_gives_the_keyboard_back_to_the_search_field(cx: &mut TestAppContext) {
+    let fx = Fixture::new("scope-bar-help");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("atla");
+    ui.click("search-help");
+    assert!(ui.dialog_open());
+    ui.click("help-done");
+    assert!(!ui.dialog_open());
+    ui.type_text("s");
+    assert_eq!(ui.read(|f| f.query().to_string()), "atlas");
+}
+
+#[gpui_kit::test]
+fn a_click_in_the_other_panes_scope_bar_takes_the_keyboard_to_its_files(cx: &mut TestAppContext) {
+    let fx = Fixture::new("scope-bar-split");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            workspace: true,
+            ..Default::default()
+        },
+    );
+    ui.press(&cmd("\\"));
+    let pane = ui
+        .workspace
+        .clone()
+        .expect("opened with tabs")
+        .read_with(ui.cx, |w, _| w.split_pane().cloned())
+        .expect("split view is on");
+    // The new pane has the keyboard, so this is its search.
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+    assert_eq!(pane.read_with(ui.cx, |f, _| f.query().to_string()), "atlas");
+    // Back in the first pane, in its search field.
+    let first = ui.view.clone();
+    ui.window(|window, cx| first.read(cx).files_focus_handle().focus(window, cx));
+    ui.press(&cmd("f"));
+    ui.type_text("road");
+    assert_eq!(ui.read(|f| f.query().to_string()), "road");
+
+    ui.click_in("split-pane", "by-contents");
+    assert!(pane.read_with(ui.cx, |f, _| f.searches_contents()));
+    let in_its_files = ui.window(|window, cx| pane.read(cx).files_focused(window));
+    assert!(in_its_files, "the pane that was clicked has the keyboard");
+    ui.press("down");
+    let selected: Vec<String> = pane.read_with(ui.cx, |f, _| {
+        f.selected_entries().into_iter().map(|e| e.name).collect()
+    });
+    assert_eq!(selected, ["Project Atlas.txt"]);
+    assert!(ui.selected().is_empty(), "the first pane got no key");
+}
+
+#[gpui_kit::test]
 fn typing_on_after_no_results_keeps_the_message(cx: &mut TestAppContext) {
     let fx = Fixture::new("search-nothing-typing");
     let mut ui = Ui::open(cx, &fx.dir);

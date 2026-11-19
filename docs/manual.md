@@ -332,7 +332,7 @@ From the first letter, the file area shows placeholders in place of the items it
 
 To search one part of the tree, open its folder and turn on **Search Only in "Folder name"**, the folder button left of the search field, before or while you search. From a terminal, `--here` does the same: `fffinder ~/src --query readme --here`.
 
-While a search is active, the scope bar shows:
+While a search is active, the scope bar shows the controls below. A click on This Computer, "Folder name", Name, or Contents leaves the keyboard where it was, so you can go on typing in the search field or moving through the results with the arrow keys.
 
 | Control | What it does |
 | --- | --- |

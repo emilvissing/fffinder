@@ -377,7 +377,6 @@ fn return_after_a_switch_to_contents_waits_for_what_is_inside_files(cx: &mut Tes
 
     // The names found are gone, and the files haven't been looked into yet.
     ui.click_without_settling("by-contents");
-    ui.press_without_settling(&cmd("f"));
     ui.press_without_settling("enter");
     assert!(ui.names().is_empty(), "{:?}", ui.names());
     assert!(!ui.files_focused());
@@ -386,6 +385,25 @@ fn return_after_a_switch_to_contents_waits_for_what_is_inside_files(cx: &mut Tes
     assert_eq!(ui.names(), ["Project Atlas.txt"]);
     assert!(ui.files_focused(), "the results came in");
     assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+}
+
+#[gpui_kit::test]
+fn return_goes_on_waiting_through_a_switch_to_contents(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-return-then-contents");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_without_settling("plain");
+    ui.press_without_settling("enter");
+    // The click leaves the keyboard in the field, where Return still waits,
+    // now for the files that have the word in them.
+    ui.click_without_settling("by-contents");
+    assert!(!ui.files_focused());
+    assert!(ui.selected().is_empty());
+
+    ui.settle();
+    assert_eq!(ui.names(), ["notes.txt"]);
+    assert!(ui.files_focused(), "the results came in");
+    assert_eq!(ui.selected(), ["notes.txt"]);
 }
 
 #[gpui_kit::test]
