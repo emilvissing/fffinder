@@ -958,8 +958,9 @@ impl Engine {
             .split_whitespace()
             .map(str::to_lowercase)
             .collect();
+        let checked = checked_words(&words);
         if wants_apps(req, &words) {
-            let mut apps = app_hits(self.app_list().entries(), &words);
+            let mut apps = app_hits(self.app_list().entries(), &checked);
             // fff-search isn't asked about apps, so they get here what the
             // search as typed gives a name that fits its capitals. Without
             // it, `Safari` lists a file named `Safari.txt` ahead of the app.
@@ -982,10 +983,23 @@ impl Engine {
         }
         // Typo-tolerant matches are a fallback: when some results contain every
         // word as an in-order subsequence (fzf-style), keep only those. With
-        // typos turned off, they're never kept.
-        let strict = |hit: &RawHit| words.iter().all(|w| is_subsequence(w, &hit.rel));
-        if !words.is_empty() && (!settings.typos || raw.iter().any(&strict)) {
-            raw.retain(strict);
+        // typos turned off, they're never kept. Otherwise the near misses
+        // among them are. fff-search lets a word go without two of its
+        // letters or more and have the rest anywhere along the path, so to
+        // it `debug-test.log` matches `bduget` as well as `budget.txt` does.
+        let strict = |hit: &RawHit| checked.iter().all(|w| is_subsequence(w, &hit.rel));
+        if !words.is_empty() {
+            if !settings.typos || raw.iter().any(&strict) {
+                raw.retain(strict);
+            } else {
+                raw.retain(|hit| {
+                    checked.iter().all(|w| {
+                        is_subsequence(w, &hit.rel)
+                            || near_miss(w, &hit.rel, typo_budget(w))
+                            || may_be_spelled_apart(w, &hit.rel)
+                    })
+                });
+            }
         }
         for hit in &mut raw {
             hit.score = rerank(hit, &words);
@@ -2310,10 +2324,12 @@ fn inside_package(path: &Path, scope: Option<&Path>) -> bool {
 }
 
 /// The apps and app folders in `entries` (from an [`AppList`]) whose names
-/// hold every one of a query's fuzzy `words` in order. They're scored about
-/// as fff-search scores a folder by its name: 15 points a letter for a word
-/// found whole and 10 for one spread out, and none for a one-letter query,
-/// which fff-search doesn't score either. [`rerank`] adds the name bonuses.
+/// hold every one of `words` in order: the words a search's results are
+/// checked for ([`checked_words`]), so that a lone letter counts for an app
+/// as it does for a file. They're scored about as fff-search scores a folder
+/// by its name: 15 points a letter for a word found whole and 10 for one
+/// spread out, and none for a one-letter query, which fff-search doesn't
+/// score either. [`rerank`] adds the name bonuses.
 /// An app is one item wherever its folder is, as in Finder, so it's spared
 /// rerank's depth penalty; otherwise `/System/Applications/Utilities/
 /// Terminal.app` would lose to a file in home with the same name.
@@ -2425,6 +2441,100 @@ fn name_has(path: &Path, words: &[String]) -> bool {
 fn is_subsequence(needle: &str, haystack: &str) -> bool {
     let mut chars = haystack.chars();
     needle.chars().all(|c| chars.any(|h| h == c))
+}
+
+/// The words a search's results are checked for: the ones fff-search matched
+/// them by. It leaves out a word shorter than two bytes, which is a lone
+/// letter, digit or symbol, when the search has a longer one, so `a budget`
+/// is `budget` to it. `Desktop/Budget.csv` is then one of its matches with
+/// no `a` in its path, and a check for one would take it out of the budgets.
+/// [`rerank`] still goes by every word, so the names that have an `a` rank
+/// higher. When no word is longer, fff-search matches by none of them, and
+/// the check is all that looks for them.
+///
+/// # Arguments
+///
+/// * `words` - The search's fuzzy words, in lowercase
+fn checked_words(words: &[String]) -> Vec<String> {
+    let longer: Vec<String> = words.iter().filter(|w| w.len() >= 2).cloned().collect();
+    if longer.is_empty() {
+        words.to_vec()
+    } else {
+        longer
+    }
+}
+
+/// How many typos a near miss of `word` may have (see [`near_miss`]): none
+/// in a word of up to three letters, of which one typo leaves too little to
+/// tell what was meant, one in a word of up to seven, and two in a longer
+/// one.
+fn typo_budget(word: &str) -> usize {
+    match word.chars().count() {
+        0..=3 => 0,
+        4..=7 => 1,
+        _ => 2,
+    }
+}
+
+/// Whether `text` has a near miss of `word` in it: letters in a row that are
+/// `word` but for a few typos. A typo is a letter that is wrong, one that is
+/// missing, one too many, or two side by side that have changed places.
+///
+/// fff-search calls something else a typo: a letter of `word` it does
+/// without, while the rest are in order anywhere along a path. Most paths
+/// pass that for a short word, which is why its matches are checked here.
+///
+/// # Arguments
+///
+/// * `word` - A word of the search, in lowercase
+/// * `text` - What it is looked for in, in lowercase
+/// * `typos` - The most typos the letters may have
+fn near_miss(word: &str, text: &str, typos: usize) -> bool {
+    let word: Vec<char> = word.chars().collect();
+    let len = word.len();
+    // Sellers' algorithm. Each letter of `text` has a column, which holds
+    // for every length of `word`'s start the fewest typos between that start
+    // and letters that end at the column's own. `prev` is the column of the
+    // letter before `c`, and `before` the one before that.
+    let mut before = vec![0; len + 1];
+    let mut prev: Vec<usize> = (0..=len).collect();
+    let mut cur = before.clone();
+    let mut last = None;
+    for c in text.chars() {
+        if prev[len] <= typos {
+            return true;
+        }
+        // The letters can begin anywhere in `text`.
+        cur[0] = 0;
+        for i in 1..=len {
+            let wrong = usize::from(word[i - 1] != c);
+            cur[i] = (prev[i - 1] + wrong).min(prev[i] + 1).min(cur[i - 1] + 1);
+            // Two letters that changed places are one typo, not two.
+            if i > 1 && last == Some(word[i - 1]) && word[i - 2] == c {
+                cur[i] = cur[i].min(before[i - 2] + 1);
+            }
+        }
+        std::mem::swap(&mut before, &mut prev);
+        std::mem::swap(&mut prev, &mut cur);
+        last = Some(c);
+    }
+    prev[len] <= typos
+}
+
+/// Whether `text` may have `word` in it in a spelling that [`near_miss`]
+/// takes for typos. A letter beyond ASCII can be one character or two: `é`,
+/// or `e` and its accent. macOS stores the two in a name, and a keyboard
+/// types the one. Counted letter by letter, `señor.txt` is then two typos
+/// from `señor`, and a search for a file by its own name would find nothing.
+/// Nothing here can tell the two spellings apart, so where the word and the
+/// text both have a letter beyond ASCII, fff-search's match stands.
+///
+/// # Arguments
+///
+/// * `word` - A word of the search, in lowercase
+/// * `text` - What it is looked for in, in lowercase
+fn may_be_spelled_apart(word: &str, text: &str) -> bool {
+    !word.is_ascii() && !text.is_ascii()
 }
 
 /// What [`rerank`] takes off for each folder in a hit's path.
@@ -2659,7 +2769,8 @@ fn folder_glob(rel: &Path) -> String {
 }
 
 /// The words a search's names are held to, as [`Engine::search`] makes them
-/// of the search: its fuzzy words in lowercase, those of quoted phrases too.
+/// of the search: its fuzzy words in lowercase, those of quoted phrases too,
+/// without the ones fff-search doesn't match by (see [`checked_words`]).
 /// Unless typos are allowed and no name has them all, a search lists only
 /// what has each in its path with the letters in order.
 fn strict_words(req: &SearchRequest) -> Vec<String> {
@@ -2667,10 +2778,11 @@ fn strict_words(req: &SearchRequest) -> Vec<String> {
     let folders =
         req.kind == KindFilter::Folder || (req.kind == KindFilter::Any && !req.files_only);
     let query = fold_word_case(&query, folders && !folder_tokens_filter(&query));
-    fuzzy_text(&query)
+    let words: Vec<String> = fuzzy_text(&query)
         .split_whitespace()
         .map(str::to_lowercase)
-        .collect()
+        .collect();
+    checked_words(&words)
 }
 
 /// The fuzzy words of a query, without constraint tokens.
@@ -3131,6 +3243,49 @@ mod tests {
     }
 
     #[test]
+    fn a_near_miss_has_a_typo_or_two_in_one_place() {
+        assert!(near_miss("budjet", "budget.txt", 1), "a wrong letter");
+        assert!(near_miss("buget", "budget.txt", 1), "one missing");
+        assert!(near_miss("budgget", "budget.txt", 1), "one too many");
+        assert!(near_miss("bduget", "budget.txt", 1), "two changed places");
+        assert!(near_miss("bduget", "plans/report-budget.txt", 1));
+        assert!(near_miss("москав", "архив/москва.txt", 1));
+        // The d, u, g, e and t are there in order, which is all fff-search
+        // asks, but they spell nothing like the word.
+        assert!(!near_miss("bduget", "debug-test.log", 1));
+        assert!(!near_miss("xqz", "notes.txt", 0));
+        assert!(!near_miss("cat", "cot.txt", 0));
+        assert!(near_miss("cat", "concat.rs", 0));
+
+        assert!(!near_miss("bvdjet", "budget.txt", 1), "two typos");
+        assert!(near_miss("bvdjet", "budget.txt", 2));
+        assert!(near_miss("sttaemnet", "plans/statement.pdf", 2));
+        assert!(!near_miss("sttaemnet", "plans/statement.pdf", 1));
+        // Two that changed places count once, and only side by side.
+        assert!(!near_miss("budteg", "budget.txt", 1));
+        assert!(near_miss("budteg", "budget.txt", 2));
+
+        // A word's letters are counted, not its bytes.
+        let budgets = ["tax", "taxe", "invoice", "invoices", "мск", "москва"].map(typo_budget);
+        assert_eq!(budgets, [0, 1, 1, 2, 0, 1]);
+    }
+
+    #[test]
+    fn only_the_words_fff_search_matches_by_are_checked() {
+        let checked = |words: &[&str]| {
+            let words: Vec<String> = words.iter().map(|word| word.to_string()).collect();
+            checked_words(&words).join(" ")
+        };
+        assert_eq!(checked(&["a", "budget", "2", "-", "tax"]), "budget tax");
+        assert_eq!(checked(&["budget"]), "budget");
+        // A letter beyond ASCII is two bytes or more.
+        assert_eq!(checked(&["a", "ø"]), "ø");
+        assert_eq!(checked(&["a", "b"]), "a b", "nothing longer beside them");
+        assert_eq!(checked(&["a"]), "a");
+        assert_eq!(checked(&[]), "");
+    }
+
+    #[test]
     fn glob_finds_files_inside_bundles() {
         let dir = std::env::temp_dir().join(format!("fff-glob-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3468,6 +3623,12 @@ mod tests {
             "but not in the search location's own path"
         );
         assert_eq!(
+            told(&search("k tax")),
+            paths(&[new]),
+            "and a lone letter beside a longer word isn't looked for at all"
+        );
+        assert_eq!(told(&search("k")), paths(&[]), "alone, it is");
+        assert_eq!(
             told(&search(r#""Tax Return" *.pdf !draft"#)),
             paths(&[new]),
             "a phrase's words are words, and filters are left to the search"
@@ -3708,6 +3869,7 @@ mod tests {
             search("/docs/ todo", any, None),
             search("*.md", any, None),
             search("a", any, None),
+            search("q atlas", any, None),
             search("straße", any, None),
             search("", KindFilter::Image, None),
             search("atlas *.png", KindFilter::Image, None),
@@ -3898,10 +4060,14 @@ mod tests {
     fn quoted_words_match_names_letter_for_letter() {
         let dir = std::env::temp_dir().join(format!("fff-exact-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("token/exemption/coding")).unwrap();
+        for folder in ["tax", "token"] {
+            std::fs::create_dir_all(dir.join(folder).join("exemption/coding")).unwrap();
+        }
         std::fs::write(dir.join("TaxExemptionCertificate.object"), "").unwrap();
         std::fs::write(dir.join("TAX_EXEMPTION_CODE.sql"), "").unwrap();
         // Every letter of "taxexemptionc", in order, across the path.
+        std::fs::write(dir.join("tax/exemption/coding/Handler.java"), "").unwrap();
+        // Every letter of it as well, but the a and the x come last.
         std::fs::write(dir.join("token/exemption/coding/TaxHandler.java"), "").unwrap();
         let engine = Engine::new(EngineOptions {
             roots: vec![dir.clone()],
@@ -3932,7 +4098,15 @@ mod tests {
             engine.set_search_settings(settings);
         };
 
-        assert!(names("taxexemptionc").len() > 1, "fuzzy finds the gaps too");
+        assert_eq!(
+            names("taxexemptionc"),
+            [
+                "Handler.java",
+                "TAX_EXEMPTION_CODE.sql",
+                "TaxExemptionCertificate.object"
+            ],
+            "fuzzy finds the gaps too, where the letters are in order"
+        );
         assert_eq!(
             names(r#""taxexemptionc""#),
             ["TaxExemptionCertificate.object"]
@@ -4107,6 +4281,204 @@ mod tests {
         engine.set_search_settings(settings);
         assert_eq!(names("bduget"), Vec::<String>::new());
         assert_eq!(names("bdgt"), ["budget.txt"], "gaps still match");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_typo_finds_only_near_misses() {
+        let dir = std::env::temp_dir().join(format!("fff-near-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for file in [
+            "budget.txt",
+            // To fff-search as good a match for "bduget" as the budgets:
+            // five of its six letters, in order.
+            "debug-test.log",
+            "notes.txt",
+            "plans/report-budget.txt",
+            "plans/statement.pdf",
+            "Catalog/a.txt",
+            "Catalog/b.txt",
+        ] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let find = |query: &str, folder: Option<&str>, files_only: bool| {
+            let request = SearchRequest {
+                query: query.into(),
+                scope: folder.map(|folder| dir.join(folder)),
+                files_only,
+                limit: 50,
+                ..Default::default()
+            };
+            let hits = engine.search(&request).hits;
+            let mut names: Vec<String> = hits.into_iter().map(|h| h.entry.name).collect();
+            names.sort();
+            names
+        };
+        let names = |query: &str| find(query, None, true);
+        let budgets = ["budget.txt", "report-budget.txt"];
+        let none = Vec::<String>::new();
+
+        assert_eq!(names("bduget"), budgets, "two letters changed places");
+        assert_eq!(names("budjet"), budgets, "a wrong letter");
+        assert_eq!(names("budgget"), budgets, "a letter too many");
+        assert_eq!(names("bvdjet"), none, "two typos in six letters");
+        assert_eq!(names("sttaemnet"), ["statement.pdf"], "two in nine");
+        // fff-search takes any name with an x, a q or a z for a match.
+        assert_eq!(names("xqz"), none);
+        // Only the word with the typo has to be spelled in one place.
+        assert_eq!(names("rpt bduget"), ["report-budget.txt"]);
+        assert_eq!(names("nts bduget"), none);
+        // That place can be a folder's name, as for a word spelled right.
+        assert_eq!(names("catlaog"), ["a.txt", "b.txt"]);
+        // The window's search, which lists folders too.
+        assert_eq!(find("catlaog", None, false), ["Catalog", "a.txt", "b.txt"]);
+        assert_eq!(find("bduget", None, false), budgets);
+        // The name of the folder that is searched isn't one: fff-search
+        // finds "catalog" there for every file in the folder.
+        assert_eq!(find("catalog", Some("Catalog"), true), none);
+
+        let mut settings = engine.search_settings();
+        settings.typos = false;
+        engine.set_search_settings(settings);
+        for query in ["bduget", "budjet", "budgget", "sttaemnet", "rpt bduget"] {
+            assert_eq!(names(query), none, "{query}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_name_that_stores_an_accent_apart_is_found_by_the_letter_typed() {
+        let dir = std::env::temp_dir().join(format!("fff-apart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The first two as macOS stores them: the letter, then its accent.
+        for file in [
+            "sen\u{303}or.txt",
+            "Re\u{301}sume\u{301}.pdf",
+            "senior.txt",
+            "notes.txt",
+        ] {
+            std::fs::write(dir.join(file), "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let names = |query: &str| {
+            let request = SearchRequest {
+                query: query.into(),
+                files_only: true,
+                limit: 50,
+                ..Default::default()
+            };
+            let hits = engine.search(&request).hits;
+            hits.into_iter().map(|h| h.entry.name).collect::<Vec<_>>()
+        };
+        // Whether a search lists the name with accents that ends so,
+        // whichever way the disk spells it back.
+        let accented = |query: &str, end: &str| {
+            let found = names(query);
+            found
+                .iter()
+                .any(|name| !name.is_ascii() && name.ends_with(end))
+        };
+
+        // As a keyboard types them: one character. Letter for letter the
+        // names are two typos away for each accent, which is more than the
+        // words may have.
+        assert!(accented("se\u{f1}or", "or.txt"));
+        assert!(accented("r\u{e9}sum\u{e9}", ".pdf"));
+        // A name in ASCII has one spelling, and is held to it.
+        let found = names("se\u{f1}or");
+        assert!(found.iter().all(|name| !name.is_ascii()), "{found:?}");
+        // So is a word in ASCII, whatever the name has.
+        assert_eq!(names("xqz"), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_lone_letter_beside_longer_words_isnt_looked_for() {
+        let dir = std::env::temp_dir().join(format!("fff-letter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Of the files with "budget" or ".csv" in their paths, only the last
+        // two have an "a" there as well.
+        for file in [
+            "Pictures/photo 1.jpg",
+            "Pictures/photo 2.jpg",
+            "Desktop/Budget.csv",
+            "Documents/annual budget.xlsx",
+            "Documents/tax.csv",
+        ] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let ranked = |query: &str, kind: KindFilter| {
+            let request = SearchRequest {
+                query: query.into(),
+                kind,
+                files_only: kind == KindFilter::Any,
+                limit: 50,
+                ..Default::default()
+            };
+            let hits = engine.search(&request).hits;
+            hits.into_iter().map(|h| h.entry.name).collect::<Vec<_>>()
+        };
+        let find = |query: &str, kind: KindFilter| {
+            let mut names = ranked(query, kind);
+            names.sort();
+            names
+        };
+        let names = |query: &str| find(query, KindFilter::Any);
+        let budgets = ["Budget.csv", "annual budget.xlsx"];
+        let none = Vec::<String>::new();
+
+        for typos in [true, false] {
+            let mut settings = engine.search_settings();
+            settings.typos = typos;
+            engine.set_search_settings(settings);
+            // fff-search matches "budget" and nothing else, so each budget
+            // is a match.
+            assert_eq!(names("a budget"), budgets, "typos: {typos}");
+            assert_eq!(names("budget a"), budgets, "typos: {typos}");
+            let folders = find("k documents", KindFilter::Folder);
+            assert_eq!(folders, ["Documents"], "typos: {typos}");
+            // The names that have the letter are still the first listed.
+            let photos = ranked("photo 2", KindFilter::Any);
+            assert_eq!(photos, ["photo 2.jpg", "photo 1.jpg"], "typos: {typos}");
+            // With no longer word beside them, letters are all there is to
+            // look for, and fff-search leaves it to the check.
+            assert_eq!(names("a *.csv"), ["tax.csv"], "typos: {typos}");
+            assert_eq!(names("q *.csv"), none, "typos: {typos}");
+            assert_eq!(find("d k", KindFilter::Folder), ["Desktop"]);
+            assert_eq!(find("d q", KindFilter::Folder), none, "typos: {typos}");
+        }
+        let mut settings = engine.search_settings();
+        settings.typos = true;
+        engine.set_search_settings(settings);
+        assert_eq!(names("a bduget"), budgets, "and beside a near miss");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4662,6 +5034,10 @@ mod tests {
             ["terminal-notes.txt"]
         );
         assert!(at(&find("notes *.txt", KindFilter::Any, false), "Notes.app").is_none());
+        // A lone letter beside a longer word isn't looked for in an app's
+        // name, as it isn't in a file's path.
+        assert!(at(&find("k safari", KindFilter::Any, false), "Safari.app").is_some());
+        assert_eq!(find("k notes", KindFilter::Folder, false), ["Notes.app"]);
         let scoped = engine.search(&SearchRequest {
             query: "safari".into(),
             scope: Some(home.clone()),
