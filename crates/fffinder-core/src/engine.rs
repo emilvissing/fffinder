@@ -13,18 +13,23 @@ use fff_search::{
     Casing, Constraint, DirSearchConfig, FFFMode, FilePickerOptions, FrecencyTracker, FuzzyQuery,
     FuzzySearchOptions, GitRecencyConfig, GrepConfig, GrepMode, GrepSearchOptions, MixedItemRef,
     PaginationArgs, ParserConfig, QueryParser, QueryTracker, SharedFilePicker, SharedFrecency,
-    SharedQueryTracker, WatchEvent, WatchId, WatchOptions,
+    SharedQueryTracker, WatchEvent, WatchEventKind, WatchId, WatchOptions,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Temporary (outside-of-roots) indexes kept alive, most recent first.
 const MAX_ADHOC: usize = 3;
+
+/// The most files that came or went which [`Changes`] keeps by path. Past
+/// that many between two looks, a search is told only that things changed.
+const CHANGES_KEPT: usize = 512;
 
 #[derive(Debug, Clone)]
 pub struct EngineOptions {
@@ -47,6 +52,9 @@ struct RootIndex {
     /// way (`/private/var/…` for `/var/…` on macOS).
     canonical: PathBuf,
     picker: SharedFilePicker,
+    /// Its watcher reports to the engine's [`Changes`]. Shared by the
+    /// copies of this index, which are all the one picker.
+    followed: Arc<Mutex<bool>>,
 }
 
 impl RootIndex {
@@ -82,7 +90,41 @@ impl RootIndex {
             path: path.to_path_buf(),
             canonical: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
             picker,
+            followed: Arc::default(),
         })
+    }
+
+    /// Have the index's watcher report what it sees to `changes`, if it
+    /// doesn't yet. False while there is no watcher to ask: fff-search starts
+    /// it once the index is finished.
+    fn follow(&self, changes: &Arc<Changes>) -> bool {
+        let mut followed = self.followed.lock().unwrap_or_else(|e| e.into_inner());
+        if *followed {
+            return true;
+        }
+        let guard = self.picker.read().ok();
+        let base = guard
+            .as_ref()
+            .and_then(|g| g.as_ref())
+            .map(|picker| picker.base_path().to_path_buf());
+        drop(guard);
+        let Some(base) = base else {
+            return false;
+        };
+        // The index keeps the callback and the callback only the counts, so
+        // it goes when the index does, and nothing has to end it.
+        let report = Arc::clone(changes);
+        let index = base.clone();
+        *followed = self
+            .picker
+            .watch("", WatchOptions::default(), move |_, events| {
+                report.note(&index, events)
+            })
+            .is_ok();
+        if *followed {
+            changes.reports(base);
+        }
+        *followed
     }
 
     /// `scope`, a folder in this root, spelled the way fff spells the root's
@@ -299,6 +341,127 @@ impl Drop for Watch {
     }
 }
 
+/// What the indexes' watchers have reported since the engine started. The
+/// counts let a window see, for the price of reading two numbers, that a list
+/// it shows may be out of date. The files that came or went of late are kept
+/// by path as well, so a search can tell whether any of them is its business
+/// before it runs again.
+#[derive(Default)]
+struct Changes {
+    /// Files added, removed and renamed so far. A rescan is one more.
+    listed: AtomicU64,
+    /// Those and each report of a file written to, as far as Recents shows
+    /// files where they are.
+    recent: AtomicU64,
+    log: Mutex<ChangeLog>,
+}
+
+#[derive(Default)]
+struct ChangeLog {
+    /// The last files that came or went, oldest first. Each has its number:
+    /// how many changes were counted before it.
+    files: VecDeque<(u64, FileChange)>,
+    /// The count as of the last rescan. A change from before it can't be
+    /// told from the rest any more: by then anything may have changed.
+    rescanned: u64,
+    /// The file that the changes last counted for Recents were all writes
+    /// to, and that count as of the first of them. Empty once anything else
+    /// is counted.
+    written: PathBuf,
+    written_since: u64,
+    /// The folders of the indexes that report, as fff-search spells them,
+    /// which is how the paths of their files begin.
+    bases: Vec<PathBuf>,
+}
+
+/// A file an index took in, let go of, or both, when it was renamed.
+struct FileChange {
+    /// Where it is now, and its path inside the index's folder in lowercase,
+    /// which is where a search's words are looked for.
+    now: Option<(PathBuf, String)>,
+    /// Where it was.
+    was: Option<PathBuf>,
+}
+
+impl Changes {
+    /// Take in what the watcher of the index of `base` reports.
+    fn note(&self, base: &Path, events: &[WatchEvent]) {
+        let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+        for event in events {
+            let (now, was) = match event.kind {
+                WatchEventKind::Rescan => {
+                    self.count_rescan(&mut log);
+                    continue;
+                }
+                WatchEventKind::Modified => {
+                    // Each report counts, as none says what it is of: a file
+                    // written to, or one only opened, which macOS notes with
+                    // the file. What that does to Recents depends on where
+                    // the file is in it, which a window knows, so the file
+                    // is kept for the window to ask after.
+                    if recents_shows(base, &event.path) {
+                        let number = self.recent.fetch_add(1, Ordering::Relaxed);
+                        if log.written != event.path {
+                            log.written.clone_from(&event.path);
+                            log.written_since = number;
+                        }
+                    }
+                    continue;
+                }
+                WatchEventKind::Created => (Some(&event.path), None),
+                WatchEventKind::Removed => (None, Some(&event.path)),
+                WatchEventKind::Renamed => (Some(&event.path), event.from.as_ref()),
+            };
+            if [now, was]
+                .into_iter()
+                .flatten()
+                .any(|path| recents_shows(base, path))
+            {
+                log.written.clear();
+                self.recent.fetch_add(1, Ordering::Relaxed);
+            }
+            let number = self.listed.load(Ordering::Relaxed);
+            let change = FileChange {
+                now: now.map(|path| {
+                    // A search finds no letters above the folder it
+                    // searches, so those of the index's own path are left
+                    // out.
+                    let inside = path.strip_prefix(base).unwrap_or(path);
+                    (path.clone(), inside.to_string_lossy().to_lowercase())
+                }),
+                was: was.cloned(),
+            };
+            log.files.push_back((number, change));
+            if log.files.len() > CHANGES_KEPT {
+                log.files.pop_front();
+            }
+            self.listed.store(number + 1, Ordering::Relaxed);
+        }
+    }
+
+    /// Count a rescan: any file may have come or gone by the time it ends.
+    fn rescan(&self) {
+        let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+        self.count_rescan(&mut log);
+    }
+
+    fn count_rescan(&self, log: &mut ChangeLog) {
+        // No search is told of a file from before a rescan, so none is kept.
+        log.files.clear();
+        log.written.clear();
+        log.rescanned = self.listed.fetch_add(1, Ordering::Relaxed) + 1;
+        self.recent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The index of `base` reports from now on.
+    fn reports(&self, base: PathBuf) {
+        let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+        if !log.bases.contains(&base) {
+            log.bases.push(base);
+        }
+    }
+}
+
 #[derive(Default)]
 struct Indexes {
     roots: Vec<RootIndex>,
@@ -325,6 +488,7 @@ pub struct Engine {
     watch: bool,
     search: RwLock<SearchSettings>,
     generation: AtomicU64,
+    changes: Arc<Changes>,
 }
 
 impl Engine {
@@ -342,6 +506,7 @@ impl Engine {
             watch: options.watch,
             search: RwLock::new(options.search),
             generation: AtomicU64::new(0),
+            changes: Arc::default(),
         });
         engine.set_roots(&options.roots);
         engine
@@ -480,6 +645,172 @@ impl Engine {
                 log::warn!("rescan {}: {err}", root.path.display());
             }
         }
+        // Counted once the scans are under way, so a search made on seeing
+        // the count finds them running and waits for what they bring.
+        self.changes.rescan();
+    }
+
+    /// Have every index report its changes from now on, for [`Self::changes`]
+    /// to count. An index can do that only once fff-search watches its
+    /// folders, which starts when the index is finished, so this is asked
+    /// again until it says that all of them do. With watching off there is
+    /// nothing to wait for. It takes the indexes' locks, so it isn't for a
+    /// window's thread.
+    pub fn follow_changes(&self) -> bool {
+        if !self.watch || !self.search_settings().watch {
+            return true;
+        }
+        let indexes: Vec<RootIndex> = {
+            let indexes = self.read_indexes();
+            indexes
+                .roots
+                .iter()
+                .chain(&indexes.adhoc)
+                .cloned()
+                .collect()
+        };
+        let mut all = true;
+        for index in &indexes {
+            // Each is asked, also after one that isn't ready.
+            all &= index.follow(&self.changes);
+        }
+        all
+    }
+
+    /// How many changes the indexes have reported so far: the files added,
+    /// removed or renamed, and those together with each report of a file
+    /// written to, as far as Recents would show the files. A rescan counts
+    /// in both. They only grow, and reading them takes no lock, so a window
+    /// compares them with what it last saw as often as it likes.
+    pub fn changes(&self) -> (u64, u64) {
+        (
+            self.changes.listed.load(Ordering::Relaxed),
+            self.changes.recent.load(Ordering::Relaxed),
+        )
+    }
+
+    /// The file reported, when reports of that one file being written to are
+    /// all the changes counted for Recents since `seen`, the second count of
+    /// [`Self::changes`] as it was then. Writing to a file puts it first in
+    /// Recents and leaves the rest as it is, so a window that has the file
+    /// first already has nothing to read again, however long the writing
+    /// goes on, as a download's does. Any other window has one change to
+    /// catch up with, and needn't wait for the reports to stop.
+    pub fn only_written_since(&self, seen: u64) -> Option<PathBuf> {
+        let log = self.changes.log.lock().unwrap_or_else(|e| e.into_inner());
+        let alone = !log.written.as_os_str().is_empty() && log.written_since <= seen;
+        alone.then(|| log.written.clone())
+    }
+
+    /// Which of the files that came or went may have changed what a search
+    /// lists. A file that went matters when the search lists it, or a folder
+    /// it was in, which may have gone with it. A renamed file is still in
+    /// the folders that both its paths are in, so those have not. A file
+    /// that came matters when the search could list it, or a folder it
+    /// brought along: when it is in the folder searched, is of the kind, and
+    /// has the search's words, their letters in order, in its path inside
+    /// the search location. That leaves a new near miss with a typo out. One
+    /// the search lists already brings nothing: the window that renamed a
+    /// result has it under its new name by the time the index reports it.
+    /// The search has to run again to know more, and need not when this is
+    /// empty.
+    ///
+    /// # Arguments
+    ///
+    /// * `req` - The search
+    /// * `numbers` - The changes to go through, by their place in the first
+    ///   count of [`Self::changes`]: from the count last gone through to the
+    ///   count now
+    /// * `lists` - Whether the search lists a path, as its results stand
+    ///
+    /// # Returns
+    ///
+    /// The paths, or `None` when anything may have changed: the index was
+    /// rescanned, or more files came and went than are kept
+    pub fn changes_for(
+        &self,
+        req: &SearchRequest,
+        numbers: Range<u64>,
+        lists: impl Fn(&Path) -> bool,
+    ) -> Option<Vec<PathBuf>> {
+        let words = strict_words(req);
+        let log = self.changes.log.lock().unwrap_or_else(|e| e.into_inner());
+        let dropped = log
+            .files
+            .front()
+            .is_some_and(|(oldest, _)| numbers.start < *oldest);
+        if numbers.start < log.rescanned || dropped {
+            return None;
+        }
+        // A folder spelled another way than the paths here begin could hold
+        // any of them, so only one spelled the same narrows them down.
+        let scope = req
+            .scope
+            .as_deref()
+            .filter(|scope| log.bases.iter().any(|base| scope.starts_with(base)));
+        let may_list = |path: &Path, lower: &str| {
+            scope.is_none_or(|scope| path.starts_with(scope) && path != scope)
+                && (req.kind == KindFilter::Folder || req.kind.accepts(path))
+                && words.iter().all(|word| is_subsequence(word, lower))
+        };
+        let mut matter = Vec::new();
+        for (_, change) in log
+            .files
+            .iter()
+            .filter(|(number, _)| numbers.contains(number))
+        {
+            let now = change.now.as_ref();
+            if let Some(was) = &change.was {
+                let left = |folder: &Path| now.is_none_or(|(now, _)| !now.starts_with(folder));
+                let mut folders = was.ancestors().skip(1);
+                if lists(was) || folders.any(|folder| left(folder) && lists(folder)) {
+                    matter.push(was.clone());
+                }
+            }
+            if let Some((now, lower)) = now
+                && may_list(now, lower)
+                && !lists(now)
+            {
+                matter.push(now.clone());
+            }
+        }
+        Some(matter)
+    }
+
+    /// Count a file as its index's watcher reports one that is gone from
+    /// `was`, new at `now`, or renamed from the one to the other, and one
+    /// that is where it was as written to (tests).
+    #[doc(hidden)]
+    pub fn report_change_for_test(&self, was: Option<&Path>, now: Option<&Path>) {
+        let path = now.or(was).expect("a path");
+        let indexes = self.read_indexes();
+        // A watcher's paths begin the way fff-search spells the folder, and
+        // the file may be given that way or the way the location is.
+        let (root, base) = indexes
+            .roots
+            .iter()
+            .find_map(|root| {
+                let guard = root.picker.read().ok()?;
+                let base = guard.as_ref()?.base_path().to_path_buf();
+                let here = path.starts_with(&root.path) || path.starts_with(&base);
+                here.then_some((root, base))
+            })
+            .expect("a file in a search location");
+        let spelled = |path: &Path| root.in_base(path, &base);
+        let event = WatchEvent {
+            path: spelled(path),
+            kind: match (was, now) {
+                (Some(was), Some(now)) if was == now => WatchEventKind::Modified,
+                (Some(_), Some(_)) => WatchEventKind::Renamed,
+                (None, _) => WatchEventKind::Created,
+                (Some(_), None) => WatchEventKind::Removed,
+            },
+            from: was
+                .filter(|was| now.is_some_and(|now| now != *was))
+                .map(spelled),
+        };
+        self.changes.reports(base.clone());
+        self.changes.note(&base, &[event]);
     }
 
     /// `scope` spelled the way a root is, when it is inside one only after
@@ -933,10 +1264,7 @@ impl Engine {
                     continue;
                 }
                 let rel = item.relative_path(picker);
-                if rel
-                    .split('/')
-                    .any(|part| part.starts_with('.') || part == "Library")
-                {
+                if rel.split('/').any(recents_skips) {
                     continue;
                 }
                 let path = join_rel(&base, &rel);
@@ -1906,6 +2234,21 @@ fn page_end(
     }
 }
 
+/// Whether Recents leaves out the files with `part` in their path: a hidden
+/// name, or a `Library` folder.
+fn recents_skips(part: &str) -> bool {
+    part.starts_with('.') || part == "Library"
+}
+
+/// Whether Recents would show `path`, a file in the index of `base`, going
+/// by where the file is: nothing hidden, under a `Library`, or in a package.
+fn recents_shows(base: &Path, path: &Path) -> bool {
+    let rel = path.strip_prefix(base).unwrap_or(path);
+    !rel.components()
+        .any(|part| recents_skips(&part.as_os_str().to_string_lossy()))
+        && !inside_package(path, None)
+}
+
 /// Finder treats bundles (`.app`, `.framework`, …) as single items, so their
 /// contents are hidden unless the search is scoped inside one.
 fn inside_package(path: &Path, scope: Option<&Path>) -> bool {
@@ -2140,6 +2483,21 @@ fn folder_glob(rel: &Path) -> String {
     }
     glob.push_str("**");
     glob
+}
+
+/// The words a search's names are held to, as [`Engine::search`] makes them
+/// of the search: its fuzzy words in lowercase, those of quoted phrases too.
+/// Unless typos are allowed and no name has them all, a search lists only
+/// what has each in its path with the letters in order.
+fn strict_words(req: &SearchRequest) -> Vec<String> {
+    let (query, _) = split_quoted(&req.query);
+    let folders =
+        req.kind == KindFilter::Folder || (req.kind == KindFilter::Any && !req.files_only);
+    let query = fold_word_case(&query, folders && !folder_tokens_filter(&query));
+    fuzzy_text(&query)
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect()
 }
 
 /// The fuzzy words of a query, without constraint tokens.
@@ -2564,6 +2922,7 @@ mod tests {
             path: "/short/tree".into(),
             canonical: "/long/tree".into(),
             picker: SharedFilePicker::default(),
+            followed: Arc::default(),
         };
         let base = Path::new("/long/tree");
         let scope = |s: &str| root.in_base(Path::new(s), base);
@@ -2756,6 +3115,398 @@ mod tests {
                 .get(&dir.join("inner/deep")),
             Some(&5)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a watcher reports of a file, as fff-search hands it over.
+    fn reported(kind: WatchEventKind, path: &str, from: Option<&str>) -> WatchEvent {
+        WatchEvent {
+            path: path.into(),
+            kind,
+            from: from.map(PathBuf::from),
+        }
+    }
+
+    fn no_roots() -> Arc<Engine> {
+        Engine::new(EngineOptions {
+            roots: Vec::new(),
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        })
+    }
+
+    #[test]
+    fn a_search_is_told_which_changes_are_its_business() {
+        let engine = no_roots();
+        let base = Path::new("/home/me");
+        engine.changes.reports(base.to_path_buf());
+        let search = |query: &str| SearchRequest {
+            query: query.into(),
+            ..Default::default()
+        };
+        let lists_nothing = |_: &Path| false;
+        let paths = |paths: &[&str]| Some(paths.iter().map(PathBuf::from).collect::<Vec<_>>());
+
+        // A new file is the business of the searches that could list it.
+        let new = "/home/me/Documents/Tax Return.pdf";
+        engine
+            .changes
+            .note(base, &[reported(WatchEventKind::Created, new, None)]);
+        assert_eq!(engine.changes().0, 1);
+        let told = |req: &SearchRequest| engine.changes_for(req, 0..1, lists_nothing);
+        assert_eq!(told(&search("tax")), paths(&[new]));
+        assert_eq!(told(&search("budget")), paths(&[]));
+        assert_eq!(
+            told(&search("docu RETURN")),
+            paths(&[new]),
+            "words are looked for along the path, whatever their capitals"
+        );
+        assert_eq!(
+            told(&search("home")),
+            paths(&[]),
+            "but not in the search location's own path"
+        );
+        assert_eq!(
+            told(&search(r#""Tax Return" *.pdf !draft"#)),
+            paths(&[new]),
+            "a phrase's words are words, and filters are left to the search"
+        );
+        assert_eq!(told(&search("*.png")), paths(&[new]), "no words to go by");
+        let of_kind = |kind| SearchRequest {
+            kind,
+            ..search("tax")
+        };
+        assert_eq!(told(&of_kind(KindFilter::Document)), paths(&[new]));
+        assert_eq!(told(&of_kind(KindFilter::Image)), paths(&[]));
+        assert_eq!(
+            told(&of_kind(KindFilter::Folder)),
+            paths(&[new]),
+            "a folder it is in may be new too"
+        );
+        let within = |scope: &str| SearchRequest {
+            scope: Some(scope.into()),
+            ..search("tax")
+        };
+        assert_eq!(told(&within("/home/me/Documents")), paths(&[new]));
+        assert_eq!(told(&within("/home/me/Pictures")), paths(&[]));
+        assert_eq!(
+            told(&within("/Users/me/Pictures")),
+            paths(&[new]),
+            "a folder spelled another way than the index's paths may hold it"
+        );
+        assert_eq!(
+            engine.changes_for(&search("tax"), 0..1, |path| path == Path::new(new)),
+            paths(&[]),
+            "a file the search lists already is nothing new to it"
+        );
+
+        // A file that went is the business of the search that lists it, or a
+        // folder it was in.
+        let old = "/home/me/Documents/2019/old.txt";
+        engine
+            .changes
+            .note(base, &[reported(WatchEventKind::Removed, old, None)]);
+        let told = |lists: &dyn Fn(&Path) -> bool| engine.changes_for(&search("tax"), 1..2, lists);
+        assert_eq!(told(&|path| path == Path::new(old)), paths(&[old]));
+        assert_eq!(
+            told(&|path| path == Path::new("/home/me/Documents")),
+            paths(&[old])
+        );
+        assert_eq!(told(&lists_nothing), paths(&[]));
+
+        // A renamed file went from one place and came to another.
+        let renamed = "/home/me/Documents/Taxes.pdf";
+        engine.changes.note(
+            base,
+            &[reported(WatchEventKind::Renamed, renamed, Some(new))],
+        );
+        assert_eq!(
+            engine.changes_for(&search("taxes"), 2..3, |path| path == Path::new(new)),
+            paths(&[new, renamed])
+        );
+        assert_eq!(
+            engine.changes_for(&search("taxes"), 0..3, lists_nothing),
+            paths(&[renamed]),
+            "of the three changes, the one that matters"
+        );
+        assert_eq!(
+            engine.changes_for(&search("taxes"), 3..3, lists_nothing),
+            paths(&[])
+        );
+        // The folder it was renamed in still has it, so that one hasn't gone
+        // with it. A folder it was moved out of may have.
+        let lists_documents = |path: &Path| path == Path::new("/home/me/Documents");
+        assert_eq!(
+            engine.changes_for(&search("budget"), 2..3, lists_documents),
+            paths(&[])
+        );
+        let moved = "/home/me/Archive/Taxes.pdf";
+        engine.changes.note(
+            base,
+            &[reported(WatchEventKind::Renamed, moved, Some(renamed))],
+        );
+        assert_eq!(
+            engine.changes_for(&search("budget"), 3..4, lists_documents),
+            paths(&[renamed])
+        );
+
+        // Only so many are kept by path. Asked about more, the answer is
+        // that anything may have changed.
+        let many: Vec<WatchEvent> = (0..=CHANGES_KEPT)
+            .map(|n| reported(WatchEventKind::Created, &format!("/home/me/{n}.txt"), None))
+            .collect();
+        engine.changes.note(base, &many);
+        let (listed, _) = engine.changes();
+        assert_eq!(listed, 4 + many.len() as u64);
+        let kept = listed - CHANGES_KEPT as u64;
+        let told = |numbers| engine.changes_for(&search("txt"), numbers, lists_nothing);
+        assert_eq!(told(4..listed), None);
+        assert_eq!(told(kept - 1..listed), None);
+        assert_eq!(
+            told(kept..listed).map(|paths| paths.len()),
+            Some(CHANGES_KEPT)
+        );
+        assert_eq!(
+            told(listed - 1..listed),
+            paths(&[&format!("/home/me/{CHANGES_KEPT}.txt")])
+        );
+    }
+
+    #[test]
+    fn a_rescan_counts_as_a_change_to_everything() {
+        let engine = no_roots();
+        let base = Path::new("/home/me");
+        let search = SearchRequest {
+            query: "notes".into(),
+            ..Default::default()
+        };
+        engine.changes.note(
+            base,
+            &[reported(
+                WatchEventKind::Created,
+                "/home/me/notes.txt",
+                None,
+            )],
+        );
+        assert_eq!(engine.changes(), (1, 1));
+        engine.rescan();
+        assert_eq!(engine.changes(), (2, 2));
+        assert_eq!(engine.changes_for(&search, 0..2, |_| false), None);
+        assert_eq!(engine.changes_for(&search, 1..2, |_| false), None);
+        assert_eq!(engine.changes_for(&search, 2..2, |_| false), Some(vec![]));
+
+        // A watcher asks for a rescan of its own when it loses track.
+        engine
+            .changes
+            .note(base, &[reported(WatchEventKind::Rescan, "/home/me", None)]);
+        assert_eq!(engine.changes(), (3, 3));
+        assert_eq!(engine.changes_for(&search, 2..3, |_| false), None);
+        engine.changes.note(
+            base,
+            &[reported(
+                WatchEventKind::Created,
+                "/home/me/more notes.txt",
+                None,
+            )],
+        );
+        assert_eq!(
+            engine.changes_for(&search, 3..4, |_| false),
+            Some(vec![PathBuf::from("/home/me/more notes.txt")])
+        );
+    }
+
+    #[test]
+    fn recents_is_told_of_the_files_it_would_show() {
+        let engine = no_roots();
+        let base = Path::new("/home/me");
+        let note = |kind, path: &str| engine.changes.note(base, &[reported(kind, path, None)]);
+        let written = |path: &str| note(WatchEventKind::Modified, path);
+        // The one file written to since the second count was `seen`.
+        let only = |seen| engine.only_written_since(seen);
+        let file = |path: &str| Some(PathBuf::from(path));
+
+        written("/home/me/notes.txt");
+        assert_eq!(engine.changes(), (0, 1), "no file came or went");
+        written("/home/me/notes.txt");
+        written("/home/me/notes.txt");
+        assert_eq!(engine.changes(), (0, 3));
+        assert_eq!(only(0), file("/home/me/notes.txt"), "over and over");
+        assert_eq!(only(2), file("/home/me/notes.txt"));
+        written("/home/me/todo.txt");
+        assert_eq!(only(2), None, "two files were");
+        assert_eq!(only(3), file("/home/me/todo.txt"));
+        written("/home/me/notes.txt");
+        assert_eq!(engine.changes(), (0, 5));
+        assert_eq!(only(3), None);
+        assert_eq!(only(4), file("/home/me/notes.txt"));
+
+        // Recents leaves these out wherever they are.
+        written("/home/me/.config/app/state.json");
+        written("/home/me/Library/Safari/History.db");
+        written("/home/me/Tools/Editor.app/Contents/Info.plist");
+        assert_eq!(engine.changes(), (0, 5));
+        assert_eq!(only(4), file("/home/me/notes.txt"));
+
+        note(WatchEventKind::Created, "/home/me/new.txt");
+        assert_eq!(engine.changes(), (1, 6));
+        assert_eq!(only(5), None, "a file that came wasn't only written to");
+        written("/home/me/new.txt");
+        assert_eq!(engine.changes(), (1, 7));
+        assert_eq!(only(5), None);
+        assert_eq!(only(6), file("/home/me/new.txt"));
+        note(WatchEventKind::Created, "/home/me/.cache/thumb.png");
+        assert_eq!(engine.changes(), (2, 7), "a search may list a hidden file");
+        assert_eq!(only(6), file("/home/me/new.txt"));
+        note(WatchEventKind::Removed, "/home/me/new.txt");
+        assert_eq!(engine.changes(), (3, 8));
+        assert_eq!(only(7), None);
+
+        written("/home/me/notes.txt");
+        assert_eq!(only(8), file("/home/me/notes.txt"));
+        engine.rescan();
+        assert_eq!(only(8), None, "anything may have changed");
+    }
+
+    #[test]
+    fn what_a_search_lists_is_among_the_changes_that_matter_to_it() {
+        let dir = std::env::temp_dir().join(format!("fff-matter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Docs/Notes")).unwrap();
+        for file in [
+            "Docs/Notes/Project Atlas.txt",
+            "Docs/Notes/todo.md",
+            "Docs/README.md",
+            "Docs/a.png",
+            "atlas.png",
+            "Straße.txt",
+        ] {
+            std::fs::write(dir.join(file), "x").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let search = |query: &str, kind, scope: Option<&str>| SearchRequest {
+            query: query.into(),
+            kind,
+            scope: scope.map(|folder| dir.join(folder)),
+            limit: 50,
+            ..Default::default()
+        };
+        let any = KindFilter::Any;
+        let searches = [
+            search("atlas", any, None),
+            search("Project ATLAS", any, None),
+            search(r#""Project Atlas""#, any, None),
+            search("notes", KindFilter::Folder, None),
+            search("notes/", any, None),
+            search("/docs/ todo", any, None),
+            search("*.md", any, None),
+            search("a", any, None),
+            search("straße", any, None),
+            search("", KindFilter::Image, None),
+            search("atlas *.png", KindFilter::Image, None),
+            search("readme", any, Some("Docs")),
+            search("atlas", KindFilter::Document, Some("Docs/Notes")),
+        ];
+        for req in &searches {
+            let hits = engine.search(req).hits;
+            assert!(!hits.is_empty(), "{:?} lists something", req.query);
+            for hit in hits {
+                // As a watcher reports the item: a file by its own path, and
+                // a folder by a file that is new in it.
+                let path = match hit.entry.is_dir {
+                    true => hit.entry.path.join("new.txt"),
+                    false => hit.entry.path.clone(),
+                };
+                engine.report_change_for_test(None, Some(&path));
+                let (listed, _) = engine.changes();
+                let matter = engine.changes_for(req, listed - 1..listed, |_| false);
+                assert_eq!(
+                    matter.map(|paths| paths.len()),
+                    Some(1),
+                    "{:?} lists {}",
+                    req.query,
+                    hit.entry.path.display()
+                );
+            }
+        }
+
+        // The exception: a near miss with a typo, which a search lists when
+        // no name has its words.
+        let near = search("atlsa", any, None);
+        let hits = engine.search(&near).hits;
+        assert!(!hits.is_empty(), "typos are allowed");
+        engine.report_change_for_test(None, Some(&hits[0].entry.path));
+        let (listed, _) = engine.changes();
+        assert_eq!(
+            engine.changes_for(&near, listed - 1..listed, |_| false),
+            Some(vec![])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_index_reports_the_files_that_come_and_go() {
+        let dir = std::env::temp_dir().join(format!("fff-follow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("kept.txt"), "x").unwrap();
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: true,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        // A watcher answers in its own time, so each step is waited for.
+        let wait_until = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !done() {
+                assert!(Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        // fff-search starts watching once the index is finished.
+        wait_until("the index reports its changes", &|| engine.follow_changes());
+        assert!(engine.follow_changes(), "asking again changes nothing");
+        let req = SearchRequest {
+            query: "fresh".into(),
+            limit: 10,
+            ..Default::default()
+        };
+        let fresh = |path: &Path| display_name(path) == "fresh.txt";
+        // Whether the search is told of `fresh.txt` among the changes since
+        // the first `seen`. It lists the file when `listed` says so.
+        let told = |seen: u64, listed: bool| {
+            let (now, _) = engine.changes();
+            let paths = engine.changes_for(&req, seen..now, |path| listed && fresh(path));
+            paths.is_none_or(|paths| paths.iter().any(|path| fresh(path)))
+        };
+
+        let (before, recent) = engine.changes();
+        std::fs::write(dir.join("fresh.txt"), "new").unwrap();
+        wait_until("the new file is reported", &|| told(before, false));
+        assert!(engine.changes().1 > recent, "Recents would show it");
+        // The index has the file by the time its watcher reports it.
+        assert_eq!(engine.search(&req).hits.len(), 1);
+
+        // A file written to is news for Recents.
+        let (_, recent) = engine.changes();
+        std::fs::write(dir.join("kept.txt"), "more").unwrap();
+        wait_until("the write is counted", &|| engine.changes().1 > recent);
+
+        let (before, _) = engine.changes();
+        std::fs::remove_file(dir.join("fresh.txt")).unwrap();
+        wait_until("the file's removal is reported", &|| told(before, true));
+        assert!(engine.search(&req).hits.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

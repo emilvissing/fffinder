@@ -150,6 +150,9 @@ pub struct Open {
     pub fps: bool,
     /// Open the window with tabs and split view, as the app does.
     pub workspace: bool,
+    /// Have the index watch the fixture, as the app's does. It then follows
+    /// changes on disk in its own time, which a test has to wait for.
+    pub watch: bool,
 }
 
 impl<'a> Ui<'a> {
@@ -163,7 +166,7 @@ impl<'a> Ui<'a> {
             roots: vec![dir.to_path_buf()],
             app_dirs: Vec::new(),
             db_dir: None,
-            watch: false,
+            watch: options.watch,
             search: Default::default(),
         });
         assert!(engine.wait_ready(Duration::from_secs(20)));
@@ -257,6 +260,57 @@ impl<'a> Ui<'a> {
         self.cx
             .update_window(self.handle, |_, window, cx| window.render_frame(cx))
             .ok();
+    }
+
+    /// Let the window look for changes on disk `times` over, and let what
+    /// each look starts run. It looks every two seconds, so that is how far
+    /// the clock goes for each: no further, or a look more could fit in.
+    pub fn look_for_changes(&mut self, times: usize) {
+        for _ in 0..times {
+            self.cx.executor().advance_clock(Duration::from_secs(2));
+            self.cx.run_until_parked();
+        }
+        self.frame();
+    }
+
+    /// Rescan the index and wait for it to hold what's on disk now. The
+    /// engine counts a rescan as a change to everything.
+    pub fn rescan(&mut self) {
+        let engine = self.engine();
+        self.wait_for_index(&engine);
+        engine.rescan();
+        assert!(engine.wait_ready(Duration::from_secs(20)));
+    }
+
+    /// Build the index anew, so that it holds what's on disk now, without
+    /// the engine counting a change. A watcher's index is like that: it has
+    /// a file by the time the watcher's word of the file arrives, which
+    /// [`Self::report_change`] stands in for.
+    pub fn reindex(&mut self) {
+        let engine = self.engine();
+        engine.set_roots(&[]);
+        engine.set_roots(std::slice::from_ref(&self.dir));
+        assert!(engine.wait_ready(Duration::from_secs(20)));
+    }
+
+    /// Have the engine count a file as the index's watcher reports one that
+    /// is gone from `was`, new at `now`, or renamed from one to the other,
+    /// and one that is where it was as written to.
+    pub fn report_change(&mut self, was: Option<&Path>, now: Option<&Path>) {
+        self.engine().report_change_for_test(was, now);
+    }
+
+    pub fn engine(&mut self) -> std::sync::Arc<Engine> {
+        self.window(|_, cx| cx.global::<AppState>().engine.clone())
+    }
+
+    /// Wait until fff-search has finished each index. A rescan asked for
+    /// before that is put off, and waiting for it would return at once.
+    fn wait_for_index(&mut self, engine: &Engine) {
+        let _guard = StepGuard::new("wait for the index".into());
+        while engine.status().iter().any(|root| root.finishing) {
+            std::thread::yield_now();
+        }
     }
 
     pub fn window<R>(&mut self, f: impl FnOnce(&mut Window, &mut App) -> R) -> R {

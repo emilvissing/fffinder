@@ -621,6 +621,534 @@ fn a_smart_folder_opened_twice_is_one_step_back_from_its_folder(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+fn results_show_what_the_index_finds_changed(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-index");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+    ui.select("Project Atlas.txt");
+
+    std::fs::write(fx.path("atlas-two.txt"), "x").unwrap();
+    ui.rescan();
+    // One look sees that the index changed, and the next that it has
+    // stopped changing.
+    ui.look_for_changes(2);
+    let found = ui.names();
+    assert!(found.contains(&"atlas-two.txt".to_string()), "{found:?}");
+    assert_eq!(
+        ui.selected(),
+        ["Project Atlas.txt"],
+        "what was selected still is"
+    );
+
+    std::fs::remove_file(fx.path("atlas-two.txt")).unwrap();
+    ui.rescan();
+    ui.look_for_changes(2);
+    let found = ui.names();
+    assert!(!found.contains(&"atlas-two.txt".to_string()), "{found:?}");
+    assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+}
+
+/// Whether the window lists an item named `name`.
+fn lists(ui: &Ui, name: &str) -> bool {
+    ui.names().iter().any(|listed| listed == name)
+}
+
+#[gpui_kit::test]
+fn results_follow_the_files_the_index_sees_come_and_go(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-files");
+    std::fs::write(fx.path("Projects/atlas/Atlas Notes.txt"), "x").unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+    ui.select("Atlas Notes.txt");
+
+    // A file the search would list is new, and what the index reports are
+    // other files, which the search can't list.
+    std::fs::write(fx.path("atlas-two.txt"), "x").unwrap();
+    ui.reindex();
+    ui.report_change(None, Some(&fx.path("Budget 2.csv")));
+    ui.look_for_changes(2);
+    ui.report_change(None, Some(&fx.path("Budget 3.csv")));
+    ui.look_for_changes(2);
+    assert!(
+        !lists(&ui, "atlas-two.txt"),
+        "the search doesn't run again for a file that is none of its business"
+    );
+
+    // Had it run again for those two, it would be held back for three looks.
+    ui.report_change(None, Some(&fx.path("atlas-two.txt")));
+    ui.look_for_changes(1);
+    assert!(
+        !lists(&ui, "atlas-two.txt"),
+        "it waits for a look at which no more files have come"
+    );
+    ui.look_for_changes(1);
+    assert!(lists(&ui, "atlas-two.txt"), "{:?}", ui.names());
+    assert_eq!(ui.selected(), ["Atlas Notes.txt"]);
+
+    // A result's file is renamed by another program.
+    let (was, now) = (fx.path("atlas-two.txt"), fx.path("atlas-2.txt"));
+    std::fs::rename(&was, &now).unwrap();
+    ui.reindex();
+    ui.report_change(Some(&was), Some(&now));
+    ui.look_for_changes(2);
+    assert!(lists(&ui, "atlas-2.txt"), "{:?}", ui.names());
+    assert!(!lists(&ui, "atlas-two.txt"));
+
+    // And one is removed. The search runs again for it because it lists
+    // the file, whatever the file's name.
+    let gone = fx.path("Projects/atlas/Project Atlas.txt");
+    std::fs::remove_file(&gone).unwrap();
+    ui.reindex();
+    ui.report_change(Some(&gone), None);
+    ui.look_for_changes(2);
+    assert_eq!(
+        {
+            let mut names = ui.names();
+            names.sort();
+            names
+        },
+        ["Atlas Notes.txt", "atlas", "atlas-2.txt"]
+    );
+    assert_eq!(ui.selected(), ["Atlas Notes.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_result_renamed_here_isnt_searched_for_again(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-own-rename");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+
+    // A result is renamed in the window, twice, and the window lists it
+    // under its new name at once. A moment later the index reports it.
+    let folder = fx.path("Projects/atlas");
+    let names = ["Project Atlas.txt", "Atlas Plan.txt", "Atlas Plans.txt"];
+    for renamed in names.windows(2) {
+        let (was, now) = (folder.join(renamed[0]), folder.join(renamed[1]));
+        ui.click(item_id("row", &was));
+        ui.press("f2");
+        ui.type_text(renamed[1].trim_end_matches(".txt"));
+        ui.press("enter");
+        assert!(lists(&ui, renamed[1]), "{:?}", ui.names());
+        ui.reindex();
+        ui.report_change(Some(&was), Some(&now));
+        ui.look_for_changes(2);
+    }
+
+    // Had the search run again for each of the two and come out as it was,
+    // it would be held back for three looks.
+    std::fs::write(fx.path("atlas-two.txt"), "x").unwrap();
+    ui.reindex();
+    ui.report_change(None, Some(&fx.path("atlas-two.txt")));
+    ui.look_for_changes(2);
+    assert!(lists(&ui, "atlas-two.txt"), "{:?}", ui.names());
+    assert!(lists(&ui, "Atlas Plans.txt"));
+}
+
+#[gpui_kit::test]
+fn results_stay_when_what_changed_isnt_among_them(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-none");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+    let before = ui.names();
+
+    // The index reports a file with the search's words in its name, so the
+    // search runs again. The file is gone by then. Another match that the
+    // answer has, which no report was of, stands for the difference between
+    // two answers to one search that many equal matches make: it isn't shown.
+    std::fs::write(fx.path("atlas-two.txt"), "x").unwrap();
+    ui.reindex();
+    ui.report_change(None, Some(&fx.path("atlas-gone.txt")));
+    ui.look_for_changes(2);
+    assert_eq!(ui.names(), before);
+
+    // Changes that leave the results as they were are followed less closely
+    // each time: after the second, the search isn't run again for 3 looks.
+    ui.report_change(None, Some(&fx.path("atlas-gone.txt")));
+    ui.look_for_changes(2);
+    assert_eq!(ui.names(), before);
+    ui.report_change(None, Some(&fx.path("atlas-two.txt")));
+    ui.look_for_changes(3);
+    assert_eq!(ui.names(), before, "not yet");
+    ui.look_for_changes(1);
+    assert!(lists(&ui, "atlas-two.txt"), "{:?}", ui.names());
+
+    // Results that changed are followed closely again.
+    std::fs::write(fx.path("atlas-three.txt"), "x").unwrap();
+    ui.reindex();
+    ui.report_change(None, Some(&fx.path("atlas-three.txt")));
+    ui.look_for_changes(2);
+    assert!(lists(&ui, "atlas-three.txt"), "{:?}", ui.names());
+}
+
+#[gpui_kit::test]
+fn a_search_held_back_is_followed_closely_again_after_a_quiet_minute(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-after-quiet");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+    let before = ui.names();
+
+    // Four times over, the index reports a file with the search's words
+    // that is gone by the time the search runs again. The search comes out
+    // as it was each time, and is held back for 1, 3, 7 and then 15 looks.
+    std::fs::write(fx.path("atlas-two.txt"), "x").unwrap();
+    ui.reindex();
+    let gone = fx.path("atlas-gone.txt");
+    for looks in [2, 2, 4, 8] {
+        ui.report_change(None, Some(&gone));
+        ui.look_for_changes(looks);
+    }
+    assert_eq!(ui.names(), before);
+
+    // A minute passes with nothing that is the search's business. The next
+    // such file holds the search back for one look again, not for 31.
+    ui.look_for_changes(30);
+    ui.report_change(None, Some(&gone));
+    ui.look_for_changes(2);
+    assert_eq!(ui.names(), before);
+    ui.report_change(None, Some(&fx.path("atlas-two.txt")));
+    ui.look_for_changes(2);
+    assert!(lists(&ui, "atlas-two.txt"), "{:?}", ui.names());
+}
+
+#[gpui_kit::test]
+fn results_wait_half_a_minute_at_most_for_files_to_stop_coming(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-stream");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+
+    // Files the search would list come one at every look, as they do while
+    // a folder is being copied. The index has them; its reports follow.
+    let coming: Vec<_> = (1..=16)
+        .map(|n| fx.path(&format!("atlas {n}.txt")))
+        .collect();
+    for file in &coming {
+        std::fs::write(file, "x").unwrap();
+    }
+    ui.reindex();
+    for file in &coming[..15] {
+        ui.report_change(None, Some(file));
+        ui.look_for_changes(1);
+    }
+    assert!(
+        !lists(&ui, "atlas 1.txt"),
+        "it waits for a look at which no more files have come"
+    );
+    ui.report_change(None, Some(&coming[15]));
+    ui.look_for_changes(1);
+    assert!(lists(&ui, "atlas 1.txt"), "{:?}", ui.names());
+    assert!(lists(&ui, "atlas 16.txt"), "{:?}", ui.names());
+
+    // The files that come after that are waited for from the start.
+    std::fs::write(fx.path("atlas 17.txt"), "x").unwrap();
+    ui.reindex();
+    ui.report_change(None, Some(&fx.path("atlas 17.txt")));
+    ui.look_for_changes(1);
+    assert!(!lists(&ui, "atlas 17.txt"), "{:?}", ui.names());
+    ui.look_for_changes(1);
+    assert!(lists(&ui, "atlas 17.txt"), "{:?}", ui.names());
+}
+
+#[gpui_kit::test]
+fn a_search_catches_up_a_minute_after_files_stop_coming(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-after-stream");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+
+    // For some minutes, a file that the search could list is reported at
+    // every look, and is gone by the time the search runs again. The search
+    // comes out as it was each time, so it runs less and less often: after
+    // the sixth time, not for 63 looks.
+    std::fs::write(fx.path("atlas-two.txt"), "x").unwrap();
+    ui.reindex();
+    let gone = fx.path("atlas-gone.txt");
+    for _ in 0..112 {
+        ui.report_change(None, Some(&gone));
+        ui.look_for_changes(1);
+    }
+    assert!(!lists(&ui, "atlas-two.txt"), "{:?}", ui.names());
+
+    // The last file to come is one that is there. A minute after it, the
+    // search has caught up.
+    ui.report_change(None, Some(&fx.path("atlas-two.txt")));
+    ui.look_for_changes(31);
+    assert!(lists(&ui, "atlas-two.txt"), "{:?}", ui.names());
+}
+
+#[gpui_kit::test]
+fn a_search_of_one_folder_follows_that_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-scope");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Projects"));
+    ui.update(|f, _, cx| f.set_scope(SearchScope::Folder, cx));
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+
+    std::fs::write(fx.path("Projects/atlas-inside.txt"), "x").unwrap();
+    std::fs::write(fx.path("atlas-outside.txt"), "x").unwrap();
+    ui.reindex();
+    ui.report_change(None, Some(&fx.path("atlas-outside.txt")));
+    ui.look_for_changes(3);
+    assert!(
+        !lists(&ui, "atlas-inside.txt"),
+        "a file outside the folder is none of the search's business"
+    );
+    ui.report_change(None, Some(&fx.path("Projects/atlas-inside.txt")));
+    ui.look_for_changes(2);
+    assert!(lists(&ui, "atlas-inside.txt"), "{:?}", ui.names());
+    assert!(!lists(&ui, "atlas-outside.txt"));
+}
+
+#[gpui_kit::test]
+fn a_search_run_again_for_the_index_shows_no_sign_of_running(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-quietly");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+
+    std::fs::write(fx.path("atlas-two.txt"), "x").unwrap();
+    ui.rescan();
+    ui.look_for_changes(1);
+    // A window that comes to the front looks at once, and at this look the
+    // search runs again. It is followed a step at a time until its answer
+    // shows, with no time passing.
+    ui.window(|window, _| window.activate_window());
+    let mut steps = 0;
+    while !lists(&ui, "atlas-two.txt") {
+        assert!(ui.cx.executor().tick(), "the search didn't run again");
+        assert!(
+            !ui.read(|f| f.search_in_flight_for_test()),
+            "no spinner, and Return wouldn't wait"
+        );
+        steps += 1;
+    }
+    assert!(steps > 1, "the answer took its time: {steps} steps");
+}
+
+#[gpui_kit::test]
+fn results_follow_what_a_watched_index_reports(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-watcher");
+    let options = Open {
+        watch: true,
+        ..Default::default()
+    };
+    let mut ui = Ui::open_with(cx, &fx.dir, options);
+    let engine = ui.engine();
+    // The watcher answers in its own time, as it does for the app, so each
+    // step here is tried until it has: up to ten seconds.
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // The index starts watching a moment after it's finished, and the window
+    // asks it to report from then on. A file made after that is counted.
+    // The window asks every 400 ms for half a minute, so the clock goes no
+    // faster than lets it keep asking through all of the ten seconds.
+    let counted = (0..200).any(|n| {
+        std::fs::write(fx.path(&format!("made {n}.txt")), "x").unwrap();
+        pause();
+        ui.cx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        ui.cx.run_until_parked();
+        engine.changes().0 > 0
+    });
+    assert!(
+        counted,
+        "the window didn't have the index report its changes"
+    );
+
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+    assert!(!lists(&ui, "atlas-two.txt"));
+    std::fs::write(fx.path("atlas-two.txt"), "x").unwrap();
+    let listed = (0..200).any(|_| {
+        pause();
+        ui.look_for_changes(1);
+        lists(&ui, "atlas-two.txt")
+    });
+    assert!(listed, "{:?}", ui.names());
+
+    std::fs::remove_file(fx.path("atlas-two.txt")).unwrap();
+    let gone = (0..200).any(|_| {
+        pause();
+        ui.look_for_changes(1);
+        !lists(&ui, "atlas-two.txt")
+    });
+    assert!(gone, "{:?}", ui.names());
+
+    // Recents hears of a new file the same way.
+    ui.update(|f, window, cx| f.navigate(Location::Recents, window, cx));
+    assert!(!lists(&ui, "just made.txt"));
+    std::fs::write(fx.path("just made.txt"), "x").unwrap();
+    let listed = (0..200).any(|_| {
+        pause();
+        ui.look_for_changes(1);
+        lists(&ui, "just made.txt")
+    });
+    assert!(listed, "{:?}", ui.names());
+}
+
+#[gpui_kit::test]
+fn a_contents_search_is_left_to_refresh(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-contents");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+    ui.click("by-contents");
+    assert_eq!(ui.names(), ["Project Atlas.txt"]);
+
+    std::fs::write(fx.path("more.txt"), "atlas again").unwrap();
+    ui.rescan();
+    ui.look_for_changes(3);
+    assert_eq!(ui.names(), ["Project Atlas.txt"]);
+    ui.press(&cmd("r"));
+    assert!(lists(&ui, "more.txt"), "{:?}", ui.names());
+}
+
+#[gpui_kit::test]
+fn recents_shows_what_the_index_finds_changed(cx: &mut TestAppContext) {
+    let fx = Fixture::new("recents-follows-index");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("shift-f"));
+    assert!(lists(&ui, "notes.txt"), "{:?}", ui.names());
+    ui.select("notes.txt");
+
+    std::fs::write(fx.path("just made.txt"), "x").unwrap();
+    ui.rescan();
+    ui.look_for_changes(2);
+    assert!(lists(&ui, "just made.txt"), "{:?}", ui.names());
+    assert_eq!(ui.selected(), ["notes.txt"]);
+
+    // In a folder, what the index counts is nobody's business.
+    ui.go_to(&fx.path("Projects"));
+    ui.rescan();
+    ui.look_for_changes(3);
+    assert_eq!(ui.names(), ["atlas"]);
+}
+
+/// Have the fixture's file `name` last written to `minutes` ago.
+fn written_ago(fx: &Fixture, name: &str, minutes: u64) {
+    let ago = std::time::Duration::from_secs(minutes * 60);
+    let file = std::fs::File::options()
+        .write(true)
+        .open(fx.path(name))
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now() - ago)
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn recents_follows_the_files_that_are_written_to(cx: &mut TestAppContext) {
+    let fx = Fixture::new("recents-follows-writes");
+    // Each file was last written to so many minutes ago.
+    let written = |name: &str, minutes: u64| written_ago(&fx, name, minutes);
+    written("notes.txt", 10);
+    written("Roadmap.md", 20);
+    written("Budget.csv", 30);
+    written("Projects/atlas/Project Atlas.txt", 40);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("shift-f"));
+    let newest_first = ["notes.txt", "Roadmap.md", "Budget.csv", "Project Atlas.txt"];
+    assert_eq!(ui.names(), newest_first);
+    let (budget, roadmap) = (fx.path("Budget.csv"), fx.path("Roadmap.md"));
+
+    // A report of a file needn't be of a write: macOS notes with a file
+    // when it was last opened, and that is reported like one. Recents is
+    // read again and comes out as it was.
+    ui.report_change(Some(&budget), Some(&budget));
+    ui.look_for_changes(1);
+    assert_eq!(ui.names(), newest_first);
+
+    // Then the file is written to, with nothing else reported in between.
+    written("Budget.csv", 5);
+    ui.reindex();
+    ui.report_change(Some(&budget), Some(&budget));
+    ui.look_for_changes(2);
+    assert_eq!(ui.names()[0], "Budget.csv", "{:?}", ui.names());
+
+    // Written to again it stays first, so Recents isn't read again. A file
+    // that no report was of stands for what reading it would show.
+    std::fs::write(fx.path("unseen.txt"), "x").unwrap();
+    written("unseen.txt", 50);
+    ui.reindex();
+    ui.report_change(Some(&budget), Some(&budget));
+    ui.look_for_changes(3);
+    assert!(!lists(&ui, "unseen.txt"), "{:?}", ui.names());
+    ui.report_change(None, Some(&fx.path("unseen.txt")));
+    ui.look_for_changes(2);
+    assert!(lists(&ui, "unseen.txt"), "{:?}", ui.names());
+
+    // A file that is being written to isn't waited for, as files that come
+    // one after the other are: a download can take long.
+    let notes = fx.path("notes.txt");
+    written("notes.txt", 2);
+    ui.reindex();
+    ui.report_change(Some(&notes), Some(&notes));
+    ui.look_for_changes(1);
+    assert_eq!(ui.names()[0], "notes.txt", "{:?}", ui.names());
+
+    // A report that leaves Recents as it was holds it back for a look. Once
+    // that look has passed with nothing to catch up with, the next such
+    // report holds it back for one look again, not for three.
+    ui.report_change(Some(&roadmap), Some(&roadmap));
+    ui.look_for_changes(3);
+    ui.report_change(Some(&roadmap), Some(&roadmap));
+    ui.look_for_changes(1);
+    written("Roadmap.md", 1);
+    ui.reindex();
+    ui.report_change(Some(&roadmap), Some(&roadmap));
+    ui.look_for_changes(1);
+    assert_eq!(ui.names()[0], "notes.txt", "held back for a look");
+    ui.look_for_changes(1);
+    assert_eq!(ui.names()[0], "Roadmap.md", "{:?}", ui.names());
+}
+
+#[gpui_kit::test]
+fn recents_waits_half_a_minute_at_most_for_writing_to_stop(cx: &mut TestAppContext) {
+    let fx = Fixture::new("recents-follows-two");
+    let written = |name: &str, minutes: u64| written_ago(&fx, name, minutes);
+    written("notes.txt", 10);
+    written("Roadmap.md", 20);
+    written("Budget.csv", 30);
+    written("Projects/atlas/Project Atlas.txt", 40);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("shift-f"));
+    let newest_first = ["notes.txt", "Roadmap.md", "Budget.csv", "Project Atlas.txt"];
+    assert_eq!(ui.names(), newest_first);
+
+    // Two files are written to in turn, as two downloads are, so every look
+    // brings word of both. The index has them as its newest; reports follow.
+    let (budget, roadmap) = (fx.path("Budget.csv"), fx.path("Roadmap.md"));
+    written("Budget.csv", 2);
+    written("Roadmap.md", 1);
+    ui.reindex();
+    let both_are_written_to = |ui: &mut Ui| {
+        ui.report_change(Some(&budget), Some(&budget));
+        ui.report_change(Some(&roadmap), Some(&roadmap));
+        ui.look_for_changes(1);
+    };
+    for _ in 0..15 {
+        both_are_written_to(&mut ui);
+    }
+    assert_eq!(
+        ui.names(),
+        newest_first,
+        "it waits for a look at which the writing has stopped"
+    );
+    both_are_written_to(&mut ui);
+    assert_eq!(
+        ui.names(),
+        ["Roadmap.md", "Budget.csv", "notes.txt", "Project Atlas.txt"]
+    );
+}
+
+#[gpui_kit::test]
 fn a_capital_in_a_search_word_doesnt_narrow_it(cx: &mut TestAppContext) {
     let fx = Fixture::new("capitals");
     let mut ui = Ui::open(cx, &fx.dir);

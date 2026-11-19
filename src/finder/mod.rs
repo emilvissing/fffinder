@@ -315,6 +315,156 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// The paths of `rows`, in their order.
+fn paths_of(rows: &[Row]) -> impl Iterator<Item = &Path> {
+    rows.iter().map(|row| row.entry.path.as_path())
+}
+
+/// What the index has reported, since a list on screen was made, that the
+/// list may not show yet.
+enum Stale {
+    /// These files came or went.
+    Files(Vec<PathBuf>),
+    /// More than was told file by file, or a rescan: anything may have.
+    Everything,
+}
+
+impl Stale {
+    /// Whether a search's answer differs from the results on screen in what
+    /// the changes account for. Apart from them, two answers to one search
+    /// can differ by which of many equal matches made the list, and results
+    /// that reshuffled whenever a file came or went somewhere would be worse
+    /// than results that stayed.
+    ///
+    /// # Arguments
+    ///
+    /// * `shown` - The results on screen
+    /// * `found` - The answer of the same search made again
+    fn shows_in(&self, shown: &[Row], found: &[Row]) -> bool {
+        match self {
+            Stale::Everything => !paths_of(shown).eq(paths_of(found)),
+            Stale::Files(files) => {
+                let shown: HashSet<&Path> = paths_of(shown).collect();
+                let found: HashSet<&Path> = paths_of(found).collect();
+                // A folder that is listed comes and goes with its files.
+                files.iter().any(|file| {
+                    file.ancestors()
+                        .any(|item| shown.contains(item) != found.contains(item))
+                })
+            }
+        }
+    }
+}
+
+/// How far a list on screen has fallen behind the index, and how making it
+/// again is paced: see [`Finder::check_index_for_changes`].
+#[derive(Default)]
+struct Behind {
+    /// The engine's count of changes as of the last look at it.
+    seen: u64,
+    /// What changed since the list was made, when anything did.
+    stale: Option<Stale>,
+    /// The list is being made again.
+    catching_up: bool,
+    /// How many times in a row the list, made again, came out as it was.
+    misses: u32,
+    /// The looks to let pass before it is made again.
+    wait: u32,
+    /// How many looks it has been behind for.
+    looks_behind: u32,
+    /// How many looks in a row have brought no news of it.
+    quiet_looks: u32,
+}
+
+impl Behind {
+    /// The most files to keep track of one by one.
+    const MOST_FILES: usize = 256;
+
+    /// The most looks to wait for files to stop arriving: half a minute's.
+    const LONGEST_BEHIND: u32 = 15;
+
+    /// The looks without news that make up for a search's misses: a minute's.
+    const QUIET_ENOUGH: u32 = 30;
+
+    /// Up to date with the first `seen` changes the engine counted.
+    fn as_of(seen: u64) -> Behind {
+        Behind {
+            seen,
+            ..Behind::default()
+        }
+    }
+
+    /// The index reported that `files` came or went, or with `None` more
+    /// than it could name.
+    fn fell_behind(&mut self, files: Option<Vec<PathBuf>>) {
+        match (&mut self.stale, files) {
+            (Some(Stale::Files(known)), Some(files))
+                if known.len() + files.len() <= Self::MOST_FILES =>
+            {
+                known.extend(files)
+            }
+            (None, Some(files)) => self.stale = Some(Stale::Files(files)),
+            _ => self.stale = Some(Stale::Everything),
+        }
+    }
+
+    /// Whether to make the list again at this look. It waits for a look that
+    /// brings no `news`, so that files arriving one after the other are
+    /// caught up with once, when they have all arrived. Files that keep
+    /// arriving are waited for half a minute at most: two downloads written
+    /// to in turn would leave Recents without either until one was done.
+    fn due(&mut self, news: bool) -> bool {
+        let waited = self.wait == 0;
+        self.wait = self.wait.saturating_sub(1);
+        if self.stale.is_none() {
+            return false;
+        }
+        self.looks_behind += 1;
+        waited && (!news || self.looks_behind > Self::LONGEST_BEHIND)
+    }
+
+    /// The list was made again and came out `fresh`, or as it was. Changes
+    /// that keep leaving it as it was are followed less and less closely: it
+    /// isn't made again for 1, 3, 7 and up to 127 looks, a little over four
+    /// minutes, so that files coming and going elsewhere don't keep a search
+    /// running.
+    fn caught_up(&mut self, fresh: bool) {
+        self.catching_up = false;
+        self.looks_behind = 0;
+        self.misses = if fresh { 0 } else { self.misses + 1 };
+        self.wait = (1 << self.misses.min(7)) - 1;
+    }
+
+    /// Follow the list closely again once it has kept up for as long as it
+    /// was last held back: what kept changing without changing it has
+    /// stopped. Only for a list that costs little to make again, as Recents
+    /// does, where the index is asked for its newest files and nothing is
+    /// read from the disk.
+    fn forgive(&mut self) {
+        if self.wait == 0 && self.stale.is_none() {
+            self.misses = 0;
+        }
+    }
+
+    /// Follow a search closely again once a minute of looks has brought it
+    /// no `news`, and let what it still has to catch up with wait no longer.
+    /// A search can take two passes over the index and read its results'
+    /// dates from the disk, so it takes more than the wait that Recents is
+    /// forgiven after. Held back until its results changed, though, a search
+    /// would add up the files that came one at a time over a day, and be
+    /// minutes behind for as long as it showed.
+    fn forgive_after_quiet(&mut self, news: bool) {
+        self.quiet_looks = match news {
+            true => 0,
+            false => self.quiet_looks.saturating_add(1),
+        };
+        if self.quiet_looks >= Self::QUIET_ENOUGH {
+            self.misses = 0;
+            self.wait = 0;
+        }
+    }
+}
+
 /// What the window showed when a search began, to go back to when it ends.
 struct BeforeSearch {
     /// The selected items.
@@ -369,6 +519,12 @@ pub struct Finder {
     /// The folder Back left for a search, to select among the results when
     /// they come in, as Back to a folder selects the one it left.
     select_in_results: Option<PathBuf>,
+    /// How far a name search's results are behind the index, and how far
+    /// Recents is.
+    results_behind: Behind,
+    recents_behind: Behind,
+    /// Reads Recents again after the index reported changes.
+    recents_task: Task<()>,
 
     rows: Vec<Row>,
     /// The groups `rows` are in, when the view uses groups.
@@ -601,6 +757,7 @@ impl Finder {
             .iter()
             .map(|p| places::favorite_for(p))
             .collect();
+        let recents_behind = Behind::as_of(engine.changes().1);
         let mut this = Finder {
             focus: cx.focus_handle(),
             files_focus: cx.focus_handle(),
@@ -627,6 +784,9 @@ impl Finder {
             new_search: false,
             before_search: None,
             select_in_results: None,
+            results_behind: Behind::default(),
+            recents_behind,
+            recents_task: Task::ready(()),
             rows: Vec::new(),
             groups: Vec::new(),
             collapsed_groups: HashSet::new(),
@@ -1094,6 +1254,9 @@ impl Finder {
         self.enter_results = None;
         // What a search would go back to when it ends was that place's too.
         self.before_search = None;
+        // Recents, read now, has what the index knows as of now.
+        self.recents_behind = Behind::as_of(self.engine.changes().1);
+        self.recents_task = Task::ready(());
         self.show_folder_view(cx);
         self.columns.clear();
         self.active_column = 0;
@@ -1300,10 +1463,7 @@ impl Finder {
                                 })
                                 .map_err(|err| ListingError::new(err.to_string()))
                         }
-                        Location::Recents => {
-                            engine.wait_ready(Duration::from_secs(60));
-                            Ok((engine.recents(500), None, Vec::new()))
-                        }
+                        Location::Recents => Ok((read_recents(&engine), None, Vec::new())),
                         Location::Results { paths, .. } => Ok((
                             paths.iter().filter_map(FileEntry::from_path).collect(),
                             None,
@@ -1373,6 +1533,7 @@ impl Finder {
     /// read again.
     fn check_for_changes(&mut self, cx: &mut Context<Self>) {
         self.check_tree_for_changes(cx);
+        self.check_index_for_changes(cx);
         let actions = crate::user_actions::actions_path();
         if self.user_actions_stamp.is_some()
             && crate::user_actions::modified(&actions) != self.user_actions_stamp
@@ -1399,6 +1560,103 @@ impl Finder {
             .ok();
         })
         .detach();
+    }
+
+    /// Bring a name search's results, or Recents, up to date with the files
+    /// the index has seen come and go since the list was made. The index's
+    /// watchers count what they see, so a look costs two numbers to compare,
+    /// and nothing more happens while they stand still. When they've moved, a
+    /// search first asks which files it was and whether they're any of its
+    /// business, and only runs again, quietly, for those that are. A contents
+    /// search is left to Refresh: it can run for seconds.
+    fn check_index_for_changes(&mut self, cx: &mut Context<Self>) {
+        let (listed, recent) = self.engine.changes();
+        if self.is_searching() {
+            // A search on its way answers for the index as it is by then,
+            // and what comes after is weighed against its results.
+            if self.search_contents || self.searching || self.results_behind.catching_up {
+                return;
+            }
+            let seen = std::mem::replace(&mut self.results_behind.seen, listed);
+            let mut news = false;
+            if seen != listed {
+                let request = SearchRequest {
+                    query: self.query.clone(),
+                    scope: self.searched_folder(),
+                    kind: self.config.kind_filter,
+                    ..Default::default()
+                };
+                // Looked up only for a file that went, or one that the
+                // search could list, so made only then.
+                let shown = std::cell::OnceCell::new();
+                let lists = |path: &Path| {
+                    shown
+                        .get_or_init(|| paths_of(&self.results).collect::<HashSet<&Path>>())
+                        .contains(path)
+                };
+                let files = self.engine.changes_for(&request, seen..listed, lists);
+                // Files that are none of this search's business are let go.
+                news = files.as_ref().is_none_or(|files| !files.is_empty());
+                if news {
+                    self.results_behind.fell_behind(files);
+                }
+            }
+            self.results_behind.forgive_after_quiet(news);
+            if self.results_behind.due(news) {
+                let stale = self.results_behind.stale.take();
+                self.start_search(false, stale, cx);
+            }
+        } else if matches!(self.history.current(), Location::Recents) {
+            if self.loading || self.recents_behind.catching_up {
+                return;
+            }
+            let seen = std::mem::replace(&mut self.recents_behind.seen, recent);
+            let mut news = false;
+            if seen != recent {
+                // A file that is written to goes first and leaves the rest
+                // as it is. So one that Recents has first already changes
+                // nothing, however often it's written to. One it doesn't
+                // have first is a single change, which isn't waited for to
+                // end: a download can take long.
+                let written = self.engine.only_written_since(seen);
+                let first = self.listing.first().map(|entry| entry.path.as_path());
+                news = written.is_none();
+                if news || written.as_deref() != first {
+                    self.recents_behind.fell_behind(None);
+                }
+            }
+            self.recents_behind.forgive();
+            if self.recents_behind.due(news) {
+                self.reload_recents(cx);
+            }
+        }
+    }
+
+    /// Read Recents again for what the index reported, without a sign that
+    /// it's being read, and show the list if it came out another one.
+    fn reload_recents(&mut self, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        self.recents_behind.stale = None;
+        self.recents_behind.catching_up = true;
+        self.recents_task = cx.spawn(async move |this, cx| {
+            let entries = cx
+                .background_spawn(async move { read_recents(&engine) })
+                .await;
+            this.update(cx, |this, cx| {
+                // A file written to again is where it was: first.
+                let fresh = !this
+                    .listing
+                    .iter()
+                    .map(|entry| &entry.path)
+                    .eq(entries.iter().map(|entry| &entry.path));
+                this.recents_behind.caught_up(fresh);
+                if fresh {
+                    this.listing = entries;
+                    this.rebuild_rows(cx);
+                }
+            })
+            .ok();
+        });
     }
 
     /// Each folder on screen, with its change time as of reading it.
@@ -1840,9 +2098,25 @@ impl Finder {
         self.run_search(debounce, cx);
     }
 
+    /// The folder a search is of, when it isn't of every search location.
+    fn searched_folder(&self) -> Option<PathBuf> {
+        match self.scope {
+            SearchScope::Computer => None,
+            SearchScope::Folder => self.current_folder().map(Path::to_path_buf),
+        }
+    }
+
     /// Run the current query on the background executor; `debounce` waits
     /// 50 ms of typing inactivity first. Stale responses are ignored.
     pub fn run_search(&mut self, debounce: bool, cx: &mut Context<Self>) {
+        self.start_search(debounce, None, cx);
+    }
+
+    /// [`Self::run_search`], or with `stale` the same search made again
+    /// quietly, to catch up with what the index reported. Nothing on screen
+    /// says that one is running, and its answer takes the place of the
+    /// results only where those changes show in it.
+    fn start_search(&mut self, debounce: bool, stale: Option<Stale>, cx: &mut Context<Self>) {
         if self.query.is_empty() {
             return;
         }
@@ -1855,10 +2129,14 @@ impl Finder {
         let abort = self.search_abort.flag();
         let engine = self.engine.clone();
         let engine_for_retry = self.engine.clone();
-        let scope = match self.scope {
-            SearchScope::Computer => None,
-            SearchScope::Folder => self.current_folder().map(Path::to_path_buf),
-        };
+        let quiet = stale.is_some();
+        // The answer is as the index is from here on, and a search asked for
+        // is as good as new: it follows the index closely again.
+        match quiet {
+            true => self.results_behind.catching_up = true,
+            false => self.results_behind = Behind::as_of(self.engine.changes().0),
+        }
+        let scope = self.searched_folder();
         let query = self.query.clone();
         let contents = self.search_contents;
         // A filter applies after the search, so fetch more for it to work on.
@@ -1878,9 +2156,13 @@ impl Finder {
             full_metadata: self.wants_result_metadata(),
             last_opened: self.wants_result_last_opened(),
         };
-        self.searching = true;
+        self.searching = !quiet;
         self.search_waiting = debounce;
-        cx.notify();
+        // A quiet search changes nothing on screen until it has an answer
+        // that does, so the window isn't drawn again for one that hasn't.
+        if !quiet {
+            cx.notify();
+        }
         self.search_task = cx.spawn(async move |this, cx| {
             if debounce {
                 cx.background_executor()
@@ -1899,6 +2181,9 @@ impl Finder {
                         content_search(&engine, &query, scope, request.limit, &abort)
                     } else {
                         let response = engine.search(&request);
+                        // The results stay current only while the indexes
+                        // say when they change.
+                        engine.follow_changes();
                         let rows = response
                             .hits
                             .into_iter()
@@ -1926,6 +2211,22 @@ impl Finder {
                     }
                     this.searching = false;
                     let retry = stats.indexing;
+                    // Results from an index that was still being built give
+                    // way to whatever it answers next, as they do for a
+                    // search that was asked for: only an answer says that
+                    // the index is built.
+                    let partial = this.search_stats.as_ref().is_some_and(|s| s.indexing);
+                    let fresh = partial
+                        || stale
+                            .as_ref()
+                            .is_none_or(|stale| stale.shows_in(&this.results, &rows));
+                    if quiet {
+                        // An index still being built hasn't had its say.
+                        this.results_behind.caught_up(fresh || retry);
+                    }
+                    if !fresh {
+                        return retry;
+                    }
                     this.results = rows;
                     this.content_hits = hits;
                     this.search_stats = Some(stats);
@@ -1966,7 +2267,7 @@ impl Finder {
                 .await;
                 this.update(cx, |this, cx| {
                     if this.search_gen == generation {
-                        this.run_search(false, cx);
+                        this.start_search(false, quiet.then_some(Stale::Everything), cx);
                     }
                 })
                 .ok();
@@ -2098,6 +2399,25 @@ impl Finder {
                 if !keep_going {
                     break;
                 }
+            }
+            // fff-search starts watching an index's folders when the index
+            // is finished, which is about now and takes it a moment. From
+            // then on the index can say when a file comes or goes, which is
+            // what keeps results and Recents current, so it's asked to until
+            // it does. An index that never comes to watch is given up on.
+            for _ in 0..FOLLOW_TRIES {
+                let followed = cx
+                    .background_spawn({
+                        let engine = engine.clone();
+                        async move { engine.follow_changes() }
+                    })
+                    .await;
+                if followed {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(400))
+                    .await;
             }
         });
     }
@@ -3585,6 +3905,18 @@ impl Finder {
             cx.notify();
         }
     }
+}
+
+/// How often a window asks the indexes to report their changes after they
+/// are finished, 400 ms apart: for half a minute.
+const FOLLOW_TRIES: usize = 75;
+
+/// Read Recents from the index once it's ready, and have the index report
+/// its changes from here on, which is how Recents hears of the next ones.
+fn read_recents(engine: &Engine) -> Vec<FileEntry> {
+    engine.wait_ready(Duration::from_secs(60));
+    engine.follow_changes();
+    engine.recents(500)
 }
 
 /// Content search: one row per matching file, showing the first matching line,
