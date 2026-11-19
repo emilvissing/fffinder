@@ -610,6 +610,50 @@ fn search_scope_button(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_contents_search_of_one_folder_finds_its_files_whatever_its_name(cx: &mut TestAppContext) {
+    let fx = Fixture::new("scope-names");
+    // More files have the word than a search may list, and newer files are
+    // looked inside first. The two folders' own are an hour older.
+    for n in 0..40 {
+        std::fs::write(fx.path(&format!("hay-{n:02}.txt")), "zebraneedle\n").unwrap();
+    }
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for folder in ["Tax Returns", "drafts[old]"] {
+        std::fs::create_dir(fx.path(folder)).unwrap();
+        for name in ["one.txt", "two.txt"] {
+            let path = fx.path(folder).join(name);
+            std::fs::write(&path, "zebraneedle\n").unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(hour_ago).unwrap();
+        }
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    let status = |ui: &mut Ui| ui.snapshot("status-text").label().unwrap().to_string();
+    let names = |ui: &Ui| {
+        let mut names = ui.names();
+        names.sort();
+        names
+    };
+    ui.update(|f, _, cx| f.set_result_limit(5, cx));
+
+    ui.go_to(&fx.path("Tax Returns"));
+    ui.click("search-scope");
+    ui.update(|f, _, cx| f.set_query("zebraneedle".into(), true, cx));
+    ui.click("by-contents");
+    assert_eq!(names(&ui), ["one.txt", "two.txt"], "a space in its name");
+    assert_eq!(status(&mut ui), "2 items", "and no more of them to find");
+
+    // Going to another folder ends the search. The next one is of that
+    // folder, and of contents again.
+    ui.go_to(&fx.path("drafts[old]"));
+    ui.update(|f, _, cx| f.set_query("zebraneedle".into(), true, cx));
+    assert_eq!(ui.read(|f| f.search_scope()), SearchScope::Folder);
+    assert!(ui.read(|f| f.searches_contents()));
+    assert_eq!(names(&ui), ["one.txt", "two.txt"], "brackets in its name");
+    assert_eq!(status(&mut ui), "2 items");
+}
+
+#[gpui_kit::test]
 fn typing_on_stops_the_contents_search_for_what_was_typed_before(cx: &mut TestAppContext) {
     let fx = Fixture::new("search-stop");
     let mut ui = Ui::open(cx, &fx.dir);

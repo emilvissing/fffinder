@@ -712,19 +712,16 @@ impl Engine {
         part.total_indexed = picker.live_file_count();
         let scope = req.scope.as_deref().map(|s| root.in_base(s, &base));
 
-        let scope_rel = scope
+        // A glob narrows the search inside fff; the prefix check below is exact.
+        let scope_glob = scope
             .as_deref()
             .filter(|s| *s != base.as_path())
             .and_then(|s| s.strip_prefix(&base).ok())
-            .map(|rel| rel.to_string_lossy().replace('\\', "/"));
-        // A glob narrows the search inside fff; the prefix check below is exact.
-        let scope_glob = scope_rel
-            .as_deref()
-            .filter(|rel| {
-                !rel.chars()
-                    .any(|c| c.is_whitespace() || "*?[]{}!\\".contains(c))
-            })
-            .map(|rel| format!("{rel}/**"));
+            .map(folder_glob);
+        // It goes beside the filters fff reads out of the search, not into
+        // the search's text: there a space in the folder's name would end
+        // it, and a `!` at its start would make it an exclusion.
+        let scope_filter = scope_glob.as_deref().map(Constraint::Glob);
 
         let user = req.query.trim();
         let single_char =
@@ -735,10 +732,6 @@ impl Engine {
             user.to_string()
         };
         query.push_str(&kind_tokens(req.kind, user));
-        if let Some(glob) = &scope_glob {
-            query.push(' ');
-            query.push_str(glob);
-        }
         let mut query = query.trim().to_string();
         // In mixed search a query ending in `/` means "folders only"; keep that
         // for a lone folder token but not for "main src/"-style path filters,
@@ -751,7 +744,7 @@ impl Engine {
 
         // fff ignores one-character words, so over-fetch and filter by name.
         // Over-fetch so the re-rank and package filter have candidates to work with.
-        let fetch = if wide || single_char || (scope_rel.is_some() && scope_glob.is_none()) {
+        let fetch = if wide || single_char {
             limit.max(20_000)
         } else {
             (limit * 4).max(2_000)
@@ -782,16 +775,15 @@ impl Engine {
                     .contains(&fuzzy_text(user).to_lowercase())
         };
 
-        // `query` may have the searched folder's glob in it by now, and a
-        // folder token alone is the whole search all the same.
         let folder_filters = folder_tokens_filter(user);
         if req.kind == KindFilter::Folder {
             let config = WithFolders {
                 only: true,
                 folder_filters,
             };
-            let parsed = QueryParser::new(config).parse(&query);
+            let mut parsed = QueryParser::new(config).parse(&query);
             part.loose = loose_text(&parsed.fuzzy_query, user);
+            parsed.constraints.extend(scope_filter);
             let result = picker.fuzzy_search_directories(&parsed, options);
             part.total_matched = result.total_matched;
             for (item, score) in result.items.iter().zip(&result.scores) {
@@ -810,8 +802,9 @@ impl Engine {
                 only: false,
                 folder_filters,
             };
-            let parsed = QueryParser::new(config).parse(&query);
+            let mut parsed = QueryParser::new(config).parse(&query);
             part.loose = loose_text(&parsed.fuzzy_query, user);
+            parsed.constraints.extend(scope_filter);
             let result = picker.fuzzy_search_mixed(&parsed, qt, options);
             part.total_matched = result.total_matched;
             for (item, score) in result.items.iter().zip(&result.scores) {
@@ -839,8 +832,9 @@ impl Engine {
                 }
             }
         } else {
-            let parsed = QueryParser::default().parse(&query);
+            let mut parsed = QueryParser::default().parse(&query);
             part.loose = loose_text(&parsed.fuzzy_query, user);
+            parsed.constraints.extend(scope_filter);
             let result = picker.fuzzy_search(&parsed, qt, options);
             part.total_matched = result.total_matched;
             for (item, score) in result.items.iter().zip(&result.scores) {
@@ -1022,41 +1016,27 @@ impl Engine {
             // The time limit is for the whole search. fff-search counts from
             // zero each time it is called, so a root gets what the roots
             // before it left, and none is searched once the time is up.
-            let Some(budget_ms) = root_budget_ms(settings.time_limit_secs, started.elapsed())
+            let Some(mut budget_ms) = root_budget_ms(settings.time_limit_secs, started.elapsed())
             else {
                 response.stopped = true;
                 break;
             };
-            let root_started = Instant::now();
+            let mut root_started = Instant::now();
             let base = picker.base_path().to_path_buf();
             let scope = req.scope.as_deref().map(|s| root.in_base(s, &base));
-            let scope_rel = scope
+            // A scope inside this root narrows the search with a glob.
+            let scope_glob = scope
                 .as_deref()
                 .filter(|s| *s != base.as_path())
                 .and_then(|s| s.strip_prefix(&base).ok())
-                .map(|rel| rel.to_string_lossy().replace('\\', "/"));
-            // A scope inside this root narrows the search with a glob.
-            let scope_glob = scope_rel
-                .as_deref()
-                .filter(|rel| !rel.contains(char::is_whitespace))
-                .map(|rel| format!(" {rel}/**"));
-            // No glob is made for a folder with a space in its path: the
-            // whole root is searched, and the hits outside the folder are
-            // dropped below. fff-search ends at a full page wherever its
-            // matches are, so the page is larger than `limit`, to hold
-            // enough of the folder's own.
-            let page_limit = if scope_rel.is_some() && scope_glob.is_none() {
-                limit.saturating_mul(4)
-            } else {
-                limit
-            };
-            let options = GrepSearchOptions {
+                .map(folder_glob);
+            let mut options = GrepSearchOptions {
                 mode: match req.mode {
                     GrepModeKind::Plain => GrepMode::PlainText,
                     GrepModeKind::Regex => GrepMode::Regex,
                     GrepModeKind::Fuzzy => GrepMode::Fuzzy,
                 },
-                page_limit,
+                page_limit: limit,
                 max_matches_per_file: if req.per_file == 0 {
                     limit
                 } else {
@@ -1079,31 +1059,69 @@ impl Engine {
                 ..Default::default()
             };
             let parser = QueryParser::new(GrepConfig);
-            let result = if let [only] = patterns.as_slice() {
-                let text = format!("{only}{}", scope_glob.as_deref().unwrap_or(""));
-                picker.grep(&parser.parse(&text), &options)
-            } else {
-                // Each pattern may carry file constraints; the rest is text.
-                let mut constraints = Vec::new();
-                let mut texts: Vec<String> = Vec::new();
-                let scoped: Vec<String> = patterns
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| match (&scope_glob, i) {
-                        (Some(glob), 0) => format!("{p}{glob}"),
-                        _ => p.to_string(),
-                    })
-                    .collect();
-                for pattern in &scoped {
-                    let query = parser.parse(pattern);
-                    let text = query.grep_text();
-                    constraints.extend(query.constraints);
-                    if !text.is_empty() {
-                        texts.push(text);
+            let result = match (patterns.as_slice(), scope_glob.as_deref()) {
+                ([only], None) => picker.grep(&parser.parse(only), &options),
+                ([only], Some(glob)) => {
+                    let mut query = parser.parse(only);
+                    let filtered = !query.constraints.is_empty();
+                    // The glob goes beside the filters read out of the
+                    // pattern, not into its text: there a space in the
+                    // folder's name would end it, and a `!` at its start
+                    // would make it an exclusion.
+                    query.constraints.push(Constraint::Glob(glob));
+                    // fff-search reads two things from `raw_query`, and
+                    // here it is left with neither. One is the text to look
+                    // for when the pattern is filters and nothing else,
+                    // which is given as that text instead. The other is
+                    // what it looks for when a search with a filter in it
+                    // has found nothing, taking the filter for text after
+                    // all: it then looks in every file of the root, outside
+                    // the folder too, with a time limit of its own. That
+                    // second search is made below, in the folder and in the
+                    // time that is left.
+                    let text = only.trim();
+                    if query.fuzzy_query == FuzzyQuery::Empty {
+                        query.fuzzy_query = FuzzyQuery::Text(text);
+                    }
+                    query.raw_query = "";
+                    let found = picker.grep(&query, &options);
+                    let nothing = found.matches.is_empty() && found.next_file_offset == 0;
+                    let told_to_stop = abort.is_some_and(|flag| flag.load(Ordering::Relaxed));
+                    if !filtered || !nothing || told_to_stop {
+                        found
+                    } else if let Some(left) =
+                        root_budget_ms(settings.time_limit_secs, started.elapsed())
+                    {
+                        // The time limit is judged below by the search
+                        // whose answer is kept.
+                        budget_ms = left;
+                        root_started = Instant::now();
+                        options.time_budget_ms = left;
+                        query.constraints = vec![Constraint::Glob(glob)];
+                        query.fuzzy_query = FuzzyQuery::Text(text);
+                        picker.grep(&query, &options)
+                    } else {
+                        // The time was up before it could be made.
+                        response.stopped = true;
+                        found
                     }
                 }
-                let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-                picker.multi_grep(&refs, &constraints, &options)
+                (several, glob) => {
+                    // Each pattern may carry file constraints; the rest is text.
+                    let mut constraints = Vec::new();
+                    let mut texts: Vec<String> = Vec::new();
+                    for pattern in several {
+                        let query = parser.parse(pattern);
+                        let text = query.grep_text();
+                        constraints.extend(query.constraints);
+                        if !text.is_empty() {
+                            texts.push(text);
+                        }
+                    }
+                    constraints.extend(glob.map(Constraint::Glob));
+                    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+                    picker.multi_grep(&refs, &constraints, &options)
+                }
             };
             // An abort has cut this root short, which isn't the time limit's
             // doing, and the roots after it aren't searched.
@@ -1113,7 +1131,7 @@ impl Engine {
                 && root_started.elapsed() >= Duration::from_millis(budget_ms);
             match page_end(
                 result.matches.len(),
-                page_limit,
+                limit,
                 result.next_file_offset,
                 out_of_time,
             ) {
@@ -2098,6 +2116,32 @@ fn join_rel(base: &Path, rel: &str) -> PathBuf {
     path
 }
 
+/// The glob for everything inside one folder of a root, and for nothing
+/// else. The folder's path is taken letter for letter: each character that
+/// means something in a glob stands in a set of its own, so that
+/// `Tax Returns [2024]` is the folder with that name and not one that ends
+/// in a 2, a 0 or a 4. A backslash is one of them wherever it can be part
+/// of a name, which is everywhere but on Windows. The names are joined with
+/// `/`, as fff has them on every OS.
+///
+/// # Arguments
+///
+/// * `rel` - The folder's path inside the root
+fn folder_glob(rel: &Path) -> String {
+    let mut glob = String::new();
+    for name in rel {
+        for c in name.to_string_lossy().chars() {
+            match c {
+                '*' | '?' | '[' | ']' | '{' | '}' | '\\' => glob.extend(['[', c, ']']),
+                _ => glob.push(c),
+            }
+        }
+        glob.push('/');
+    }
+    glob.push_str("**");
+    glob
+}
+
 /// The fuzzy words of a query, without constraint tokens.
 fn fuzzy_text(query: &str) -> String {
     query
@@ -2968,9 +3012,10 @@ mod tests {
         assert!(alone.iter().all(|h| h.entry.is_dir));
         assert!(alone.iter().any(|h| h.entry.name == "notes"));
         assert!(alone.iter().any(|h| h.entry.name == "meeting-notes"));
-        // It is the whole search when one folder is searched as well, though
-        // fff-search is then given that folder beside it.
+        // It is the whole search when one folder is searched as well, and
+        // lists only folders there too.
         let scoped = hits("archive/", KindFilter::Any, Some("other"));
+        assert!(scoped.iter().all(|h| h.entry.is_dir));
         assert!(scoped.iter().any(|h| h.entry.name == "todo-archive"));
         // A glob stays a glob with a slash at its end, where it matches
         // folders.
@@ -3282,6 +3327,44 @@ mod tests {
         assert_eq!(first("/Docs/ README"), "README.md");
         engine.track_open(&tree.join("Docs/b/readme.md"), Some("/Docs/ README"));
         assert_eq!(first("/Docs/ README"), "readme.md");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Left out on Windows for the reason the two tests above are.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_search_of_one_folder_remembers_what_it_opened() {
+        let dir = std::env::temp_dir().join(format!("fff-opened-here-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tree = dir.join("tree");
+        for file in ["Docs/a/README.md", "Docs/b/readme.md"] {
+            let path = tree.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![tree.clone()],
+            app_dirs: Vec::new(),
+            db_dir: Some(dir.join("db")),
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let first = |query: &str| {
+            let request = SearchRequest {
+                query: query.into(),
+                scope: Some(tree.join("Docs")),
+                limit: 50,
+                ..Default::default()
+            };
+            engine.search(&request).hits.swap_remove(0).entry.name
+        };
+
+        // The folder is no part of the text fff-search is given, so the
+        // search is looked up under the words it was remembered with.
+        assert_eq!(first("README"), "README.md");
+        engine.track_open(&tree.join("Docs/b/readme.md"), Some("README"));
+        assert_eq!(first("README"), "readme.md");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4349,8 +4432,9 @@ mod tests {
     fn a_folder_with_a_space_in_its_name_isnt_crowded_out_of_a_content_search() {
         let dir = std::env::temp_dir().join(format!("fff-grep-space-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        // Such a folder is searched along with everything around it, newer
-        // files first, and what was found elsewhere is dropped afterwards.
+        // fff-search looks inside newer files first and ends at a full page.
+        // Were the folder searched along with everything around it, the
+        // fifty files elsewhere would fill the page before its own came up.
         let folder = dir.join("my folder");
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
@@ -4361,7 +4445,7 @@ mod tests {
             let file = std::fs::File::options().write(true).open(&path).unwrap();
             file.set_modified(hour_ago).unwrap();
         }
-        for n in 0..20 {
+        for n in 0..50 {
             std::fs::write(dir.join(format!("elsewhere/{n}.txt")), "needle\n").unwrap();
         }
         let engine = Engine::new(EngineOptions {
@@ -4372,9 +4456,9 @@ mod tests {
             search: Default::default(),
         });
         assert!(engine.wait_ready(Duration::from_secs(10)));
-        let grep = |limit: usize| {
+        let grep = |patterns: &[&str], limit: usize| {
             engine.grep(&GrepRequest {
-                patterns: vec!["needle".into()],
+                patterns: patterns.iter().map(|p| p.to_string()).collect(),
                 scope: Some(folder.clone()),
                 limit,
                 per_file: 1,
@@ -4382,17 +4466,271 @@ mod tests {
             })
         };
 
-        // Ten matches are found elsewhere before the folder's first. The
-        // search goes on past them, and so gets to every file there is.
-        let found = grep(10);
+        // Only the folder's own files are looked inside.
+        let found = grep(&["needle"], 10);
         assert_eq!(found.hits.len(), 3);
         assert!(!found.more);
+        assert_eq!((found.files_with_matches, found.files_searched), (3, 3));
 
-        // It doesn't go on for ever. Where it ends before the folder's
-        // files are all found, it says that more may match.
-        let cut = grep(2);
-        assert!(cut.hits.len() <= 2);
-        assert!(cut.more);
+        // So the limit counts the folder's files and no others.
+        let cut = grep(&["needle"], 2);
+        assert_eq!(cut.hits.len(), 2);
+        assert!(cut.more, "the folder's third file was left out");
+
+        // Several patterns keep to the folder as one does.
+        let either = grep(&["needle", "zzz"], 10);
+        assert_eq!((either.hits.len(), either.files_with_matches), (3, 3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_with_a_space_in_its_name_isnt_crowded_out_of_a_name_search() {
+        let dir = std::env::temp_dir().join(format!("fff-find-space-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // More names elsewhere match better than fff-search is ever asked
+        // for: 20,000 at the most. Were the folder searched along with
+        // everything around it, its own file would not be among them.
+        let folder = dir.join("my folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("n-e-e-d-l-e.txt"), "").unwrap();
+        for part in 0..21 {
+            let elsewhere = dir.join(format!("elsewhere/{part:02}"));
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            for n in 0..1000 {
+                std::fs::write(elsewhere.join(format!("needle-{n:03}.txt")), "").unwrap();
+            }
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(60)));
+        let found = engine.search(&SearchRequest {
+            query: "needle".into(),
+            scope: Some(folder),
+            limit: 10,
+            ..Default::default()
+        });
+        let names: Vec<&str> = found.hits.iter().map(|h| h.entry.name.as_str()).collect();
+        assert_eq!(names, ["n-e-e-d-l-e.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folders_glob_has_its_name_letter_for_letter() {
+        let glob = |rel: &str| folder_glob(Path::new(rel));
+        assert_eq!(glob("a/b"), "a/b/**");
+        assert_eq!(glob("Tax Returns [2024]"), "Tax Returns [[]2024[]]/**");
+        // Outside a set, nothing else in a name means anything to a glob.
+        assert_eq!(glob("q*r? x{a,b} !new-^"), "q[*]r[?] x[{]a,b[}] !new-^/**");
+        // A backslash is part of a name, except on Windows, where it is
+        // between two names.
+        let backslash = if cfg!(windows) { "a/b/**" } else { r"a[\]b/**" };
+        assert_eq!(glob(r"a\b"), backslash);
+    }
+
+    #[test]
+    fn a_search_of_one_folder_takes_the_folders_name_letter_for_letter() {
+        let dir = std::env::temp_dir().join(format!("fff-scope-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Read as a glob, each name matches the folder beside it and not the
+        // folder that has it: `[slug]` is one of four letters, `{a,b}` is an
+        // `a` or a `b`. Read as one more word of the search, `!new` leaves
+        // out the folder beside it.
+        let mut folders = vec![
+            ("My Docs [old]", "My Docs o"),
+            ("app/[slug]", "app/s"),
+            ("photos[2024]", "photos2"),
+            ("x{a,b}", "xa"),
+            ("!new", "new"),
+        ];
+        // Windows has no names with these in them.
+        if cfg!(unix) {
+            folders.extend([("q*r?", "qxxry"), (r"back\slash", "back/slash")]);
+        }
+        for (folder, beside) in &folders {
+            for parent in [folder, beside] {
+                std::fs::create_dir_all(dir.join(parent)).unwrap();
+                std::fs::write(dir.join(parent).join("needle.txt"), "needle\n").unwrap();
+            }
+        }
+        for parent in ["My Docs [old]", "My Docs o"] {
+            std::fs::create_dir_all(dir.join(parent).join("archive")).unwrap();
+            std::fs::write(dir.join(parent).join("archive/kept.txt"), "kept\n").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+
+        for (folder, _) in &folders {
+            let scope = dir.join(folder);
+            // The root is spelled another way in a hit's path on some
+            // systems, so a hit is known by the end of its path.
+            let own = Path::new(folder).join("needle.txt");
+            // With folders in the results, as in the window, and without.
+            for files_only in [false, true] {
+                let by_name = engine.search(&SearchRequest {
+                    query: "needle".into(),
+                    scope: Some(scope.clone()),
+                    limit: 10,
+                    files_only,
+                    ..Default::default()
+                });
+                let found: Vec<&Path> = by_name.hits.iter().map(|h| &*h.entry.path).collect();
+                assert!(
+                    matches!(found[..], [path] if path.ends_with(&own)),
+                    "{found:?}"
+                );
+                assert_eq!(
+                    by_name.total_matched, 1,
+                    "{folder}: only its own are matched"
+                );
+            }
+
+            for patterns in [vec!["needle"], vec!["needle", "zzz"]] {
+                let inside = engine.grep(&GrepRequest {
+                    patterns: patterns.iter().map(|p| p.to_string()).collect(),
+                    scope: Some(scope.clone()),
+                    limit: 10,
+                    ..Default::default()
+                });
+                let found: Vec<&Path> = inside.hits.iter().map(|h| &*h.path).collect();
+                assert!(
+                    matches!(found[..], [path] if path.ends_with(&own)),
+                    "{found:?}"
+                );
+                assert_eq!(inside.files_with_matches, 1, "{folder} {patterns:?}");
+            }
+        }
+
+        // Folders are kept to the folder the same way.
+        let folders_inside = engine.search(&SearchRequest {
+            query: "archive".into(),
+            scope: Some(dir.join("My Docs [old]")),
+            kind: KindFilter::Folder,
+            limit: 10,
+            ..Default::default()
+        });
+        let names: Vec<&str> = folders_inside
+            .hits
+            .iter()
+            .map(|h| h.entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["archive"]);
+        assert_eq!(folders_inside.total_matched, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_content_search_of_one_folder_never_looks_outside_it() {
+        let dir = std::env::temp_dir().join(format!("fff-grep-inside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("plain")).unwrap();
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        let css = "color: red !important\nsee src/ and *.rs\nif a != b\n";
+        std::fs::write(dir.join("plain/style.css"), css).unwrap();
+        std::fs::write(dir.join("plain/glob.rs"), "let sources = \"*.rs\";\n").unwrap();
+        std::fs::write(dir.join("plain/empty.txt"), "nothing to find\n").unwrap();
+        // The same lines outside the folder, and a `zzz` with the folder's
+        // glob after it. fff-search has a second search of its own for a
+        // search with a filter in it that found nothing: it looks in every
+        // file of the root for all the text it was given, which has the
+        // glob in it when the glob is written into the search.
+        let trap = format!("{css}zzz plain/**\n");
+        std::fs::write(dir.join("other/trap.txt"), trap).unwrap();
+        let index = |root: PathBuf| {
+            let engine = Engine::new(EngineOptions {
+                roots: vec![root],
+                app_dirs: Vec::new(),
+                db_dir: None,
+                watch: false,
+                search: Default::default(),
+            });
+            assert!(engine.wait_ready(Duration::from_secs(10)));
+            engine
+        };
+        let grep = |engine: &Engine, scope: Option<PathBuf>, pattern: &str| {
+            let found = engine.grep(&GrepRequest {
+                patterns: vec![pattern.into()],
+                scope,
+                limit: 10,
+                ..Default::default()
+            });
+            let mut lines: Vec<String> = found
+                .hits
+                .iter()
+                .map(|h| format!("{}:{}", display_name(&h.path), h.line))
+                .collect();
+            lines.sort();
+            (lines, found.files_with_matches)
+        };
+        let engine = index(dir.clone());
+        let inside = |pattern: &str| grep(&engine, Some(dir.join("plain")), pattern);
+
+        // A word the folder doesn't have is found nowhere.
+        assert_eq!(inside("zzz"), (vec![], 0));
+
+        // Text that reads as a filter is searched for as it is: an
+        // exclusion, a folder, and an extension, which is looked for in the
+        // files that have it when one of those has the text.
+        assert_eq!(inside("!important"), (vec!["style.css:1".into()], 1));
+        assert_eq!(inside("src/"), (vec!["style.css:2".into()], 1));
+        assert_eq!(inside("*.rs"), (vec!["glob.rs:1".into()], 1));
+        assert_eq!(inside("a != b"), (vec!["style.css:3".into()], 1));
+        // Beside a word, a filter that leaves the folder no file with the
+        // word in it was text after all.
+        assert_eq!(inside("and *.rs"), (vec!["style.css:2".into()], 1));
+
+        // Each is what fff-search finds by itself where the folder is all
+        // there is to search: as a search location of its own.
+        let alone = index(dir.join("plain"));
+        for pattern in ["zzz", "!important", "src/", "*.rs", "a != b", "and *.rs"] {
+            assert_eq!(inside(pattern), grep(&alone, None, pattern), "{pattern}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_content_search_told_to_stop_makes_no_second_search_of_a_folder() {
+        let dir = std::env::temp_dir().join(format!("fff-grep-again-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/notes.md"), "list the *.rs files\n").unwrap();
+        std::fs::write(dir.join("docs/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("outside.md"), "nothing\n").unwrap();
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let request = GrepRequest {
+            patterns: vec!["the *.rs".into()],
+            scope: Some(dir.join("docs")),
+            limit: 10,
+            ..Default::default()
+        };
+        // No file with the extension has the word, so the search is made
+        // again for all of its text.
+        assert_eq!(engine.grep(&request).hits.len(), 1);
+
+        // fff-search looks at the flag at every eighth file, so the first
+        // search, of the one file with the extension, runs to its end. The
+        // second isn't made.
+        let stop = Arc::new(AtomicBool::new(true));
+        let cut = engine.grep_cancellable(&request, Some(&stop));
+        assert!(cut.hits.is_empty());
+        assert!(!cut.stopped, "it wasn't the time limit that ended it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

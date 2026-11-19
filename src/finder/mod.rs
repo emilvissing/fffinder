@@ -3478,9 +3478,9 @@ fn content_search(
     let mut lines = HashMap::new();
     // Two things tell that files were left out, and each misses a case. The
     // engine says so when it stopped with files unsearched, which it didn't
-    // if the file too many was the last one there is. And that file is
-    // missing when the engine dropped hits after it stopped, as it does the
-    // ones outside the folder searched.
+    // if the file too many was the last one there is. And that file doesn't
+    // show as one too many when another that was found makes no row, having
+    // gone since it was looked inside.
     let mut truncated = response.more;
     for hit in response.hits {
         if !seen.insert(hit.path.clone()) {
@@ -4097,10 +4097,10 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("fffinder-content-more-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        // The engine looks inside newer files first. It searches a folder
-        // with a space in its name along with everything around it, for a
-        // while past its limit, and drops what it found elsewhere. So the
-        // files it stops at for a limit of two are all outside the folder.
+        // The engine looks inside newer files first, and fifty of them have
+        // the word outside the folder. A search of the folder looks inside
+        // its own files and no others, though its name has a space in it,
+        // so what a limit of two leaves out is one of them.
         let folder = dir.join("my folder");
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
@@ -4111,7 +4111,7 @@ mod tests {
             let file = std::fs::File::options().write(true).open(&path).unwrap();
             file.set_modified(hour_ago).unwrap();
         }
-        for n in 0..20 {
+        for n in 0..50 {
             std::fs::write(dir.join(format!("elsewhere/{n}.txt")), "needle\n").unwrap();
         }
         let engine = Engine::new(EngineOptions {
@@ -4124,15 +4124,13 @@ mod tests {
         assert!(engine.wait_ready(Duration::from_secs(10)));
         let abort = Arc::new(AtomicBool::new(false));
         let (rows, _, stats) = content_search(&engine, "needle", Some(folder.clone()), 2, &abort);
-        assert!(rows.len() <= 2);
+        assert_eq!(rows.len(), 2);
         assert!(
             stats.truncated,
-            "{} of the folder's 3 files and no word of more",
-            rows.len()
+            "2 of the folder's 3 files and no word of more"
         );
 
-        // With room for them, the folder's files are all found behind the
-        // twenty that come first.
+        // With room for them, the folder's files are all listed.
         let (rows, _, stats) = content_search(&engine, "needle", Some(folder), 10, &abort);
         assert_eq!(rows.len(), 3);
         assert!(!stats.truncated);
