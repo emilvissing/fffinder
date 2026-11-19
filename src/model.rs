@@ -115,10 +115,69 @@ impl<'a> Moves<'a> {
     }
 }
 
+/// A search as the window showed it, for Back and Forward to run again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedSearch {
+    pub query: String,
+    /// It looked only in the folder the window showed.
+    pub in_folder: bool,
+    /// It looked inside files, not at their names.
+    pub contents: bool,
+}
+
+/// What the window is called while it shows a search for `words`.
+pub fn search_title(words: &str) -> String {
+    format!("Searching “{words}”")
+}
+
+/// What the window showed at one point in its history: a place, or a search
+/// made there. The place a search was made in always comes before the search,
+/// whether or not the history holds a visit for that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Visit {
+    pub location: Location,
+    pub search: Option<SavedSearch>,
+}
+
+impl Visit {
+    fn seen(&self) -> Seen<'_> {
+        Seen {
+            location: &self.location,
+            search: self.search.as_ref(),
+        }
+    }
+}
+
+/// A [`Visit`] where the history has it, to compare and list without a copy.
+#[derive(Clone, Copy, PartialEq)]
+struct Seen<'a> {
+    location: &'a Location,
+    search: Option<&'a SavedSearch>,
+}
+
+impl Seen<'_> {
+    fn visit(self) -> Visit {
+        Visit {
+            location: self.location.clone(),
+            search: self.search.cloned(),
+        }
+    }
+}
+
+/// Where Back or Forward led.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    /// The window showed another location on the way, or shows one now. It
+    /// doesn't between a search and the place the search was made in.
+    pub moved: bool,
+    /// The search to show there.
+    pub search: Option<SavedSearch>,
+}
+
 #[derive(Debug, Clone)]
 pub struct History {
-    back: Vec<Location>,
-    forward: Vec<Location>,
+    back: Vec<Visit>,
+    forward: Vec<Visit>,
     current: Location,
 }
 
@@ -135,82 +194,166 @@ impl History {
         &self.current
     }
 
-    /// Go somewhere new; clears the forward stack. No-op for the current location.
-    pub fn navigate(&mut self, to: Location) -> bool {
-        if to == self.current {
-            return false;
-        }
-        let from = std::mem::replace(&mut self.current, to);
-        self.back.push(from);
-        self.forward.clear();
-        true
-    }
-
-    pub fn back(&mut self) -> bool {
-        self.back_by(1)
-    }
-
-    pub fn forward(&mut self) -> bool {
-        self.forward_by(1)
-    }
-
-    /// Go back `steps` places at once, to where that many single steps would
-    /// lead. With fewer places than that to go back to, it stays where it
-    /// is rather than go as far as it can.
+    /// Go somewhere new; clears the forward stack. A search the window shows
+    /// stays behind for Back to return to. No-op for the current location,
+    /// unless a search is left there.
     ///
     /// # Arguments
     ///
-    /// * `steps` - How many places to go back; 1 is the nearest
+    /// * `to` - Where to go
+    /// * `live` - The search the window shows, which going there ends
     ///
     /// # Returns
     ///
-    /// Whether it went there
-    pub fn back_by(&mut self, steps: usize) -> bool {
-        if steps == 0 || steps > self.back.len() {
+    /// Whether the location changed
+    pub fn navigate(&mut self, to: Location, live: Option<SavedSearch>) -> bool {
+        let moved = to != self.current;
+        if !moved && live.is_none() {
             return false;
         }
-        for to in self.back.drain(self.back.len() - steps..).rev() {
-            self.forward.push(std::mem::replace(&mut self.current, to));
-        }
-        true
+        let from = std::mem::replace(&mut self.current, to);
+        self.back.push(Visit {
+            location: from,
+            search: live,
+        });
+        self.forward.clear();
+        moved
     }
 
-    /// Go forward `steps` places at once, or stay put when there are fewer,
+    pub fn back(&mut self, live: Option<SavedSearch>) -> Option<Step> {
+        self.back_by(1, live)
+    }
+
+    pub fn forward(&mut self, live: Option<SavedSearch>) -> Option<Step> {
+        self.forward_by(1, live)
+    }
+
+    /// Go back `steps` steps at once, to where that many single steps would
+    /// lead. With fewer steps than that to go back, it stays where it is
+    /// rather than go as far as it can. Back from a search is one step, to
+    /// the place the search was made in, and Forward returns to the search.
+    ///
+    /// # Arguments
+    ///
+    /// * `steps` - How many steps to go back; 1 is the nearest
+    /// * `live` - The search the window shows
+    ///
+    /// # Returns
+    ///
+    /// What to show now, or `None` if it went nowhere
+    pub fn back_by(&mut self, steps: usize, live: Option<SavedSearch>) -> Option<Step> {
+        self.go(false, steps, live)
+    }
+
+    /// Go forward `steps` steps at once, or stay put when there are fewer,
     /// as [`History::back_by`] does.
     ///
     /// # Arguments
     ///
-    /// * `steps` - How many places to go forward; 1 is the nearest
+    /// * `steps` - How many steps to go forward; 1 is the nearest
+    /// * `live` - The search the window shows
     ///
     /// # Returns
     ///
-    /// Whether it went there
-    pub fn forward_by(&mut self, steps: usize) -> bool {
-        if steps == 0 || steps > self.forward.len() {
-            return false;
+    /// What to show now, or `None` if it went nowhere
+    pub fn forward_by(&mut self, steps: usize, live: Option<SavedSearch>) -> Option<Step> {
+        self.go(true, steps, live)
+    }
+
+    /// Whether Back leads anywhere, which from a search it always does.
+    pub fn can_back(&self, live: Option<&SavedSearch>) -> bool {
+        self.steps(false, live).next().is_some()
+    }
+
+    /// Whether Forward leads anywhere.
+    pub fn can_forward(&self, live: Option<&SavedSearch>) -> bool {
+        self.steps(true, live).next().is_some()
+    }
+
+    /// What Back leads to, a step at a time and nearest first: places, and
+    /// searches the window left. From a search, the nearest is the place it
+    /// was made in.
+    ///
+    /// # Arguments
+    ///
+    /// * `live` - The search the window shows
+    pub fn back_list<'a>(
+        &'a self,
+        live: Option<&'a SavedSearch>,
+    ) -> impl Iterator<Item = Visit> + 'a {
+        self.steps(false, live).map(|(_, stop)| stop.visit())
+    }
+
+    /// What Forward leads to, a step at a time and nearest first.
+    ///
+    /// # Arguments
+    ///
+    /// * `live` - The search the window shows
+    pub fn forward_list<'a>(
+        &'a self,
+        live: Option<&'a SavedSearch>,
+    ) -> impl Iterator<Item = Visit> + 'a {
+        self.steps(true, live).map(|(_, stop)| stop.visit())
+    }
+
+    /// The steps Back takes from what the window shows, or with `forward`
+    /// the steps Forward takes: where each one leads, and how many of the
+    /// visits that way are left beyond it. The lists and the steps
+    /// themselves are both made from this, so that they can't disagree.
+    fn steps<'a>(
+        &'a self,
+        forward: bool,
+        live: Option<&'a SavedSearch>,
+    ) -> impl Iterator<Item = (usize, Seen<'a>)> + 'a {
+        let visits = if forward { &self.forward } else { &self.back };
+        let mut left = visits.len();
+        let mut shown = Seen {
+            location: &self.current,
+            search: live,
+        };
+        std::iter::from_fn(move || {
+            left = past_repeats(&visits[..left], shown);
+            if shown.search.is_some() && !forward {
+                // Back from a search leads to the place it was made in.
+                shown.search = None;
+            } else {
+                left = left.checked_sub(1)?;
+                shown = visits[left].seen();
+            }
+            Some((left, shown))
+        })
+    }
+
+    /// Take `steps` steps back, or with `forward` that many forward, if
+    /// there are as many.
+    fn go(&mut self, forward: bool, steps: usize, live: Option<SavedSearch>) -> Option<Step> {
+        let mut stops: Vec<(usize, Visit)> = self
+            .steps(forward, live.as_ref())
+            .take(steps)
+            .map(|(left, stop)| (left, stop.visit()))
+            .collect();
+        if stops.len() < steps {
+            return None;
         }
-        for to in self.forward.drain(self.forward.len() - steps..).rev() {
-            self.back.push(std::mem::replace(&mut self.current, to));
-        }
-        true
-    }
-
-    pub fn can_back(&self) -> bool {
-        !self.back.is_empty()
-    }
-
-    pub fn can_forward(&self) -> bool {
-        !self.forward.is_empty()
-    }
-
-    /// The places Back leads to, nearest first.
-    pub fn back_list(&self) -> impl Iterator<Item = &Location> {
-        self.back.iter().rev()
-    }
-
-    /// The places Forward leads to, nearest first.
-    pub fn forward_list(&self) -> impl Iterator<Item = &Location> {
-        self.forward.iter().rev()
+        let moved = stops.iter().any(|(_, stop)| stop.location != self.current);
+        // No steps at all leave no stop to go to.
+        let (left, to) = stops.pop()?;
+        let (taken, given) = match forward {
+            true => (&mut self.forward, &mut self.back),
+            false => (&mut self.back, &mut self.forward),
+        };
+        taken.truncate(left);
+        // The other way now leads through what the window showed, and
+        // through each stop that was passed, again.
+        given.push(Visit {
+            location: std::mem::replace(&mut self.current, to.location),
+            search: live,
+        });
+        given.extend(stops.into_iter().map(|(_, stop)| stop));
+        Some(Step {
+            moved,
+            search: to.search,
+        })
     }
 
     /// Keep up with items that moved: every folder in the history that was
@@ -224,11 +367,26 @@ impl History {
     ///
     /// Whether the current location moved
     pub fn follow(&mut self, moves: &Moves) -> bool {
-        for location in self.back.iter_mut().chain(&mut self.forward) {
-            location.follow(moves);
+        for visit in self.back.iter_mut().chain(&mut self.forward) {
+            visit.location.follow(moves);
         }
         self.current.follow(moves)
     }
+}
+
+/// How many of `visits` are left after the nearest ones, at the end, that
+/// are just `shown`, which is what the window shows by then. Going to one of
+/// those would change nothing, so it's no step. One is there when a search
+/// that Back or Forward led to was ended some other way, as with Escape; when
+/// the same search was made twice in a row, as by opening a Smart Folder
+/// again; and behind a search that Forward led to from the place it was made
+/// in.
+fn past_repeats(visits: &[Visit], shown: Seen<'_>) -> usize {
+    let repeats = visits
+        .iter()
+        .rev()
+        .take_while(|visit| visit.seen() == shown);
+    visits.len() - repeats.count()
 }
 
 /// Multi-selection over a list of items, Finder style: click, Cmd-click
@@ -434,17 +592,17 @@ mod tests {
         let b = Location::Folder("/b".into());
         let c = Location::Folder("/c".into());
         let mut h = History::new(a.clone());
-        assert!(h.navigate(b.clone()));
-        assert!(!h.navigate(b.clone()));
-        h.navigate(c.clone());
-        assert!(h.back());
+        assert!(h.navigate(b.clone(), None));
+        assert!(!h.navigate(b.clone(), None));
+        h.navigate(c.clone(), None);
+        assert!(h.back(None).is_some());
         assert_eq!(h.current(), &b);
-        assert!(h.can_forward());
-        h.navigate(Location::Recents);
-        assert!(!h.can_forward());
-        assert!(h.back() && h.back());
+        assert!(h.can_forward(None));
+        h.navigate(Location::Recents, None);
+        assert!(!h.can_forward(None));
+        assert!(h.back(None).is_some() && h.back(None).is_some());
         assert_eq!(h.current(), &a);
-        assert!(!h.back());
+        assert!(h.back(None).is_none());
     }
 
     #[test]
@@ -452,38 +610,38 @@ mod tests {
         let [a, b, c, d] = ["/a", "/b", "/c", "/d"].map(|p| Location::Folder(p.into()));
         let mut h = History::new(a.clone());
         for to in [&b, &c, &d] {
-            h.navigate(to.clone());
+            h.navigate(to.clone(), None);
         }
-        assert_eq!(h.back_list().collect::<Vec<_>>(), [&c, &b, &a]);
-        assert_eq!(h.forward_list().count(), 0);
+        assert_eq!(names(h.back_list(None)), ["c", "b", "a"]);
+        assert_eq!(h.forward_list(None).count(), 0);
 
         // More steps than there are places, or none, goes nowhere.
-        assert!(!h.back_by(4) && !h.back_by(0));
+        assert!(h.back_by(4, None).is_none() && h.back_by(0, None).is_none());
         assert_eq!(h.current(), &d);
-        assert_eq!(h.back_list().count(), 3);
+        assert_eq!(h.back_list(None).count(), 3);
 
         // Two at once end where two single steps do.
         let mut stepped = h.clone();
-        assert!(stepped.back() && stepped.back());
-        assert!(h.back_by(2));
+        assert!(stepped.back(None).is_some() && stepped.back(None).is_some());
+        assert!(h.back_by(2, None).is_some());
         assert_eq!(h.current(), &b);
-        assert_eq!(h.back_list().collect::<Vec<_>>(), [&a]);
-        assert_eq!(h.forward_list().collect::<Vec<_>>(), [&c, &d]);
+        assert_eq!(names(h.back_list(None)), ["a"]);
+        assert_eq!(names(h.forward_list(None)), ["c", "d"]);
         assert_eq!(stepped.current(), h.current());
-        assert!(stepped.back_list().eq(h.back_list()));
-        assert!(stepped.forward_list().eq(h.forward_list()));
+        assert!(stepped.back_list(None).eq(h.back_list(None)));
+        assert!(stepped.forward_list(None).eq(h.forward_list(None)));
 
-        assert!(!h.forward_by(3) && !h.forward_by(0));
+        assert!(h.forward_by(3, None).is_none() && h.forward_by(0, None).is_none());
         assert_eq!(h.current(), &b);
-        assert!(h.forward_by(2));
+        assert!(h.forward_by(2, None).is_some());
         assert_eq!(h.current(), &d);
-        assert_eq!(h.back_list().collect::<Vec<_>>(), [&c, &b, &a]);
-        assert!(!h.can_forward());
+        assert_eq!(names(h.back_list(None)), ["c", "b", "a"]);
+        assert!(!h.can_forward(None));
 
-        assert!(h.back_by(3));
+        assert!(h.back_by(3, None).is_some());
         assert_eq!(h.current(), &a);
-        assert!(!h.can_back());
-        assert_eq!(h.forward_list().collect::<Vec<_>>(), [&b, &c, &d]);
+        assert!(!h.can_back(None));
+        assert_eq!(names(h.forward_list(None)), ["b", "c", "d"]);
     }
 
     #[test]
@@ -520,21 +678,284 @@ mod tests {
         let pairs = [(PathBuf::from("/p/old"), PathBuf::from("/p/new"))];
         let moves = Moves::new(&pairs);
         let mut h = History::new(Location::Folder("/p/old/a".into()));
-        h.navigate(Location::Folder("/p".into()));
-        h.navigate(Location::Folder("/p/old".into()));
-        h.back();
+        h.navigate(Location::Folder("/p".into()), None);
+        h.navigate(Location::Folder("/p/old".into()), None);
+        h.back(None);
         assert!(!h.follow(&moves), "the current folder stayed put");
         assert_eq!(h.current(), &Location::Folder("/p".into()));
-        h.forward();
+        h.forward(None);
         assert_eq!(h.current(), &Location::Folder("/p/new".into()));
-        h.back();
-        h.back();
+        h.back(None);
+        h.back(None);
         assert_eq!(h.current(), &Location::Folder("/p/new/a".into()));
 
         let mut shown = History::new(Location::Folder("/p/old".into()));
         assert!(shown.follow(&moves));
-        assert!(!shown.can_back(), "following isn't going somewhere");
+        assert!(!shown.can_back(None), "following isn't going somewhere");
         assert_eq!(shown.current(), &Location::Folder("/p/new".into()));
+    }
+
+    /// A search for `query`, by name, in every search location.
+    fn search(query: &str) -> Option<SavedSearch> {
+        Some(SavedSearch {
+            query: query.into(),
+            in_folder: false,
+            contents: false,
+        })
+    }
+
+    /// What Back or Forward answers with when it led somewhere.
+    fn step(moved: bool, search: Option<SavedSearch>) -> Option<Step> {
+        Some(Step { moved, search })
+    }
+
+    /// How a list of visits reads: each place by its name, and a search by
+    /// its words after the name of the place it was made in.
+    fn names(visits: impl Iterator<Item = Visit>) -> Vec<String> {
+        visits
+            .map(|visit| match visit.search {
+                Some(search) => format!("{}?{}", visit.location.title(), search.query),
+                None => visit.location.title(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn history_goes_back_to_a_search_and_then_to_its_folder() {
+        let [x, a, b] = ["/x", "/a", "/b"].map(|p| Location::Folder(p.into()));
+        let mut h = History::new(x.clone());
+        h.navigate(a.clone(), None);
+        // A folder opened from the results of a search made in `a`.
+        assert!(h.navigate(b.clone(), search("atlas")));
+        assert_eq!(names(h.back_list(None)), ["a?atlas", "a", "x"]);
+
+        // Every step back shows something else: the results, the folder they
+        // were found from, and the folder before it.
+        assert_eq!(h.back(None), step(true, search("atlas")));
+        assert_eq!(h.current(), &a);
+        assert_eq!(h.back(search("atlas")), step(false, None));
+        assert_eq!(h.current(), &a);
+        assert_eq!(h.back(None), step(true, None));
+        assert_eq!(h.current(), &x);
+        assert_eq!(h.back(None), None);
+        assert_eq!(names(h.forward_list(None)), ["a", "a?atlas", "b"]);
+
+        // And every step forward, the same three the other way.
+        assert_eq!(h.forward(None), step(true, None));
+        assert_eq!(h.current(), &a);
+        assert_eq!(h.forward(None), step(false, search("atlas")));
+        assert_eq!(h.current(), &a);
+        assert_eq!(h.forward(search("atlas")), step(true, None));
+        assert_eq!(h.current(), &b);
+        assert_eq!(h.forward(None), None);
+        assert_eq!(names(h.back_list(None)), ["a?atlas", "a", "x"]);
+
+        // Three at once pass through the search, and two end in its folder.
+        assert_eq!(h.back_by(3, None), step(true, None));
+        assert_eq!(h.current(), &x);
+        assert_eq!(names(h.forward_list(None)), ["a", "a?atlas", "b"]);
+        assert_eq!(h.forward_by(2, None), step(true, search("atlas")));
+        assert_eq!(h.current(), &a);
+        assert_eq!(h.forward_by(1, search("atlas")), step(true, None));
+        assert_eq!(h.back_by(2, None), step(true, None));
+        assert_eq!(h.current(), &a);
+        assert_eq!(names(h.back_list(None)), ["x"]);
+        assert_eq!(names(h.forward_list(None)), ["a?atlas", "b"]);
+    }
+
+    #[test]
+    fn back_from_a_search_puts_it_ahead_of_what_forward_led_to() {
+        let [a, b] = ["/a", "/b"].map(|p| Location::Folder(p.into()));
+        let mut h = History::new(a.clone());
+        h.navigate(b.clone(), None);
+        h.back(None);
+
+        // The search was typed in `a`, with `b` still ahead. Back from it
+        // is `a`, though no place is behind that.
+        assert!(!h.can_back(None));
+        assert_eq!(names(h.back_list(search("road").as_ref())), ["a"]);
+        assert_eq!(h.back(search("road")), step(false, None));
+        assert_eq!(h.current(), &a);
+        assert!(!h.can_back(None));
+        assert_eq!(names(h.forward_list(None)), ["a?road", "b"]);
+        assert_eq!(h.forward(None), step(false, search("road")));
+        assert_eq!(h.forward(search("road")), step(true, None));
+        assert_eq!(h.current(), &b);
+        assert_eq!(h.back(None), step(true, search("road")));
+
+        // With other words by the time the window goes on, those are kept.
+        assert_eq!(h.forward(search("map")), step(true, None));
+        assert_eq!(h.back(None), step(true, search("map")));
+        assert_eq!(h.current(), &a);
+    }
+
+    #[test]
+    fn history_keeps_a_search_left_for_its_own_folder() {
+        let a = Location::Folder("/a".into());
+        let mut h = History::new(a.clone());
+        // Going where the window already is does nothing, except to keep a
+        // search that it ends, as showing a result in its folder does.
+        assert!(!h.navigate(a.clone(), None));
+        assert!(!h.can_back(None));
+        assert!(!h.navigate(a.clone(), search("road")));
+        assert_eq!(names(h.back_list(None)), ["a?road", "a"]);
+
+        assert_eq!(h.back(None), step(false, search("road")));
+        assert_eq!(h.forward(search("road")), step(false, None));
+        assert_eq!(h.back(None), step(false, search("road")));
+        assert_eq!(h.current(), &a);
+
+        // It's going somewhere all the same, so nothing is ahead after it.
+        assert_eq!(h.back(search("road")), step(false, None));
+        assert!(h.can_forward(None));
+        assert!(!h.navigate(a.clone(), search("map")));
+        assert!(!h.can_forward(None));
+        assert_eq!(h.back(None), step(false, search("map")));
+        assert_eq!(h.back(search("map")), step(false, None));
+        assert_eq!(h.back(None), None);
+    }
+
+    #[test]
+    fn history_skips_a_step_that_would_change_nothing() {
+        let [a, b] = ["/a", "/b"].map(|p| Location::Folder(p.into()));
+        let mut h = History::new(a.clone());
+        h.navigate(a.clone(), search("road"));
+        assert_eq!(h.back(None), step(false, search("road")));
+        // The search is ended with Escape, which the history doesn't hear
+        // of. Forward would be `a` with no search, where the window is.
+        assert!(h.can_forward(search("road").as_ref()));
+        assert!(!h.can_forward(None));
+        assert_eq!(h.forward(None), None);
+
+        // The same search typed again after Back ended it is what Forward
+        // would lead to, and `b` is the next place that isn't.
+        h.navigate(b.clone(), None);
+        assert_eq!(h.back(None), step(true, None));
+        assert_eq!(h.back(search("road")), step(false, None));
+        assert_eq!(names(h.forward_list(search("road").as_ref())), ["b"]);
+        assert_eq!(h.forward(search("road")), step(true, None));
+        assert_eq!(h.current(), &b);
+
+        // The same search made twice in a row, as by opening a Smart Folder
+        // again, is one step back and not two.
+        let mut h = History::new(a.clone());
+        h.navigate(b.clone(), None);
+        h.navigate(b.clone(), search("road"));
+        h.navigate(b.clone(), search("road"));
+        assert_eq!(names(h.back_list(search("road").as_ref())), ["b", "a"]);
+        assert_eq!(h.back(search("road")), step(false, None));
+        assert_eq!(h.back(None), step(true, None));
+        assert_eq!(h.current(), &a);
+        assert_eq!(names(h.forward_list(None)), ["b", "b?road"]);
+    }
+
+    #[test]
+    fn a_search_in_the_history_follows_its_folder() {
+        let pairs = [(PathBuf::from("/p/old"), PathBuf::from("/p/new"))];
+        let moves = Moves::new(&pairs);
+        let mut h = History::new(Location::Folder("/p/old".into()));
+        h.navigate(Location::Folder("/q".into()), search("atlas"));
+        h.navigate(Location::Folder("/p/old/a".into()), search("road"));
+        h.back(None);
+        assert!(!h.follow(&moves));
+
+        assert_eq!(
+            names(h.back_list(search("road").as_ref())),
+            ["q", "new?atlas", "new"]
+        );
+        assert_eq!(names(h.forward_list(search("road").as_ref())), ["a"]);
+        assert_eq!(h.back_by(2, search("road")), step(true, search("atlas")));
+        assert_eq!(h.current(), &Location::Folder("/p/new".into()));
+        assert_eq!(h.forward_by(3, search("atlas")), step(true, None));
+        assert_eq!(h.current(), &Location::Folder("/p/new/a".into()));
+    }
+
+    /// Check that one step at a time leads through what Back and Forward
+    /// list, that every step shows something else, and that several steps at
+    /// once end where single ones do.
+    fn assert_steps_follow_the_lists(h: &History, live: &Option<SavedSearch>) {
+        let was = Visit {
+            location: h.current.clone(),
+            search: live.clone(),
+        };
+        let parts = |h: &History| (h.current.clone(), h.back.clone(), h.forward.clone());
+        for forward in [false, true] {
+            let go = |h: &mut History, steps: usize, live: Option<SavedSearch>| match forward {
+                true => h.forward_by(steps, live),
+                false => h.back_by(steps, live),
+            };
+            let list: Vec<Visit> = match forward {
+                true => h.forward_list(live.as_ref()).collect(),
+                false => h.back_list(live.as_ref()).collect(),
+            };
+            let (mut stepped, mut shown, mut moved) = (h.clone(), was.clone(), false);
+            for (ix, stop) in list.iter().enumerate() {
+                let one = go(&mut stepped, 1, shown.search.clone()).expect("a listed step");
+                let now = Visit {
+                    location: stepped.current.clone(),
+                    search: one.search,
+                };
+                assert_eq!(&now, stop);
+                assert_ne!(now, shown, "a step that changed nothing");
+                assert_eq!(one.moved, now.location != shown.location);
+                (shown, moved) = (now, moved || one.moved);
+
+                let mut jumped = h.clone();
+                let jump = go(&mut jumped, ix + 1, live.clone());
+                assert_eq!(jump, step(moved, shown.search.clone()));
+                assert_eq!(parts(&jumped), parts(&stepped));
+            }
+            assert_eq!(go(&mut stepped, 1, shown.search.clone()), None);
+            let mut too_far = h.clone();
+            assert_eq!(go(&mut too_far, list.len() + 1, live.clone()), None);
+            assert_eq!(parts(&too_far), parts(h), "all the steps or none");
+        }
+
+        // Forward takes back what Back did. Back takes back what Forward
+        // did, in two steps when that was a search made somewhere else.
+        let mut there = h.clone();
+        if let Some(step) = there.back(live.clone()) {
+            let again = there.forward(step.search).expect("forward after back");
+            assert_eq!((&there.current, &again.search), (&was.location, live));
+        }
+        let mut there = h.clone();
+        if let Some(step) = there.forward(live.clone()) {
+            let mut behind = there.back_list(step.search.as_ref()).take(2);
+            assert!(behind.any(|visit| visit == was));
+        }
+    }
+
+    #[test]
+    fn steps_back_and_forward_lead_where_the_lists_say() {
+        /// Every history that `depth` more things done in the window lead to.
+        fn explore(h: &History, live: &Option<SavedSearch>, depth: usize) {
+            assert_steps_follow_the_lists(h, live);
+            let Some(depth) = depth.checked_sub(1) else {
+                return;
+            };
+            // Going somewhere, which may be where the window is already.
+            for to in ["/a", "/b"] {
+                let mut next = h.clone();
+                next.navigate(Location::Folder(to.into()), live.clone());
+                explore(&next, &None, depth);
+            }
+            // Typing a search and ending it with Escape, which the history
+            // hears of only when the window next goes somewhere.
+            for typed in [search("road"), search("map"), None] {
+                if typed != *live {
+                    explore(h, &typed, depth);
+                }
+            }
+            let mut next = h.clone();
+            if let Some(step) = next.back(live.clone()) {
+                explore(&next, &step.search, depth);
+            }
+            let mut next = h.clone();
+            if let Some(step) = next.forward(live.clone()) {
+                explore(&next, &step.search, depth);
+            }
+        }
+        explore(&History::new(Location::Folder("/a".into())), &None, 6);
     }
 
     #[test]

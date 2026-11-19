@@ -34,7 +34,7 @@ mod views;
 mod volumes;
 
 use crate::actions::*;
-use crate::model::{History, Location, Moves, Selection};
+use crate::model::{History, Location, Moves, SavedSearch, Selection, Step, search_title};
 use crate::nushell::{self, NuRun};
 use crate::theme::ui;
 use fffinder_core::listing::dir_stamp;
@@ -366,6 +366,9 @@ pub struct Finder {
     new_search: bool,
     /// The selection and scroll position a search took the place of.
     before_search: Option<BeforeSearch>,
+    /// The folder Back left for a search, to select among the results when
+    /// they come in, as Back to a folder selects the one it left.
+    select_in_results: Option<PathBuf>,
 
     rows: Vec<Row>,
     /// The groups `rows` are in, when the view uses groups.
@@ -620,6 +623,7 @@ impl Finder {
             enter_results: None,
             new_search: false,
             before_search: None,
+            select_in_results: None,
             rows: Vec::new(),
             groups: Vec::new(),
             collapsed_groups: HashSet::new(),
@@ -882,7 +886,7 @@ impl Finder {
     }
 
     pub fn can_go_back(&self) -> bool {
-        self.history.can_back()
+        self.history.can_back(self.live_search().as_ref())
     }
 
     /// The window's settings as they are now.
@@ -1015,7 +1019,7 @@ impl Finder {
 
     pub fn title(&self) -> String {
         if self.is_searching() {
-            format!("Searching “{}”", self.query)
+            search_title(&self.query)
         } else {
             self.history.current().title()
         }
@@ -1044,8 +1048,9 @@ impl Finder {
     // ----- navigation --------------------------------------------------------
 
     pub fn navigate(&mut self, to: Location, window: &mut Window, cx: &mut Context<Self>) {
+        let search = self.live_search();
         self.end_search(window, cx);
-        if self.history.navigate(to) {
+        if self.history.navigate(to, search) {
             self.location_changed(None, window, cx);
         }
     }
@@ -1128,16 +1133,20 @@ impl Finder {
         self.go_forward_by(1, window, cx);
     }
 
-    /// Go back `steps` places at once, as the Back button's menu does.
+    /// Go back `steps` places at once, as the Back button's menu does. A
+    /// search counts as a place of its own, after the one it was made in.
     pub(super) fn go_back_by(&mut self, steps: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.end_search(window, cx);
-        if self.history.back_by(steps) {
-            // The folder gone into from here is selected, which after one
-            // step is the folder the window just left.
-            let entered = self.history.forward_list().next();
-            let select = entered.and_then(Location::folder).map(Path::to_path_buf);
-            self.location_changed(select, window, cx);
-        }
+        let search = self.live_search();
+        let Some(step) = self.history.back_by(steps, search) else {
+            return;
+        };
+        // The folder gone into from here is selected, which after one step
+        // is the folder the window just left. A search made here isn't
+        // somewhere gone into.
+        let entered = self.history.forward_list(step.search.as_ref()).next();
+        let entered = entered.filter(|visit| visit.location != *self.history.current());
+        let select = entered.and_then(|visit| visit.location.folder().map(Path::to_path_buf));
+        self.show_step(step, select, window, cx);
     }
 
     /// Go forward `steps` places at once, as the Forward button's menu does.
@@ -1147,10 +1156,37 @@ impl Finder {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let search = self.live_search();
+        if let Some(step) = self.history.forward_by(steps, search) {
+            self.show_step(step, None, window, cx);
+        }
+    }
+
+    /// Show what Back or Forward led to: another place, a search the window
+    /// left earlier, or both. The folder at `select` is selected there, among
+    /// the place's items or the search's results.
+    fn show_step(
+        &mut self,
+        step: Step,
+        select: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The history has the search that's showing by now. It ends even
+        // when another one follows, as words that stay the same would be
+        // taken for the same search, and where it looks may differ.
         self.end_search(window, cx);
-        if self.history.forward_by(steps) {
+        let Some(search) = step.search else {
+            if step.moved {
+                self.location_changed(select, window, cx);
+            }
+            return;
+        };
+        if step.moved {
             self.location_changed(None, window, cx);
         }
+        self.restore_search(search, window, cx);
+        self.select_in_results = select;
     }
 
     pub fn go_up(&mut self, _: &GoUp, window: &mut Window, cx: &mut Context<Self>) {
@@ -1158,10 +1194,11 @@ impl Finder {
             return;
         };
         if let Some(parent) = folder.parent() {
+            let search = self.live_search();
             self.end_search(window, cx);
             if self
                 .history
-                .navigate(Location::Folder(parent.to_path_buf()))
+                .navigate(Location::Folder(parent.to_path_buf()), search)
             {
                 self.location_changed(Some(folder), window, cx);
             }
@@ -1185,9 +1222,10 @@ impl Finder {
     /// Open a folder and select `item` in it.
     pub fn reveal_in_place(&mut self, item: &Path, window: &mut Window, cx: &mut Context<Self>) {
         let Some(parent) = item.parent() else { return };
+        let search = self.live_search();
         self.end_search(window, cx);
         self.history
-            .navigate(Location::Folder(parent.to_path_buf()));
+            .navigate(Location::Folder(parent.to_path_buf()), search);
         self.location_changed(Some(item.to_path_buf()), window, cx);
     }
 
@@ -1607,8 +1645,9 @@ impl Finder {
             return;
         }
         // A key waiting to move into the results was pressed for the words
-        // as they were.
+        // as they were, and so was Back, for a folder to select among them.
         self.enter_results = None;
+        self.select_in_results = None;
         let was_searching = self.is_searching();
         self.query = query;
         if self.query.is_empty() {
@@ -1701,6 +1740,34 @@ impl Finder {
                 .update(cx, |s, cx| s.set_value("", window, cx));
             self.set_query(String::new(), true, cx);
         }
+    }
+
+    /// The search that's showing, for the history to keep when the window
+    /// leaves it.
+    fn live_search(&self) -> Option<SavedSearch> {
+        self.is_searching().then(|| SavedSearch {
+            query: self.query.clone(),
+            in_folder: self.scope == SearchScope::Folder,
+            contents: self.search_contents,
+        })
+    }
+
+    /// Run a search the history kept, as it was: its words, where it looked,
+    /// and whether in names or inside files. The field gets the words too,
+    /// as Escape there takes an empty field to have no search to end. No
+    /// search is showing when this is called.
+    fn restore_search(&mut self, search: SavedSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.scope = if search.in_folder {
+            SearchScope::Folder
+        } else {
+            SearchScope::Computer
+        };
+        self.search_contents = search.contents;
+        self.search_input
+            .update(cx, |s, cx| s.set_value(search.query.clone(), window, cx));
+        self.set_query(search.query, true, cx);
+        // The toolbar shows the scope, which may have changed.
+        cx.notify();
     }
 
     /// Run the search after its words, scope, kind, or Name or Contents
@@ -1807,6 +1874,14 @@ impl Finder {
                         this.scroll_views_to_top();
                     }
                     this.rebuild_rows(cx);
+                    // Back led to this search from a folder. If it's one of
+                    // the results it's selected, as in a folder Back leads to.
+                    if let Some(left) = this.select_in_results.take()
+                        && let Some(ix) = this.rows.iter().position(|r| r.entry.path == left)
+                    {
+                        this.selection.select_only(ix);
+                        this.scroll_to(ix);
+                    }
                     this.selection_changed(cx);
                     retry
                 })

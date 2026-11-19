@@ -1885,6 +1885,34 @@ fn going_to_another_folder_from_a_search_starts_at_its_top(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+fn back_to_a_search_scrolls_to_the_folder_it_came_from(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-place-back");
+    for ix in 0..120 {
+        std::fs::create_dir(fx.path(&format!("box {ix:03}"))).unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.click("search");
+    ui.type_text("box");
+    assert!(ui.names().len() >= 120, "{}", ui.names().len());
+
+    // The last result is a folder far below the ones on screen.
+    ui.press("down");
+    ui.press("end");
+    let last = ui.selected();
+    assert!(!ui.exists(item_id("row", &first_item(&ui))));
+    ui.press("enter");
+    assert_eq!(ui.folder(), Some(fx.path(&last[0])));
+
+    // The results come back from their top, and then show that folder.
+    ui.press(&cmd("["));
+    assert_eq!(ui.read(|f| f.query().to_string()), "box");
+    assert_eq!(ui.selected(), last);
+    let shown = on_screen(&mut ui, "row");
+    assert!(shown.contains(&last[0]), "{last:?} in {shown:?}");
+}
+
+#[gpui_kit::test]
 fn a_folder_renamed_during_a_search_is_shown_from_its_top(cx: &mut TestAppContext) {
     let fx = long_folder("search-place-renamed");
     for ix in 0..200 {

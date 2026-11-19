@@ -3,13 +3,14 @@
 
 mod common;
 
-use common::{Fixture, Open, Ui, cmd};
+use common::{Fixture, Open, Ui, cmd, item_id};
 use fffinder::finder::{PickerOptions, QuickLookMode, SearchScope};
 use fffinder::model::Location;
 use fffinder::system::SystemCall;
-use fffinder_core::ViewMode;
+use fffinder_core::{KindFilter, SmartFolder, ViewMode};
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
 use gpui_kit::{Keystroke, TestAppContext};
+use std::path::Path;
 
 #[gpui_kit::test]
 fn lists_navigates_and_goes_back(cx: &mut TestAppContext) {
@@ -180,6 +181,283 @@ fn searches_by_name_and_returns_to_browsing(cx: &mut TestAppContext) {
         ui.names(),
         ["Budget.csv", "notes.txt", "Projects", "Roadmap.md"]
     );
+}
+
+#[gpui_kit::test]
+fn back_from_a_folder_opened_from_the_results_returns_to_the_search(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-history");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let (projects, atlas) = (fx.path("Projects"), fx.path("Projects/atlas"));
+    let shown = |ui: &Ui| (ui.folder(), ui.read(|f| f.query().to_string()));
+    let at = |folder: &Path, query: &str| (Some(folder.to_path_buf()), query.to_string());
+    ui.go_to(&projects);
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+    ui.double_click(item_id("tile", &atlas));
+    assert_eq!(
+        shown(&ui),
+        at(&atlas, ""),
+        "opening a folder ends the search"
+    );
+
+    // Back leads to the results first, with the folder it left selected
+    // among them, as it is in a folder.
+    ui.press(&cmd("["));
+    assert_eq!(shown(&ui), at(&projects, "atlas"));
+    let found = ui.names();
+    assert!(
+        found.contains(&"Project Atlas.txt".to_string()),
+        "{found:?}"
+    );
+    assert_eq!(ui.selected(), ["atlas"]);
+    assert!(ui.files_focused(), "the arrow keys go on from there");
+    assert!(ui.exists("scope-computer"), "the scope bar is back too");
+
+    // Then to the folder the search was made in, and then to the one before
+    // it. No press leaves the window as it was.
+    ui.press(&cmd("["));
+    assert_eq!(shown(&ui), at(&projects, ""));
+    assert_eq!(ui.names(), ["atlas"]);
+    ui.press(&cmd("["));
+    assert_eq!(shown(&ui), at(&fx.dir, ""));
+
+    // Forward goes the same way again.
+    ui.press(&cmd("]"));
+    assert_eq!(shown(&ui), at(&projects, ""));
+    ui.press(&cmd("]"));
+    assert_eq!(shown(&ui), at(&projects, "atlas"));
+    let found = ui.names();
+    assert!(
+        found.contains(&"Project Atlas.txt".to_string()),
+        "{found:?}"
+    );
+    ui.press(&cmd("]"));
+    assert_eq!(shown(&ui), at(&atlas, ""));
+    assert_eq!(ui.names(), ["Project Atlas.txt"]);
+}
+
+#[gpui_kit::test]
+fn other_words_typed_before_a_search_is_back_have_nothing_selected(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-history-typed");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let atlas = fx.path("Projects/atlas");
+    ui.click("search");
+    ui.type_text("atlas");
+    ui.double_click(item_id("tile", &atlas));
+    assert_eq!(ui.folder(), Some(atlas));
+
+    // Back, and a letter is gone from the field before the search it led to
+    // has answered. The folder Back came from is found for these words too,
+    // but they're another search, and that starts with nothing selected.
+    ui.press_without_settling(&cmd("["));
+    ui.click_without_settling("search");
+    ui.press_without_settling("backspace");
+    ui.settle();
+    assert_eq!(ui.read(|f| f.query().to_string()), "atla");
+    let found = ui.names();
+    assert!(found.contains(&"atlas".to_string()), "{found:?}");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+}
+
+#[gpui_kit::test]
+fn back_during_a_search_ends_it_and_stays_in_the_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-history-ends");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let projects = fx.path("Projects");
+    let query = |ui: &Ui| ui.read(|f| f.query().to_string());
+    let in_a_field = |ui: &mut Ui| ui.window(|window, cx| window.has_focused_input(cx));
+    ui.go_to(&projects);
+    ui.press(&cmd("f"));
+    ui.type_text("road");
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+
+    // The keyboard is in the search field, where Cmd+[ is Back too.
+    ui.press(&cmd("["));
+    assert_eq!(query(&ui), "");
+    assert_eq!(ui.folder(), Some(projects.clone()), "not the folder before");
+    assert_eq!(ui.names(), ["atlas"]);
+    assert!(!ui.exists("scope-computer"));
+
+    // Forward is the search again, and with nothing after it Forward leaves
+    // it alone.
+    ui.press(&cmd("]"));
+    assert_eq!(query(&ui), "road");
+    assert_eq!(ui.folder(), Some(projects.clone()));
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    ui.press(&cmd("]"));
+    assert_eq!(query(&ui), "road");
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+
+    // The words are in the field again: Escape there empties a field with
+    // words in it, and leaves one that has none.
+    ui.press("escape");
+    assert_eq!(query(&ui), "");
+    assert!(in_a_field(&mut ui), "the field had the words to empty");
+
+    // A search ended any other way isn't one to go back or forward to.
+    ui.press(&cmd("]"));
+    assert_eq!(query(&ui), "");
+    ui.press(&cmd("["));
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    ui.press(&cmd("]"));
+    assert_eq!(ui.folder(), Some(projects));
+    assert_eq!(query(&ui), "");
+}
+
+#[gpui_kit::test]
+fn a_search_comes_back_where_it_looked_and_for_what(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-history-scope");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let projects = fx.path("Projects");
+    let search = |ui: &Ui| {
+        ui.read(|f| {
+            (
+                f.query().to_string(),
+                f.search_scope(),
+                f.searches_contents(),
+            )
+        })
+    };
+    ui.go_to(&projects);
+    ui.click("search");
+    ui.type_text("atlas");
+    ui.click("scope-folder");
+    ui.click("by-contents");
+    assert_eq!(ui.names(), ["Project Atlas.txt"]);
+
+    // The next search, in another folder, is everywhere and by name.
+    ui.go_to(&fx.dir);
+    ui.click("search");
+    ui.type_text("notes");
+    ui.click("scope-computer");
+    ui.click("by-name");
+    assert_eq!(ui.names(), ["notes.txt"]);
+
+    ui.press(&cmd("["));
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    assert_eq!(search(&ui).0, "");
+    ui.press(&cmd("["));
+    assert_eq!(ui.folder(), Some(projects.clone()));
+    assert_eq!(
+        search(&ui),
+        ("atlas".to_string(), SearchScope::Folder, true),
+        "in Projects only, and inside files"
+    );
+    assert_eq!(ui.names(), ["Project Atlas.txt"]);
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+
+    ui.press(&cmd("]"));
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    assert_eq!(search(&ui).0, "");
+    ui.press(&cmd("]"));
+    assert_eq!(
+        search(&ui),
+        ("notes".to_string(), SearchScope::Computer, false)
+    );
+    assert_eq!(ui.names(), ["notes.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_search_comes_back_in_place_of_one_for_the_same_words(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-history-same-words");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let search = |ui: &Ui| ui.read(|f| (f.query().to_string(), f.search_scope()));
+    ui.go_to(&fx.path("Projects"));
+    ui.click("search");
+    ui.type_text("road");
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+
+    // Back ends the search. The same words typed again look only in the
+    // folder this time, which doesn't have the file.
+    ui.press(&cmd("["));
+    ui.type_text("road");
+    ui.click("scope-folder");
+    assert_eq!(search(&ui), ("road".to_string(), SearchScope::Folder));
+    let found = ui.names();
+    assert!(!found.contains(&"Roadmap.md".to_string()), "{found:?}");
+
+    // Forward is the search Back ended. Its words are in the field already,
+    // but it looked in This Computer, and it runs there again.
+    ui.press(&cmd("]"));
+    assert_eq!(search(&ui), ("road".to_string(), SearchScope::Computer));
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn back_returns_to_a_search_left_without_leaving_its_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-history-reveal");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let atlas = fx.path("Projects/atlas");
+    let shown = |ui: &Ui| (ui.folder(), ui.read(|f| f.query().to_string()));
+    let here = |query: &str| (Some(atlas.clone()), query.to_string());
+    ui.go_to(&atlas);
+    ui.click("search");
+    ui.type_text("atlas");
+    assert!(ui.names().len() > 1, "{:?}", ui.names());
+
+    // The result is in the folder the window is in already.
+    ui.right_click(item_id("tile", &atlas.join("Project Atlas.txt")));
+    ui.click_menu_item("Show in Enclosing Folder");
+    assert_eq!(shown(&ui), here(""));
+    assert_eq!(ui.names(), ["Project Atlas.txt"]);
+    assert_eq!(ui.selected(), ["Project Atlas.txt"]);
+
+    // The folder is one of its own results here, but not one that Back came
+    // from, so it isn't selected.
+    ui.press(&cmd("["));
+    assert_eq!(shown(&ui), here("atlas"));
+    let found = ui.names();
+    assert!(found.contains(&"atlas".to_string()), "{found:?}");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+    // Forward, by its button here, is the folder without the search again.
+    ui.click("forward");
+    assert_eq!(shown(&ui), here(""));
+    assert_eq!(ui.names(), ["Project Atlas.txt"]);
+
+    // The same for going to the folder itself, as by its row in the sidebar.
+    ui.press(&cmd("["));
+    assert_eq!(shown(&ui), here("atlas"));
+    ui.go_to(&atlas);
+    assert_eq!(shown(&ui), here(""));
+    ui.press(&cmd("["));
+    assert_eq!(shown(&ui), here("atlas"));
+
+    // Cmd-Up from a search goes somewhere new, and Back from there is the
+    // search again.
+    ui.press(&cmd("up"));
+    assert_eq!(ui.folder(), Some(fx.path("Projects")));
+    assert_eq!(ui.selected(), ["atlas"]);
+    ui.press(&cmd("["));
+    assert_eq!(shown(&ui), here("atlas"));
+    assert!(ui.names().len() > 1, "{:?}", ui.names());
+}
+
+#[gpui_kit::test]
+fn a_smart_folder_opened_twice_is_one_step_back_from_its_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-history-smart");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let projects = fx.path("Projects");
+    let shown = |ui: &Ui| (ui.folder(), ui.read(|f| f.query().to_string()));
+    let saved = SmartFolder {
+        name: "Atlas".into(),
+        query: "atlas".into(),
+        kind: KindFilter::Any,
+        scope: Some(projects.clone()),
+        contents: false,
+        filter: None,
+    };
+    ui.update(|f, _, cx| f.add_smart_folder(saved, cx));
+    ui.click(("smart", 0usize));
+    assert_eq!(shown(&ui), (Some(projects.clone()), "atlas".into()));
+
+    // It's the same search in the same folder again, not one more to go
+    // back through.
+    ui.click(("smart", 0usize));
+    assert_eq!(shown(&ui), (Some(projects.clone()), "atlas".into()));
+    ui.press(&cmd("["));
+    assert_eq!(shown(&ui), (Some(projects), String::new()));
+    ui.press(&cmd("["));
+    assert_eq!(shown(&ui), (Some(fx.dir.clone()), String::new()));
 }
 
 #[gpui_kit::test]

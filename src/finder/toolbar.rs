@@ -3,7 +3,7 @@
 
 use super::{Finder, SearchScope};
 use crate::actions::*;
-use crate::model::Location;
+use crate::model::{Location, SavedSearch, Visit, search_title};
 use crate::theme::palette;
 use crate::theme::ui;
 use fffinder_core::{GroupKey, SortKey, ViewMode};
@@ -303,22 +303,45 @@ pub(super) fn view_mode_items(
 /// How many places a Back or Forward menu lists.
 const HISTORY_MENU_LENGTH: usize = 12;
 
+/// How many characters of a search's words a Back or Forward menu or tooltip
+/// shows.
+const HISTORY_WORDS_SHOWN: usize = 40;
+
+/// What a Back or Forward menu or tooltip calls a search the window left: the
+/// title the window had for it. Its words can be as long as a pasted line,
+/// and neither a menu nor a tooltip cuts its text to fit, so of long ones
+/// only the start is shown.
+fn search_label(search: &SavedSearch) -> String {
+    let words = search.query.as_str();
+    match words.char_indices().nth(HISTORY_WORDS_SHOWN) {
+        Some((end, _)) => search_title(&format!("{}…", words[..end].trim_end())),
+        None => search_title(words),
+    }
+}
+
 /// What a Back or Forward button's tooltip says: where the button leads,
-/// when it leads somewhere.
-fn history_tip(name: &str, to: Option<&Location>) -> String {
+/// when it leads somewhere. A search is named by its title, which has its
+/// words in quotes already.
+fn history_tip(name: &str, to: Option<&Visit>) -> String {
     match to {
-        Some(place) => format!("{name} to “{}”", place.title()),
+        Some(Visit {
+            search: Some(search),
+            ..
+        }) => format!("{name} to {}", search_label(search)),
+        Some(Visit { location, .. }) => format!("{name} to “{}”", location.title()),
         None => name.to_string(),
     }
 }
 
 /// The places a Back menu lists, or with `forward` a Forward menu: the
-/// nearest ones, nearest first.
-fn history_places(finder: &Finder, forward: bool) -> Vec<Location> {
+/// nearest ones, nearest first. A search the window left is one of them,
+/// and during a search the nearest one back is the place it was made in.
+fn history_places(finder: &Finder, forward: bool) -> Vec<Visit> {
     let (history, most) = (&finder.history, HISTORY_MENU_LENGTH);
+    let live = finder.live_search();
     match forward {
-        true => history.forward_list().take(most).cloned().collect(),
-        false => history.back_list().take(most).cloned().collect(),
+        true => history.forward_list(live.as_ref()).take(most).collect(),
+        false => history.back_list(live.as_ref()).take(most).collect(),
     }
 }
 
@@ -326,14 +349,21 @@ fn history_places(finder: &Finder, forward: bool) -> Vec<Location> {
 /// folder whose name another place in the menu has too, the folder it is in
 /// as well, as in "src — atlas". Whole paths would tell such folders apart
 /// too, but a menu doesn't cut its items' text short, and long ones run out
-/// of the window before the part they differ in.
-fn history_labels(places: &[Location]) -> Vec<String> {
+/// of the window before the part they differ in. A search goes by the title
+/// the window had for it.
+fn history_labels(places: &[Visit]) -> Vec<String> {
     places
         .iter()
-        .map(|place| {
-            let title = place.title();
+        .map(|visit| {
+            let place = &visit.location;
+            let title = match &visit.search {
+                Some(search) => return search_label(search),
+                None => place.title(),
+            };
             let namesakes: Vec<&Location> = places
                 .iter()
+                .filter(|other| other.search.is_none())
+                .map(|other| &other.location)
                 .filter(|other| *other != place && other.title() == title)
                 .collect();
             match place.folder().and_then(Path::parent) {
@@ -475,19 +505,23 @@ impl Finder {
             && !self.config.show_sidebar
             && !crate::term::active()
             && !self.split_pane;
-        let can_back = self.history.can_back();
-        let can_forward = self.history.can_forward();
         let fit = self.toolbar_room(traffic, window);
         self.toolbar_fit = fit;
 
-        let back_tip = history_tip("Back", self.history.back_list().next());
-        let forward_tip = history_tip("Forward", self.history.forward_list().next());
+        // Where each button leads says whether it leads anywhere, so that a
+        // button is enabled just when its tooltip names a place and its menu
+        // has one to list.
+        let live = self.live_search();
+        let back_to = self.history.back_list(live.as_ref()).next();
+        let forward_to = self.history.forward_list(live.as_ref()).next();
+        let back_tip = history_tip("Back", back_to.as_ref());
+        let forward_tip = history_tip("Forward", forward_to.as_ref());
         let nav = pill(cx)
             .child(with_history_menu(
                 "back-history",
                 pill_button("back", IconName::ChevronLeft, cx)
                     .tooltip_with_action(back_tip, &GoBack, Some(FINDER))
-                    .disabled(!can_back)
+                    .disabled(back_to.is_none())
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.go_back(&GoBack, window, cx)
                     })),
@@ -498,7 +532,7 @@ impl Finder {
                 "forward-history",
                 pill_button("forward", IconName::ChevronRight, cx)
                     .tooltip_with_action(forward_tip, &GoForward, Some(FINDER))
-                    .disabled(!can_forward)
+                    .disabled(forward_to.is_none())
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.go_forward(&GoForward, window, cx)
                     })),
@@ -1016,7 +1050,28 @@ fn actions_menu(
 #[cfg(test)]
 mod tests {
     use super::{TOOLBAR_FULL_WIDTH, TOOLBAR_MIN_WIDTH, ToolbarFit, history_labels, history_tip};
-    use crate::model::Location;
+    use crate::model::{Location, SavedSearch, Visit};
+
+    /// A place the window showed, with no search.
+    fn place(location: Location) -> Visit {
+        Visit {
+            location,
+            search: None,
+        }
+    }
+
+    /// A search for `query` that the window showed in the folder at `path`.
+    fn search_in(path: &str, query: &str) -> Visit {
+        let search = SavedSearch {
+            query: query.into(),
+            in_folder: false,
+            contents: false,
+        };
+        Visit {
+            location: Location::Folder(path.into()),
+            search: Some(search),
+        }
+    }
 
     #[test]
     fn the_toolbar_folds_one_step_at_a_time() {
@@ -1038,26 +1093,67 @@ mod tests {
 
     #[test]
     fn a_history_buttons_tooltip_names_where_it_leads() {
-        let projects = Location::Folder("/srv/Projects".into());
+        let projects = place(Location::Folder("/srv/Projects".into()));
 
         assert_eq!(history_tip("Back", Some(&projects)), "Back to “Projects”");
         assert_eq!(
-            history_tip("Forward", Some(&Location::Recents)),
+            history_tip("Forward", Some(&place(Location::Recents))),
             "Forward to “Recents”"
         );
         assert_eq!(history_tip("Back", None), "Back");
+
+        // A search the window left, by the title the window had for it.
+        assert_eq!(
+            history_tip("Back", Some(&search_in("/srv/Projects", "atlas"))),
+            "Back to Searching “atlas”"
+        );
+    }
+
+    #[test]
+    fn a_long_search_is_named_by_the_start_of_its_words() {
+        // Forty characters are all shown.
+        let forty = "quarterly revenue forecast for the north";
+        assert_eq!(forty.chars().count(), 40);
+        assert_eq!(
+            history_labels(&[search_in("/srv", forty)]),
+            [format!("Searching “{forty}”")]
+        );
+
+        // Of more, the first forty, in a menu and in a tooltip alike.
+        let line = "quarterly revenue forecast for the northern region, draft seven";
+        let named = format!("Searching “{forty}…”");
+        assert_eq!(history_labels(&[search_in("/srv", line)]), [named.as_str()]);
+        assert_eq!(
+            history_tip("Forward", Some(&search_in("/srv", line))),
+            format!("Forward to {named}")
+        );
+
+        // A space they would end in is left out.
+        assert_eq!(
+            history_labels(&[search_in(
+                "/srv",
+                "quarterly revenue forecast for the year 2026"
+            )]),
+            ["Searching “quarterly revenue forecast for the year…”"]
+        );
+
+        // They're characters, however many bytes each takes.
+        assert_eq!(
+            history_labels(&[search_in("/srv", &"é".repeat(41))]),
+            [format!("Searching “{}…”", "é".repeat(40))]
+        );
     }
 
     #[test]
     fn a_history_menu_tells_folders_with_one_name_apart() {
-        let folder = |path: &str| Location::Folder(path.into());
+        let folder = |path: &str| place(Location::Folder(path.into()));
         let sep = std::path::MAIN_SEPARATOR;
 
         let places = [
             folder("/srv/a/src"),
             folder("/srv/Projects"),
             folder("/srv/b/src"),
-            Location::Recents,
+            place(Location::Recents),
         ];
         assert_eq!(
             history_labels(&places),
@@ -1083,6 +1179,21 @@ mod tests {
             ]
         );
 
+        // A search goes by its title, with the folder it was made in beside
+        // it by name. The title doesn't have that folder's name in it, so
+        // another folder with the name has nothing to be told apart from.
+        let searched = [
+            search_in("/srv/a/src", "atlas"),
+            folder("/srv/a/src"),
+            folder("/srv/Projects"),
+        ];
+        assert_eq!(
+            history_labels(&searched),
+            ["Searching “atlas”", "src", "Projects"]
+        );
+        let elsewhere = [search_in("/srv/a/src", "atlas"), folder("/srv/b/src")];
+        assert_eq!(history_labels(&elsewhere), ["Searching “atlas”", "src"]);
+
         // The same folder twice is one place, and its name says which.
         let twice = [folder("/srv/a/src"), folder("/srv/a/src")];
         assert_eq!(history_labels(&twice), ["src", "src"]);
@@ -1090,7 +1201,7 @@ mod tests {
         assert_eq!(history_labels(&thrice), ["src — a", "src — b", "src — a"]);
 
         // The Trash has no folder to tell it from a folder of that name.
-        let trashes = [folder("/srv/Trash"), Location::Trash];
+        let trashes = [folder("/srv/Trash"), place(Location::Trash)];
         assert_eq!(history_labels(&trashes), ["Trash — srv", "Trash"]);
     }
 }

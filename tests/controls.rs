@@ -62,6 +62,37 @@ fn back_and_forward_buttons(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_back_button_ends_a_search_where_there_is_no_folder_to_go_back_to(cx: &mut TestAppContext) {
+    let fx = Fixture::new("back-ends-search");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let query = |ui: &Ui| ui.read(|f| f.query().to_string());
+    ui.click("search");
+    ui.type_text("atlas");
+
+    // A disabled button does nothing when it's clicked, so these two say
+    // that Back is enabled during the search, and Forward after it.
+    ui.click("back");
+    assert_eq!(query(&ui), "");
+    assert_eq!(ui.folder().as_deref(), Some(fx.dir.as_path()));
+    assert_eq!(ui.names().len(), 4);
+    assert!(!ui.read(|f| f.can_go_back()), "the window opened here");
+    ui.click("forward");
+    assert_eq!(query(&ui), "atlas");
+    assert!(
+        ui.names().contains(&"Project Atlas.txt".to_string()),
+        "{:?}",
+        ui.names()
+    );
+    assert!(ui.read(|f| f.can_go_back()), "back to the folder's items");
+
+    // Forward has nowhere to go from the search, and leaves it alone.
+    ui.click("forward");
+    assert_eq!(query(&ui), "atlas");
+    ui.right_click("forward");
+    assert!(!ui.menu_open());
+}
+
+#[gpui_kit::test]
 fn back_and_forward_buttons_list_their_history(cx: &mut TestAppContext) {
     let fx = Fixture::new("history-menus");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -107,6 +138,61 @@ fn back_and_forward_buttons_list_their_history(cx: &mut TestAppContext) {
     ui.right_click("forward");
     assert!(!ui.menu_open(), "forward is used up");
     assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn a_history_menu_lists_a_search_as_a_place_of_its_own(cx: &mut TestAppContext) {
+    let fx = Fixture::new("history-search");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let (projects, atlas) = (fx.path("Projects"), fx.path("Projects/atlas"));
+    let start = Location::Folder(fx.dir.clone()).title();
+    let shown = |ui: &Ui| (ui.folder(), ui.read(|f| f.query().to_string()));
+    ui.go_to(&projects);
+    ui.click("search");
+    ui.type_text("atlas");
+    let searching = ui.read(|f| f.title());
+
+    // From a search, the first step back is the folder it was made in.
+    ui.right_click("back");
+    assert_eq!(ui.menu_labels(), ["Projects", start.as_str()]);
+    ui.press("escape");
+    assert_eq!(shown(&ui), (Some(projects.clone()), "atlas".into()));
+
+    // A search the window left is a place of its own, named as the window
+    // was while it showed.
+    ui.double_click(item_id("tile", &atlas));
+    ui.right_click("back");
+    assert_eq!(
+        ui.menu_labels(),
+        [searching.as_str(), "Projects", start.as_str()]
+    );
+    ui.click_menu_item(&searching);
+    assert_eq!(shown(&ui), (Some(projects.clone()), "atlas".into()));
+    assert_eq!(ui.selected(), ["atlas"], "the folder gone into from here");
+    ui.right_click("forward");
+    assert_eq!(ui.menu_labels(), ["atlas"]);
+    ui.press("escape");
+
+    // Two steps at once pass through the folder without the search, and
+    // Forward leads back through both.
+    ui.right_click("back");
+    assert_eq!(ui.menu_labels(), ["Projects", start.as_str()]);
+    ui.click_menu_item(&start);
+    assert_eq!(shown(&ui), (Some(fx.dir.clone()), String::new()));
+    assert_eq!(ui.selected(), ["Projects"]);
+    ui.right_click("forward");
+    assert_eq!(ui.menu_labels(), ["Projects", searching.as_str(), "atlas"]);
+    ui.click_menu_item(&searching);
+    assert_eq!(shown(&ui), (Some(projects.clone()), "atlas".into()));
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+
+    // The search's own folder is two steps back from the folder it led to.
+    ui.click("forward");
+    assert_eq!(shown(&ui), (Some(atlas), String::new()));
+    ui.right_click("back");
+    ui.click_menu_item("Projects");
+    assert_eq!(shown(&ui), (Some(projects), String::new()));
+    assert_eq!(ui.names(), ["atlas"]);
 }
 
 #[gpui_kit::test]
@@ -158,6 +244,31 @@ fn a_history_menu_goes_only_where_it_says(cx: &mut TestAppContext) {
     );
     assert!(!ui.menu_open());
     assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn a_history_menu_goes_to_a_search_only_while_it_is_that_far_back(cx: &mut TestAppContext) {
+    let fx = Fixture::new("history-search-moved-on");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let shown = |ui: &Ui| (ui.folder(), ui.read(|f| f.query().to_string()));
+    ui.click("search");
+    ui.type_text("atlas");
+    let searching = ui.read(|f| f.title());
+    ui.double_click(item_id("tile", &fx.path("Projects/atlas")));
+    ui.right_click("back");
+    assert_eq!(ui.menu_labels()[0], searching);
+
+    // A key goes back to the search under the open menu. One step back is
+    // now its folder: the same place, but not the search the item names.
+    ui.press("alt-left");
+    assert_eq!(shown(&ui), (Some(fx.dir.clone()), "atlas".into()));
+    ui.click_menu_item(&searching);
+    assert_eq!(
+        shown(&ui),
+        (Some(fx.dir.clone()), "atlas".into()),
+        "the item didn't end the search it names"
+    );
+    assert!(!ui.menu_open());
 }
 
 #[gpui_kit::test]
