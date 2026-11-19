@@ -9,9 +9,9 @@ use crate::entry::{FileEntry, display_name};
 use crate::kind::{self, KindFilter};
 use fff_search::file_picker::FilePicker;
 use fff_search::{
-    Casing, DirSearchConfig, FFFMode, FilePickerOptions, FrecencyTracker, FuzzySearchOptions,
-    GitRecencyConfig, GrepConfig, GrepMode, GrepSearchOptions, MixedItemRef, MixedSearchConfig,
-    PaginationArgs, QueryParser, QueryTracker, SharedFilePicker, SharedFrecency,
+    Casing, Constraint, DirSearchConfig, FFFMode, FilePickerOptions, FrecencyTracker,
+    FuzzySearchOptions, GitRecencyConfig, GrepConfig, GrepMode, GrepSearchOptions, MixedItemRef,
+    PaginationArgs, ParserConfig, QueryParser, QueryTracker, SharedFilePicker, SharedFrecency,
     SharedQueryTracker, WatchEvent, WatchId, WatchOptions,
 };
 use rayon::prelude::*;
@@ -530,14 +530,15 @@ impl Engine {
         // fff-search reads a quoted phrase as plain fuzzy words, which find
         // every name that has it; the names are checked for it below.
         let (query, exact) = split_quoted(&req.query);
-        // The searches `search_root` makes with folders in the results.
+        // The searches `search_root` makes with folders in the results. In
+        // them a folder token that is the whole search is a word too.
         let folders =
             req.kind == KindFilter::Folder || (req.kind == KindFilter::Any && !req.files_only);
         let typed = fold_glob_case(&query, case);
         // Words reach fff-search in lowercase, so a capital in one doesn't
         // narrow the search.
         let req = &SearchRequest {
-            query: fold_word_case(&typed, folders),
+            query: fold_word_case(&typed, folders && !folder_tokens_filter(&typed)),
             ..req.clone()
         };
         // A capital is a preference instead, and only fff-search can rank by
@@ -682,12 +683,12 @@ impl Engine {
         }
         let mut query = query.trim().to_string();
         // In mixed search a query ending in `/` means "folders only"; keep that
-        // for a lone folder token but not for "main src/"-style path filters.
-        if req.kind == KindFilter::Any
-            && query.ends_with('/')
-            && let Some((head, last)) = query.rsplit_once(char::is_whitespace)
-        {
-            query = format!("{last} {head}");
+        // for a lone folder token but not for "main src/"-style path filters,
+        // which go before the tokens that don't end in `/`.
+        if req.kind == KindFilter::Any && query.ends_with('/') {
+            let mut tokens: Vec<&str> = query.split_whitespace().collect();
+            tokens.sort_by_key(|token| !token.ends_with('/'));
+            query = tokens.join(" ");
         }
 
         // fff ignores one-character words, so over-fetch and filter by name.
@@ -723,8 +724,15 @@ impl Engine {
                     .contains(&fuzzy_text(user).to_lowercase())
         };
 
+        // `query` may have the searched folder's glob in it by now, and a
+        // folder token alone is the whole search all the same.
+        let folder_filters = folder_tokens_filter(user);
         if req.kind == KindFilter::Folder {
-            let parsed = QueryParser::new(DirSearchConfig).parse(&query);
+            let config = WithFolders {
+                only: true,
+                folder_filters,
+            };
+            let parsed = QueryParser::new(config).parse(&query);
             let result = picker.fuzzy_search_directories(&parsed, options);
             part.total_matched = result.total_matched;
             for (item, score) in result.items.iter().zip(&result.scores) {
@@ -739,7 +747,11 @@ impl Engine {
                 }
             }
         } else if req.kind == KindFilter::Any && !req.files_only {
-            let parsed = QueryParser::new(MixedSearchConfig).parse(&query);
+            let config = WithFolders {
+                only: false,
+                folder_filters,
+            };
+            let parsed = QueryParser::new(config).parse(&query);
             let result = picker.fuzzy_search_mixed(&parsed, qt, options);
             part.total_matched = result.total_matched;
             for (item, score) in result.items.iter().zip(&result.scores) {
@@ -1399,7 +1411,8 @@ impl Engine {
         // can in the window.
         let query = query.map(|q| {
             let (query, _) = split_quoted(q);
-            fold_word_case(&fold_glob_case(&query, self.search_settings().case), true)
+            let typed = fold_glob_case(&query, self.search_settings().case);
+            fold_word_case(&typed, !folder_tokens_filter(&typed))
         });
         let roots = self.read_indexes().roots.clone();
         for root in roots.iter().filter(|r| path.starts_with(&r.path)) {
@@ -1807,6 +1820,54 @@ fn fuzzy_text(query: &str) -> String {
         .join(" ")
 }
 
+/// Whether `/notes/` and `src/` are folder filters in a search that can have
+/// folders in its results. They are beside other tokens, as in `/notes/ todo`.
+/// One that is the whole search is a word there instead, so that typing
+/// `src/` lists the folders that match it.
+fn folder_tokens_filter(query: &str) -> bool {
+    query.split_whitespace().nth(1).is_some()
+}
+
+/// How fff-search reads a search that can have folders in its results. Its
+/// own settings for these searches take every folder token for a word, and
+/// `/notes/ todo` then finds `meeting-notes/todo.txt` as well.
+struct WithFolders {
+    /// Only folders are searched. They have no extension, file type or git
+    /// status to filter by.
+    only: bool,
+    /// What [`folder_tokens_filter`] says of the search.
+    folder_filters: bool,
+}
+
+impl ParserConfig for WithFolders {
+    // Off, because fff-search's own folder filters take any token with a
+    // slash at an end for a folder's name, a glob such as `src*/` too.
+    // `parse_custom` reads them instead, which a glob never reaches.
+    fn enable_path_segments(&self) -> bool {
+        false
+    }
+
+    fn enable_extension(&self) -> bool {
+        !self.only
+    }
+
+    fn enable_type_filter(&self) -> bool {
+        !self.only
+    }
+
+    fn enable_git_status(&self) -> bool {
+        !self.only
+    }
+
+    fn parse_custom<'a>(&self, token: &'a str) -> Option<Constraint<'a>> {
+        let folder = token.trim_matches('/');
+        let is_filter = self.folder_filters
+            && !folder.is_empty()
+            && (token.starts_with('/') || token.ends_with('/'));
+        is_filter.then_some(Constraint::PathSegment(folder))
+    }
+}
+
 /// Take the quoted phrases out of a name search, `"tax exemption"` and the
 /// like. A quote left open runs to the end, so typing one narrows the results
 /// right away.
@@ -1941,17 +2002,18 @@ fn fold_case(glob: &str) -> String {
 /// # Arguments
 ///
 /// * `query` - The search, after quoted phrases are taken out
-/// * `folders` - Whether the results can have folders. fff-search then reads
-///   `/notes/` and `src/` as words too. Otherwise they are folder filters,
-///   which ignore case from A to Z and match any other letter only as typed,
-///   so they are left alone as well
-fn fold_word_case(query: &str, folders: bool) -> String {
+/// * `folder_words` - Whether fff-search reads `/notes/` and `src/` as words
+///   too, as it does for one that is the whole search when the results can
+///   have folders. Otherwise they are folder filters, which ignore case from
+///   A to Z and match any other letter only as typed, so they are left alone
+///   as well
+fn fold_word_case(query: &str, folder_words: bool) -> String {
     query
         .split_whitespace()
         .map(|token| {
             let is_filter = token.starts_with('!')
                 || token.contains(['*', '?', '[', '{'])
-                || (!folders && (token.starts_with('/') || token.ends_with('/')));
+                || (!folder_words && (token.starts_with('/') || token.ends_with('/')));
             match is_filter {
                 true => token.to_string(),
                 false => lowercase_word(token),
@@ -2456,6 +2518,124 @@ mod tests {
     }
 
     #[test]
+    fn folder_filters_narrow_searches_that_can_list_folders() {
+        let dir = std::env::temp_dir().join(format!("fff-folder-filter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Only the first two are inside a folder named "notes".
+        for file in [
+            "notes/todo.txt",
+            "notes/todo-items/first.md",
+            "meeting-notes/todo-agenda.txt",
+            "other/notes-todo.txt",
+            "other/todo-archive/second.md",
+            "Москва/todo-moscow.txt",
+        ] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        // The window's search, which leaves `files_only` off.
+        let hits = |query: &str, kind: KindFilter, scope: Option<&str>| {
+            let request = SearchRequest {
+                query: query.into(),
+                scope: scope.map(|folder| dir.join(folder)),
+                kind,
+                limit: 50,
+                ..Default::default()
+            };
+            engine.search(&request).hits
+        };
+        let find = |query: &str, kind: KindFilter| {
+            let mut names: Vec<String> = hits(query, kind, None)
+                .into_iter()
+                .map(|h| h.entry.name)
+                .collect();
+            names.sort();
+            names
+        };
+        let in_notes = ["first.md", "todo-items", "todo.txt"];
+
+        assert_eq!(find("/notes/ todo", KindFilter::Any), in_notes);
+        assert_eq!(find("/NOTES/ todo", KindFilter::Any), in_notes);
+        assert_eq!(
+            find("todo /notes", KindFilter::Any),
+            in_notes,
+            "a slash at either end makes it one"
+        );
+        assert_eq!(
+            find("todo notes/", KindFilter::Any),
+            in_notes,
+            "written at the end, it doesn't ask for folders only"
+        );
+        assert_eq!(
+            find("todo notes/ !other/", KindFilter::Any),
+            in_notes,
+            "nor do two of them"
+        );
+        assert_eq!(
+            find("todo !notes/", KindFilter::Any),
+            [
+                "notes-todo.txt",
+                "second.md",
+                "todo-agenda.txt",
+                "todo-archive",
+                "todo-moscow.txt"
+            ],
+            "only the folder named notes is left out"
+        );
+        assert_eq!(
+            find("/notes/ *.md *.txt", KindFilter::Any),
+            ["first.md", "todo.txt"],
+            "extensions are still alternatives beside one"
+        );
+        assert_eq!(find("todo notes/", KindFilter::Folder), ["todo-items"]);
+        assert_eq!(
+            find("/notes/ todo", KindFilter::Document),
+            ["first.md", "todo.txt"]
+        );
+        assert_eq!(
+            find("first /notes/todo-items/", KindFilter::Any),
+            ["first.md"],
+            "folders in a row"
+        );
+        // The folder a filter names counts as inside it: it is listed with
+        // what it holds, and left out with it.
+        assert_eq!(
+            find("items todo-items/", KindFilter::Any),
+            ["first.md", "todo-items"]
+        );
+        assert_eq!(
+            find("todo !todo-items/", KindFilter::Folder),
+            ["todo-archive"]
+        );
+        // Beyond A to Z, a filter's letters are compared as they are typed.
+        assert_eq!(find("todo /Москва/", KindFilter::Any), ["todo-moscow.txt"]);
+
+        // A folder token that is the whole search is a word, and lists the
+        // folders that match it.
+        let alone = hits("notes/", KindFilter::Any, None);
+        assert!(alone.iter().all(|h| h.entry.is_dir));
+        assert!(alone.iter().any(|h| h.entry.name == "notes"));
+        assert!(alone.iter().any(|h| h.entry.name == "meeting-notes"));
+        // It is the whole search when one folder is searched as well, though
+        // fff-search is then given that folder beside it.
+        let scoped = hits("archive/", KindFilter::Any, Some("other"));
+        assert!(scoped.iter().any(|h| h.entry.name == "todo-archive"));
+        // A glob stays a glob with a slash at its end, where it matches
+        // folders.
+        assert_eq!(find("archive oth*/", KindFilter::Folder), ["todo-archive"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn typos_can_be_turned_off() {
         let dir = std::env::temp_dir().join(format!("fff-typos-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2722,6 +2902,43 @@ mod tests {
         engine.track_open(&tree.join("b/readme.md"), Some("README"));
         assert_eq!(first("README"), "readme.md", "opened from this search");
         assert_eq!(first("Readme"), "readme.md", "in any letter case");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Left out on Windows for the reason the test above is.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_search_with_a_folder_filter_remembers_what_it_opened() {
+        let dir = std::env::temp_dir().join(format!("fff-opened-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tree = dir.join("tree");
+        for file in ["Docs/a/README.md", "Docs/b/readme.md"] {
+            let path = tree.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![tree.clone()],
+            app_dirs: Vec::new(),
+            db_dir: Some(dir.join("db")),
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let first = |query: &str| {
+            let request = SearchRequest {
+                query: query.into(),
+                limit: 50,
+                ..Default::default()
+            };
+            engine.search(&request).hits.swap_remove(0).entry.name
+        };
+
+        // The filter is searched as typed, so the search is remembered with
+        // it as typed.
+        assert_eq!(first("/Docs/ README"), "README.md");
+        engine.track_open(&tree.join("Docs/b/readme.md"), Some("/Docs/ README"));
+        assert_eq!(first("/Docs/ README"), "readme.md");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

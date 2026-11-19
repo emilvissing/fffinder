@@ -365,6 +365,8 @@ Unquoted words match fzf-style: their letters must appear in order somewhere in 
 
 Unquoted words ignore letter case, so `README` also finds `readme.md`. Quoted words and globs follow **Letter case in searches** in [Settings › Search engine](#search-engine). Set to Smart, as it is at first, `"README"` finds only names that have `README` in capitals.
 
+A folder filter isn't fuzzy. `/notes/` and `notes/` mean a folder named `notes`, at any depth inside the search location, so `/notes/ todo` doesn't find `meeting-notes/todo.txt`, and `!notes/` leaves out only a folder with that name and what is inside it. Letter case is ignored from A to Z; other letters, such as `Ü`, must be typed as the folder has them. A filter can name folders in a row, as in `/src/finder/ list`. It can't have a space in it, so for a folder such as `Brand guidelines` use a glob, with `?` where the space is: `**/Brand?guidelines/** colors`. With Any Kind or Folder, a folder filter that is the whole search is a word instead: `src/` finds the folders that match it.
+
 ### Ranking and limits
 
 fff-search ranks results, and fffinder re-ranks them so name matches come first, shallow paths come before deep ones, and nothing inside `.app` or `.framework` bundles shows. A capital letter in a word is a preference: names that fit the capitals rank higher, so `README` lists `README.md` ahead of `readme.md`, and the initials `TEC` favor `TaxExemptionController.java`. When a word matches files exactly, typo-only matches are dropped. With **Allow typos** off in [Settings › Search engine](#search-engine), they're always dropped. Apps from the app folders rank as one item wherever their folder is, so "safari" or "term" puts Safari or Terminal ahead of a file with the same words in its name.
