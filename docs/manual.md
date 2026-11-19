@@ -126,11 +126,14 @@ The file area shows a message when there is nothing to list:
 | Message | When |
 | --- | --- |
 | Can't open this folder | The folder can't be read. The reason is shown. |
+| No Items Pass the Filter | A [Nushell filter](#filters-and-smart-folders) hides every item of the folder, or everything the search found. The message says how many items that is, and **Remove Filter** under it turns the filter off. While the filter is still running over the items, placeholders show instead, since some of them may pass. |
 | Indexing… | A search ran before the index was ready. It runs again as soon as a search location finishes indexing, and again as the rest finish. A folder outside the search locations says the same while its temporary index is built. |
 | Searching… | A contents search is still looking inside files, after the search before it found nothing. |
 | Nothing Found Before the Time Limit | A contents search reached its time limit before it had looked inside every file, and had found nothing by then. |
-| No Results | The search found nothing. |
+| The Search Was Cut Short | A search stopped at the result limit before it came to an item it can list, so it can't say that nothing matches. |
+| No Results | The search found nothing. When it looked only in one folder, or only for one kind, the message says so, and **Search This Computer** or **Search Any Kind** under it searches again without that limit. For a contents search it adds that files over the size set in [Settings › Search engine](#search-engine) aren't looked inside. |
 | No Recent Files | Recents is empty. |
+| The Trash Is Empty | The Trash is empty. |
 | No Items | The folder is empty. |
 
 Open folders refresh on their own. Every two seconds fffinder checks each folder on screen: the one the window shows, folders opened in place in the list, and the column view's panes. It quietly reads again any that gained, lost, or renamed an item. The check happens off the window's thread, so a slow network volume can't freeze it. A file whose contents change in place keeps its old size and date until something in its folder changes or you refresh. Search results and Recents keep up through the index instead, which watches the search locations. When it sees a file added, removed, or renamed, a search by name that lists the file, or could list it, runs again a few seconds later, once files have stopped coming, and shows its results if the file made a difference to them. While files keep coming, it runs again every half minute or so. Nothing says that it's running, and what's selected stays selected. Files that come and go without changing the results make it run again less and less often, down to once in about four minutes, so a busy disk doesn't keep a search going. After a minute without such files, it keeps up closely again. Recents is read again the same way: a few seconds after the files it would show have stopped being added, removed, renamed, or written to, and every half minute or so while they haven't. A single file that is written to on and on, as a download is, isn't waited for: it goes first, and stays there however often it's written to, with the size and date it showed. Changes that keep leaving Recents as it was make it read less often too, until they have stopped for a while. A search by contents can take seconds, so it waits for Refresh (Cmd+R), and so does a new near miss with a typo.
@@ -346,7 +349,7 @@ While a search is active, the scope bar shows the controls below. A click on Thi
 | Save | Save the search as a [Smart Folder](#filters-and-smart-folders) (Cmd+S). |
 | Funnel | Open the Nushell filter bar (Cmd+Alt+F). |
 | (i) | Show the Search Syntax dialog (Cmd+/). |
-| Kind menu | Any Kind, Folder, Document, Image, Movie, Audio, Code, or Archive. Disabled for contents searches. A kind of file goes by the extension, so a name without one, such as `README` or `Makefile`, is found only with Any Kind. Document covers text, PDFs, word processor, spreadsheet, and presentation files, and data such as CSV, JSON, and settings files. An extension you type narrows the kind: with Image, `logo *.svg` finds only the SVG images, and `logo *.txt` finds nothing. |
+| Kind menu | Any Kind, Folder, Document, Image, Movie, Audio, Code, or Archive. Disabled for contents searches. A kind other than Any Kind shows in the accent color, as the other controls do when they are on. A kind of file goes by the extension, so a name without one, such as `README` or `Makefile`, is found only with Any Kind. Document covers text, PDFs, word processor, spreadsheet, and presentation files, and data such as CSV, JSON, and settings files. An extension you type narrows the kind: with Image, `logo *.svg` finds only the SVG images, and `logo *.txt` finds nothing. |
 
 ### Search syntax
 
@@ -362,7 +365,7 @@ While a search is active, the scope bar shows the controls below. A click on Thi
 | `!*.log !test` | Exclude an extension, glob, folder, or text. |
 | `main.rs:42` | A line suffix, ignored for matching. |
 
-Cmd+/ shows this table in the app. Click an example there to try it: it replaces what's in the search field and is searched for right away, by name even if Contents was on. Undo in the search field (Cmd+Z there) brings back what it replaced. The table stays open so you can try one example after another, with the results changing behind it, and it highlights the row of the example that's being searched for. An example is an ordinary search, so it shows No Results when nothing in your search locations fits it, or when the kind, the scope, or a filter leaves out what does. The first row says whether typos are allowed, as **Allow typos** is set.
+Cmd+/ shows this table in the app. Click an example there to try it: it replaces what's in the search field and is searched for right away, by name even if Contents was on. Undo in the search field (Cmd+Z there) brings back what it replaced. The table stays open so you can try one example after another, with the results changing behind it, and it highlights the row of the example that's being searched for. An example is an ordinary search, so it shows No Results when nothing in your search locations fits it, or when the kind or the scope leaves out what does, and No Items Pass the Filter when a filter hides what it found. The first row says whether typos are allowed, as **Allow typos** is set.
 
 Unquoted words match fzf-style: their letters must appear in order somewhere in the path inside the search location, with gaps allowed, folder names included. So `taxexemptionc` also finds `token/exemption/coding/TaxHandler.java`. Quote a word to match it only in the name, letters in a row.
 
@@ -653,7 +656,7 @@ Or start with `|` to use a whole pipeline, which must keep the `path` column:
 | sort-by size --reverse | first 20
 ```
 
-The filter runs 400 ms after you stop typing, or right away when you press Return. The status bar counts how many items pass. Errors show in red below the bar. The close button removes the filter, and so does Cmd+Alt+F. Escape empties the field, which turns the filter off, and Escape in an empty field gives the keyboard to the files. The bar stays open either way.
+The filter runs 400 ms after you stop typing, or right away when you press Return. The status bar counts how many items pass. When none does, the file area says so and offers **Remove Filter**. Errors show in red below the bar. The close button removes the filter, and so does Cmd+Alt+F. Escape empties the field, which turns the filter off, and Escape in an empty field gives the keyboard to the files. The bar stays open either way.
 
 A Smart Folder is a saved search. While searching, **Save** in the scope bar opens "Save Smart Folder", and so do Cmd+S, "Save Search…" in the Actions menu, and "Save Search…" in the Edit menu. With no search showing, Cmd+S says there is nothing to save yet, and the Actions menu's item is off. The dialog says what it saves: the words, Name or Contents, the scope folder or This Computer, a Name search's kind unless it's Any Kind, and the filter when one is on. Name it, and it's saved in the sidebar under Smart Folders. A name that a Smart Folder already has replaces that one, in the same place in the sidebar. The dialog says so before you save, and its button reads Replace. With no name, the button is off.
 
@@ -1311,7 +1314,7 @@ cargo run -- ~/src --query readme    # run from source
 
 The UI tests open the real window headlessly and use it with mouse clicks and key presses:
 
-- `tests/controls.rs` clicks every control and checks what each click changed: toolbar buttons and menus, the search field and scope bar, the filter bar, sidebar rows and Smart Folders, the path bar, the icon-size slider, list headers, items in all four views, context menus and Nushell actions, every button and field in every dialog (batch rename included), the Nushell panel, and the picker bar.
+- `tests/controls.rs` clicks every control and checks what each click changed: toolbar buttons and menus, the search field and scope bar, the filter bar, the buttons under a message in the file area, sidebar rows and Smart Folders, the path bar, the icon-size slider, list headers, items in all four views, context menus and Nushell actions, every button and field in every dialog (batch rename included), the Nushell panel, and the picker bar.
 - `tests/finder.rs` presses every keyboard shortcut except Quit and New Window, which belong to the app rather than the window, and types to select.
 - `tests/columns.rs` drags column, pane, and sidebar edges, scrolls the list sideways, and rests the mouse on text to check its tooltip.
 - `tests/basics.rs` draws selection boxes, presses the mouse's other buttons, opens folders in new tabs, and pages through a long list.

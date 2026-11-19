@@ -48,7 +48,9 @@ use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollbarHandle as _;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
-use gpui_kit::component::{ActiveTheme as _, ElementExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, ElementExt as _, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
@@ -575,6 +577,10 @@ pub struct Finder {
     /// propagation, so the empty-space menu around the item checks this and
     /// stays closed for the same click.
     item_menu_at: Option<Point<Pixels>>,
+    /// A button under the file area's message was clicked, and no click has
+    /// begun in the file area since. The second press of a double-click on
+    /// the button finds what the first one put in its place.
+    message_button_clicked: bool,
 
     nu_open: bool,
     /// The open "Rename N Items" dialog's state.
@@ -834,6 +840,7 @@ impl Finder {
             quick_look_focus: cx.focus_handle(),
             quick_look_window: None,
             item_menu_at: None,
+            message_button_clicked: false,
             type_select: String::new(),
             type_select_at: None,
             nu_open: false,
@@ -4245,30 +4252,56 @@ impl Finder {
                     )
                 })
                 .into_any_element()
-        } else if self.rows.is_empty() && !self.loading && !self.awaits_first_results() {
-            let (title, detail) = if self.is_searching() {
-                let stats = self.search_stats.as_ref();
-                empty_search_message(
-                    self.indexing_progress(),
-                    stats.is_some_and(|s| s.indexing),
-                    self.searching && self.search_contents,
-                    // With rows a filter hides, the search did find something.
-                    stats.is_some_and(|s| s.stopped) && self.results.is_empty(),
-                )
-            } else if matches!(self.history.current(), Location::Recents) {
-                (
-                    "No Recent Files".into(),
-                    "Files you change appear here.".into(),
-                )
-            } else if matches!(self.history.current(), Location::Trash) {
-                (
-                    "The Trash Is Empty".into(),
-                    "Items you move to the Trash appear here.".into(),
-                )
-            } else {
-                ("No Items".into(), "This folder is empty.".into())
-            };
-            self.render_message(&title, &detail, cx).into_any_element()
+        } else if self.rows.is_empty()
+            && !self.loading
+            && !self.awaits_first_results()
+            // A filter that is still running may keep some of the items it
+            // was given, so placeholders show until it ends. One that was
+            // given none has none to keep.
+            && !(self.filtering && self.unfiltered_len > 0)
+        {
+            let stats = self.search_stats.as_ref();
+            let scope_folder = self
+                .searched_folder()
+                .map(|folder| fffinder_core::entry::display_name(&folder));
+            let message = empty_message(&EmptyInput {
+                location: self.history.current(),
+                searching: self.is_searching(),
+                contents: self.search_contents,
+                scope_folder: scope_folder.as_deref(),
+                kind: self.config.kind_filter,
+                indexed: self.indexing_progress(),
+                partial: stats.is_some_and(|s| s.indexing),
+                looking: self.searching && self.search_contents,
+                // With rows a filter hides, the search did find something.
+                stopped: stats.is_some_and(|s| s.stopped) && self.results.is_empty(),
+                capped: stats.is_some_and(|s| s.truncated),
+                // The items of a collapsed group passed the filter.
+                filtered: !self.filter.is_empty()
+                    && self.filter_error.is_none()
+                    && self.groups.is_empty(),
+                unfiltered: self.unfiltered_len,
+            });
+            let buttons: Vec<_> = message
+                .actions
+                .iter()
+                .map(|&action| self.empty_action_button(action, cx))
+                .collect();
+            self.render_message(&message.title, &message.detail, cx)
+                .when(!buttons.is_empty(), |this| {
+                    this.child(
+                        h_flex()
+                            // A second line in a narrow pane keeps both
+                            // buttons in view.
+                            .flex_wrap()
+                            .justify_center()
+                            .max_w_full()
+                            .gap(ui(8.))
+                            .mt(ui(10.))
+                            .children(buttons),
+                    )
+                })
+                .into_any_element()
         } else if view == ViewMode::Columns {
             self.render_columns(window, cx).into_any_element()
         } else if self.rows.is_empty() {
@@ -4298,6 +4331,19 @@ impl Finder {
             .min_h_0()
             .w_full()
             .relative()
+            // A double-click on a button under the message presses it once.
+            // The second press is no click on the item that is now where
+            // the button was, which it would open, or on the next button.
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                if event.button != MouseButton::Left || !this.message_button_clicked {
+                    return;
+                }
+                if event.click_count >= 2 {
+                    cx.stop_propagation();
+                } else {
+                    this.message_button_clicked = false;
+                }
+            }))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(|this, _: &MoveUp, window, cx| {
                 this.move_selection(0, -1, false, window, cx)
@@ -4402,6 +4448,9 @@ impl Finder {
         let theme = cx.theme();
         v_flex()
             .size_full()
+            // Clear of the edges of a pane narrower than the text, where
+            // the title takes more than one line too.
+            .px(ui(12.))
             .items_center()
             .justify_center()
             .gap_1()
@@ -4409,6 +4458,7 @@ impl Finder {
                 div()
                     .id("message-title")
                     .aria_label(SharedString::from(title.to_string()))
+                    .text_center()
                     .text_size(ui(17.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
@@ -4417,38 +4467,165 @@ impl Finder {
             )
             .child(
                 div()
+                    .id("message-detail")
+                    .aria_label(SharedString::from(detail.to_string()))
                     .max_w(ui(420.))
                     .text_center()
                     .text_size(ui(12.))
                     .text_color(theme.muted_foreground)
-                    .child(detail.to_string()),
+                    .child(detail.to_string())
+                    .test_support(),
             )
+    }
+
+    /// A button under the file area's message, for one way out of it.
+    fn empty_action_button(
+        &self,
+        action: EmptyAction,
+        cx: &Context<Self>,
+    ) -> gpui_kit::component::button::Button {
+        let (id, label) = match action {
+            EmptyAction::RemoveFilter => ("empty-remove-filter", "Remove Filter"),
+            EmptyAction::SearchComputer => ("empty-widen-scope", "Search This Computer"),
+            EmptyAction::AnyKind => ("empty-any-kind", "Search Any Kind"),
+        };
+        gpui_kit::component::button::Button::new(id)
+            .small()
+            // In a pane narrower than its label, the label is cut short.
+            .max_w_full()
+            .label(label)
+            // In the file area Return and Space are the files' keys, Open
+            // and Quick Look, so they wouldn't press a button that had the
+            // keyboard. Tab passes it by.
+            .tab_stop(false)
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.run_empty_action(action, window, cx)
+            }))
+    }
+
+    /// Do what a button under the file area's message offers.
+    fn run_empty_action(
+        &mut self,
+        action: EmptyAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.message_button_clicked = true;
+        match action {
+            EmptyAction::RemoveFilter => {
+                // Which gives the files the keyboard, as the filter bar's
+                // own button does.
+                self.close_filter(window, cx);
+                return;
+            }
+            EmptyAction::SearchComputer => self.set_scope(SearchScope::Computer, cx),
+            EmptyAction::AnyKind => self.set_kind(KindFilter::Any, cx),
+        }
+        // The other two do what a click in the scope bar does, and like it
+        // they leave the keyboard where it is, so the search field goes on
+        // taking letters. The files get it where the scope bar gives it to
+        // them, and when it is on the button itself, where a right click
+        // puts it: the button goes once the search finds something.
+        if self.files_focus.contains_focused(window, cx)
+            || self.focus.is_focused(window)
+            || !self.focus.contains_focused(window, cx)
+        {
+            self.focus_files(window, cx);
+        }
     }
 }
 
-/// What the file area says when a search has nothing to list: the title and
-/// the line under it.
-///
-/// # Arguments
-///
-/// * `indexed` - The files indexed so far, while a search location is being
-///   indexed
-/// * `partial` - Whether the last answer came from an index still being built
-/// * `looking` - Whether a contents search is running
-/// * `stopped` - Whether the time limit ended the last search with nothing
-///   found
-fn empty_search_message(
+/// A way out of an empty file area, offered as a button under its message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyAction {
+    /// Take the Nushell filter off.
+    RemoveFilter,
+    /// Search every search location instead of one folder.
+    SearchComputer,
+    /// Search for items of any kind instead of one.
+    AnyKind,
+}
+
+/// What the file area says when it has nothing to list.
+struct EmptyMessage {
+    title: String,
+    /// The line under the title.
+    detail: String,
+    /// The buttons under both.
+    actions: Vec<EmptyAction>,
+}
+
+/// What decides the message of an empty file area.
+struct EmptyInput<'a> {
+    /// Where the window is.
+    location: &'a Location,
+    /// Words are being searched for. The fields down to `capped` are about
+    /// that search.
+    searching: bool,
+    /// It looks inside files, not at names.
+    contents: bool,
+    /// The name of the one folder it looks in, when it isn't This Computer.
+    scope_folder: Option<&'a str>,
+    /// The kind chosen in the scope bar.
+    kind: KindFilter,
+    /// The files indexed so far, while a search location is being indexed.
     indexed: Option<usize>,
+    /// The last answer came from an index still being built.
     partial: bool,
+    /// A contents search is running.
     looking: bool,
+    /// The time limit ended the last search with nothing found.
     stopped: bool,
-) -> (String, String) {
+    /// More items match than the last search listed.
+    capped: bool,
+    /// A Nushell filter is on, and no item passed it.
+    filtered: bool,
+    /// How many items there are before the filter.
+    unfiltered: usize,
+}
+
+/// What the file area says when it has nothing to list: why, and the ways
+/// out that are worth a button.
+fn empty_message(input: &EmptyInput) -> EmptyMessage {
+    let plain = |title: &str, detail: &str| EmptyMessage {
+        title: title.to_string(),
+        detail: detail.to_string(),
+        actions: Vec::new(),
+    };
+    // With items the filter hides, neither the place nor the search is
+    // without any, whatever else is true of them.
+    if input.filtered && input.unfiltered > 0 {
+        let hidden = match input.unfiltered {
+            1 => "1 item is hidden by the filter.".to_string(),
+            n => format!("{} items are hidden by the filter.", group_digits(n)),
+        };
+        return EmptyMessage {
+            title: "No Items Pass the Filter".to_string(),
+            // The filter was given only part of what the search matches.
+            detail: if input.capped {
+                format!("{hidden} {}", bars::MORE_THAN_FILTERED)
+            } else {
+                hidden
+            },
+            actions: vec![EmptyAction::RemoveFilter],
+        };
+    }
+    if !input.searching {
+        return match input.location {
+            Location::Recents => plain("No Recent Files", "Files you change appear here."),
+            Location::Trash => plain(
+                "The Trash Is Empty",
+                "Items you move to the Trash appear here.",
+            ),
+            _ => plain("No Items", "This folder is empty."),
+        };
+    }
     // What an index held while it was still being built is no "No Results":
     // the search runs again as the index fills.
-    match indexed {
-        Some(n) => (
-            "Indexing…".to_string(),
-            format!(
+    match input.indexed {
+        Some(n) => plain(
+            "Indexing…",
+            &format!(
                 "{} files indexed so far. Results appear when indexing finishes.",
                 group_digits(n)
             ),
@@ -4456,29 +4633,73 @@ fn empty_search_message(
         // Without a count: the index being built is a folder's own, outside
         // the search locations, or the locations were last looked at before
         // their indexing began or as it ended.
-        None if partial => (
-            "Indexing…".to_string(),
-            "Results appear when indexing finishes.".to_string(),
-        ),
+        None if input.partial => plain("Indexing…", "Results appear when indexing finishes."),
         // Looking inside files can take seconds, too long to leave "No
         // Results" up for words it wasn't about. A name search answers
         // before another message could be read.
-        None if looking => (
-            "Searching…".to_string(),
-            "Looking inside files for a match.".to_string(),
-        ),
+        None if input.looking => plain("Searching…", "Looking inside files for a match."),
         // A search the time limit ended hasn't looked inside every file, so
         // it can't say that none has the words.
-        None if stopped => (
-            "Nothing Found Before the Time Limit".to_string(),
+        None if input.stopped => plain(
+            "Nothing Found Before the Time Limit",
             "The search stopped before it had looked inside every file. Search a smaller \
-             folder, or raise the time limit in Settings › Search engine."
-                .to_string(),
+             folder, or raise the time limit in Settings › Search engine.",
         ),
-        None => (
-            "No Results".to_string(),
-            "Try a different name, kind, or search location.".to_string(),
+        // Nor can a search that was cut short at its limit, when nothing it
+        // came to before that can be listed. A filter is given more results
+        // than Results shown allows, so raising that wouldn't help it.
+        None if input.capped => plain(
+            "The Search Was Cut Short",
+            if input.filtered {
+                "The search stopped at the result limit before it came to an item it can \
+                 list. Narrow the search."
+            } else {
+                "The search stopped at the result limit before it came to an item it can \
+                 list. Narrow the search, or raise Results shown in Settings › Search engine."
+            },
         ),
+        None => no_results(input),
+    }
+}
+
+/// "No Results", with what kept the search from looking further and a
+/// button to lift each such limit.
+fn no_results(input: &EmptyInput) -> EmptyMessage {
+    // A contents search looks inside files of every kind.
+    let kind = Some(input.kind).filter(|kind| *kind != KindFilter::Any && !input.contents);
+    let limits = match (input.scope_folder, kind) {
+        (Some(folder), Some(kind)) => Some(format!(
+            "The search looked only in “{folder}”, and only for items of the kind {}.",
+            kind.label()
+        )),
+        (Some(folder), None) => Some(format!("The search looked only in “{folder}”.")),
+        (None, Some(kind)) => Some(format!(
+            "The search looked only for items of the kind {}.",
+            kind.label()
+        )),
+        (None, None) => None,
+    };
+    let detail = if input.contents {
+        format!(
+            "{} Files over the size set in Settings › Search engine aren’t looked inside.",
+            limits
+                .as_deref()
+                .unwrap_or("Try different words or another search location.")
+        )
+    } else {
+        limits.unwrap_or_else(|| "Try a different name or search location.".to_string())
+    };
+    let mut actions = Vec::new();
+    if input.scope_folder.is_some() {
+        actions.push(EmptyAction::SearchComputer);
+    }
+    if kind.is_some() {
+        actions.push(EmptyAction::AnyKind);
+    }
+    EmptyMessage {
+        title: "No Results".to_string(),
+        detail,
+        actions,
     }
 }
 
@@ -4498,9 +4719,13 @@ pub fn group_digits(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's `test` attribute would replace the standard one.
-    use super::{AbortOnDrop, IndexActivity, ListingError, content_search, empty_search_message};
+    use super::{
+        AbortOnDrop, EmptyAction, EmptyInput, IndexActivity, ListingError, content_search,
+        empty_message,
+    };
+    use crate::model::Location;
     use crate::trash_bin::TrashError;
-    use fffinder_core::{Engine, EngineOptions, RootStatus};
+    use fffinder_core::{Engine, EngineOptions, KindFilter, RootStatus};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -4669,17 +4894,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// What the message is made from when a search by name, in This
+    /// Computer and for any kind, has answered with nothing.
+    fn name_search(location: &Location) -> EmptyInput<'_> {
+        EmptyInput {
+            location,
+            searching: true,
+            contents: false,
+            scope_folder: None,
+            kind: KindFilter::Any,
+            indexed: None,
+            partial: false,
+            looking: false,
+            stopped: false,
+            capped: false,
+            filtered: false,
+            unfiltered: 0,
+        }
+    }
+
     #[test]
     fn a_search_the_time_limit_ended_doesnt_say_no_results() {
-        let title = |indexed, partial, looking, stopped| {
-            empty_search_message(indexed, partial, looking, stopped).0
+        let folder = Location::Folder(PathBuf::from("/r"));
+        let said = |indexed, partial, looking, stopped| {
+            empty_message(&EmptyInput {
+                contents: true,
+                indexed,
+                partial,
+                looking,
+                stopped,
+                ..name_search(&folder)
+            })
         };
+        let title =
+            |indexed, partial, looking, stopped| said(indexed, partial, looking, stopped).title;
         assert_eq!(title(None, false, false, false), "No Results");
         assert_eq!(
             title(None, false, false, true),
             "Nothing Found Before the Time Limit"
         );
-        let (_, detail) = empty_search_message(None, false, false, true);
+        let detail = said(None, false, false, true).detail;
         assert!(detail.contains("time limit"), "{detail}");
 
         // While the search runs again, or an index is being built, the
@@ -4687,6 +4941,250 @@ mod tests {
         assert_eq!(title(None, false, true, true), "Searching…");
         assert_eq!(title(None, true, false, true), "Indexing…");
         assert_eq!(title(Some(12), false, false, true), "Indexing…");
+    }
+
+    #[test]
+    fn a_filter_that_hides_every_item_isnt_an_empty_folder_or_no_results() {
+        let folder = Location::Folder(PathBuf::from("/r"));
+        // In a folder, and in a search that found something.
+        for searching in [false, true] {
+            let said = empty_message(&EmptyInput {
+                searching,
+                filtered: true,
+                unfiltered: 1234,
+                ..name_search(&folder)
+            });
+            assert_eq!(said.title, "No Items Pass the Filter");
+            assert_eq!(said.detail, "1,234 items are hidden by the filter.");
+            assert_eq!(said.actions, [EmptyAction::RemoveFilter]);
+        }
+        let one = empty_message(&EmptyInput {
+            filtered: true,
+            unfiltered: 1,
+            ..name_search(&Location::Trash)
+        });
+        assert_eq!(one.detail, "1 item is hidden by the filter.");
+
+        // The filter is given only so many of a search's results, and the
+        // ones it wasn't given may pass.
+        let part = empty_message(&EmptyInput {
+            filtered: true,
+            unfiltered: 5000,
+            capped: true,
+            ..name_search(&folder)
+        });
+        assert_eq!(part.title, "No Items Pass the Filter");
+        assert_eq!(
+            part.detail,
+            "5,000 items are hidden by the filter. More items match than the filter was given. \
+             Narrow the search."
+        );
+
+        // It is what the filter hides that counts, whatever else is true of
+        // the search just then.
+        let busy = empty_message(&EmptyInput {
+            contents: true,
+            indexed: Some(12),
+            partial: true,
+            looking: true,
+            filtered: true,
+            unfiltered: 3,
+            ..name_search(&folder)
+        });
+        assert_eq!(busy.title, "No Items Pass the Filter");
+
+        // With no items to hide, the filter isn't why there are none.
+        let empty = |searching| {
+            empty_message(&EmptyInput {
+                searching,
+                filtered: true,
+                ..name_search(&folder)
+            })
+        };
+        assert_eq!(empty(false).title, "No Items");
+        assert_eq!(empty(true).title, "No Results");
+        assert!(empty(false).actions.is_empty() && empty(true).actions.is_empty());
+    }
+
+    #[test]
+    fn an_empty_place_says_which_it_is_and_offers_nothing() {
+        let folder = Location::Folder(PathBuf::from("/r"));
+        for (location, title, detail) in [
+            (&folder, "No Items", "This folder is empty."),
+            (
+                &Location::Recents,
+                "No Recent Files",
+                "Files you change appear here.",
+            ),
+            (
+                &Location::Trash,
+                "The Trash Is Empty",
+                "Items you move to the Trash appear here.",
+            ),
+        ] {
+            // What the next search would be limited to, and an index that
+            // is being built, are nothing to a place without items.
+            let said = empty_message(&EmptyInput {
+                searching: false,
+                scope_folder: Some("r"),
+                kind: KindFilter::Image,
+                indexed: Some(12),
+                ..name_search(location)
+            });
+            assert_eq!((said.title.as_str(), said.detail.as_str()), (title, detail));
+            assert!(said.actions.is_empty(), "{:?}", said.actions);
+        }
+    }
+
+    #[test]
+    fn no_results_says_where_the_search_looked_and_offers_to_look_further() {
+        let folder = Location::Folder(PathBuf::from("/r/Projects"));
+        let anywhere = empty_message(&name_search(&folder));
+        assert_eq!(anywhere.title, "No Results");
+        assert_eq!(anywhere.detail, "Try a different name or search location.");
+        assert!(anywhere.actions.is_empty(), "{:?}", anywhere.actions);
+
+        let in_folder = empty_message(&EmptyInput {
+            scope_folder: Some("Projects"),
+            ..name_search(&folder)
+        });
+        assert_eq!(in_folder.title, "No Results");
+        assert_eq!(in_folder.detail, "The search looked only in “Projects”.");
+        assert_eq!(in_folder.actions, [EmptyAction::SearchComputer]);
+
+        let of_kind = empty_message(&EmptyInput {
+            kind: KindFilter::Image,
+            ..name_search(&folder)
+        });
+        assert_eq!(
+            of_kind.detail,
+            "The search looked only for items of the kind Image."
+        );
+        assert_eq!(of_kind.actions, [EmptyAction::AnyKind]);
+
+        let both = empty_message(&EmptyInput {
+            scope_folder: Some("Projects"),
+            kind: KindFilter::Image,
+            ..name_search(&folder)
+        });
+        assert_eq!(
+            both.detail,
+            "The search looked only in “Projects”, and only for items of the kind Image."
+        );
+        assert_eq!(
+            both.actions,
+            [EmptyAction::SearchComputer, EmptyAction::AnyKind]
+        );
+
+        // A contents search looks inside files of every kind, so the kind
+        // the menu was left at is neither named nor offered.
+        let inside = |scope_folder| {
+            empty_message(&EmptyInput {
+                contents: true,
+                scope_folder,
+                kind: KindFilter::Image,
+                ..name_search(&folder)
+            })
+        };
+        let (scoped, unscoped) = (inside(Some("Projects")), inside(None));
+        assert_eq!(scoped.title, "No Results");
+        assert_eq!(
+            scoped.detail,
+            "The search looked only in “Projects”. Files over the size set in Settings › \
+             Search engine aren’t looked inside."
+        );
+        assert_eq!(scoped.actions, [EmptyAction::SearchComputer]);
+        assert_eq!(
+            unscoped.detail,
+            "Try different words or another search location. Files over the size set in \
+             Settings › Search engine aren’t looked inside."
+        );
+        assert!(unscoped.actions.is_empty(), "{:?}", unscoped.actions);
+    }
+
+    #[test]
+    fn a_search_cut_short_with_nothing_listed_doesnt_say_no_results() {
+        let folder = Location::Folder(PathBuf::from("/r"));
+        let cut = |filtered| {
+            empty_message(&EmptyInput {
+                contents: true,
+                capped: true,
+                filtered,
+                ..name_search(&folder)
+            })
+        };
+        assert_eq!(cut(false).title, "The Search Was Cut Short");
+        assert!(
+            cut(false).detail.contains("raise Results shown"),
+            "{}",
+            cut(false).detail
+        );
+        // A filter is given more results than Results shown allows.
+        assert_eq!(cut(true).title, "The Search Was Cut Short");
+        assert!(
+            cut(true).detail.ends_with("Narrow the search."),
+            "{}",
+            cut(true).detail
+        );
+
+        // Only "No Results" has buttons: the others aren't the last word
+        // on a search, or say what to do instead. Each comes before the
+        // ones after it.
+        let limited = EmptyInput {
+            scope_folder: Some("r"),
+            kind: KindFilter::Image,
+            ..name_search(&folder)
+        };
+        for (title, said) in [
+            (
+                "Indexing…",
+                empty_message(&EmptyInput {
+                    indexed: Some(12),
+                    partial: true,
+                    looking: true,
+                    stopped: true,
+                    capped: true,
+                    ..limited
+                }),
+            ),
+            (
+                "Indexing…",
+                empty_message(&EmptyInput {
+                    partial: true,
+                    looking: true,
+                    stopped: true,
+                    capped: true,
+                    ..limited
+                }),
+            ),
+            (
+                "Searching…",
+                empty_message(&EmptyInput {
+                    looking: true,
+                    stopped: true,
+                    capped: true,
+                    ..limited
+                }),
+            ),
+            (
+                "Nothing Found Before the Time Limit",
+                empty_message(&EmptyInput {
+                    stopped: true,
+                    capped: true,
+                    ..limited
+                }),
+            ),
+            (
+                "The Search Was Cut Short",
+                empty_message(&EmptyInput {
+                    capped: true,
+                    ..limited
+                }),
+            ),
+        ] {
+            assert_eq!(said.title, title);
+            assert!(said.actions.is_empty(), "{title}: {:?}", said.actions);
+        }
     }
 
     fn root(scanning: bool, finishing: bool, files: usize) -> RootStatus {

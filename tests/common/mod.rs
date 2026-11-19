@@ -72,6 +72,9 @@ fn isolate_settings() {
     CONFIG.get_or_init(|| {
         let config =
             std::env::temp_dir().join(format!("fffinder-ui-config-{}", std::process::id()));
+        // An earlier process with this ID may have left its settings here,
+        // and every window of this one would start with them.
+        let _ = std::fs::remove_dir_all(&config);
         std::fs::create_dir_all(&config).unwrap();
         // SAFETY: runs once, inside the OnceLock, before any test reads the variable.
         unsafe {

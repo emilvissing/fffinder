@@ -28,7 +28,8 @@ const MORE_ITEMS_MATCH: &str =
 
 /// The same for a filtered search. A filter is given more results than
 /// Results shown allows, so raising that wouldn't bring in any more.
-const MORE_THAN_FILTERED: &str = "More items match than the filter was given. Narrow the search.";
+pub(super) const MORE_THAN_FILTERED: &str =
+    "More items match than the filter was given. Narrow the search.";
 
 impl Finder {
     pub(super) fn render_scope_bar(
@@ -194,6 +195,9 @@ impl Finder {
             .child(
                 Button::new("kind")
                     .outline()
+                    // In the accent color while it narrows the search, like
+                    // a chip that is on. A contents search ignores the kind.
+                    .when(kind != KindFilter::Any && !contents, |this| this.primary())
                     .xsmall()
                     .w(ui(130.))
                     .label(kind.label())

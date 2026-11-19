@@ -1783,6 +1783,238 @@ fn a_contents_search_that_found_nothing_says_it_is_searching_again(cx: &mut Test
     assert_eq!(ui.snapshot("message-title").label(), Some("No Results"));
 }
 
+/// The line under the title of the file area's message.
+fn message_detail(ui: &mut Ui) -> String {
+    ui.snapshot("message-detail").label().unwrap().to_string()
+}
+
+#[gpui_kit::test]
+fn no_results_in_one_folder_offers_to_search_this_computer(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-nothing-scope");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Projects"));
+    ui.click("search-scope");
+    ui.click("search");
+    ui.type_text("budge");
+    assert!(ui.names().is_empty(), "Budget.csv is outside Projects");
+    assert!(ui.exists("empty-widen-scope"));
+    assert!(!ui.exists("empty-any-kind"), "the kind is Any Kind");
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Results"));
+    assert_eq!(
+        message_detail(&mut ui),
+        "The search looked only in “Projects”."
+    );
+
+    // The button does what This Computer in the scope bar does, and like
+    // that one it leaves the keyboard in the search field.
+    ui.click("empty-widen-scope");
+    assert_eq!(ui.read(|f| f.search_scope()), SearchScope::Computer);
+    assert_eq!(ui.names(), ["Budget.csv"]);
+    ui.type_text("t");
+    assert_eq!(ui.read(|f| f.query().to_string()), "budget");
+}
+
+#[gpui_kit::test]
+fn no_results_for_one_kind_offers_any_kind(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-nothing-kind");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("search");
+    ui.type_text("roadmap");
+    ui.click("kind");
+    ui.click_menu_item("Folder");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(ui.exists("empty-any-kind"));
+    assert!(
+        !ui.exists("empty-widen-scope"),
+        "the search is of This Computer"
+    );
+    assert_eq!(
+        message_detail(&mut ui),
+        "The search looked only for items of the kind Folder."
+    );
+
+    ui.click("empty-any-kind");
+    assert_eq!(ui.read(|f| f.config().kind_filter), KindFilter::Any);
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+
+    // A contents search looks inside files of every kind, whatever the menu
+    // was left at, so its message has nothing to say about the kind.
+    ui.click("kind");
+    ui.click_menu_item("Folder");
+    ui.type_text("qqzz");
+    ui.click("by-contents");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Results"));
+    let detail = message_detail(&mut ui);
+    assert!(!detail.contains("kind"), "{detail}");
+    assert!(!ui.exists("empty-any-kind"));
+}
+
+#[gpui_kit::test]
+fn a_button_under_no_results_takes_no_keyboard_away_with_it(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-nothing-keys");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Projects"));
+    ui.click("search-scope");
+    ui.click("search");
+    ui.type_text("budget");
+    assert!(ui.names().is_empty());
+    let on_the_button = |ui: &mut Ui| ui.snapshot("empty-widen-scope").focused() == Some(true);
+
+    // In the file area Return and Space are the files' keys, so they
+    // wouldn't press the button, and Tab passes it by.
+    for _ in 0..40 {
+        ui.press("tab");
+        assert!(!on_the_button(&mut ui));
+    }
+
+    // A right click gives a button the keyboard all the same. This one is
+    // gone once the search finds something, and the keyboard would be
+    // nowhere.
+    ui.right_click("empty-widen-scope");
+    assert!(on_the_button(&mut ui));
+    ui.click("empty-widen-scope");
+    assert_eq!(ui.names(), ["Budget.csv"]);
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Budget.csv"]);
+
+    // A click on the status bar leaves the keyboard with no part of the
+    // window, and the button gives it to the files, as the scope bar does.
+    ui.click("search-scope");
+    assert!(ui.names().is_empty());
+    ui.click("status-text");
+    assert!(!ui.files_focused());
+    ui.click("empty-widen-scope");
+    assert_eq!(ui.names(), ["Budget.csv"]);
+    assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn a_double_click_on_a_button_under_no_results_opens_nothing(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-nothing-double");
+    // Enough files that one of them is listed where the button was.
+    for n in 0..60 {
+        std::fs::write(fx.path(&format!("quokka {n:02}.txt")), "").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.go_to(&fx.path("Projects"));
+    ui.click("search-scope");
+    ui.click("search");
+    ui.type_text("quokka");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+
+    let button = ui.snapshot("empty-widen-scope").bounds().center();
+    ui.click("empty-widen-scope");
+    assert_eq!(ui.names().len(), 60);
+    let found: Vec<PathBuf> = ui.read(|f| {
+        f.rows_for_test()
+            .iter()
+            .map(|r| r.entry.path.clone())
+            .collect()
+    });
+    let under = found
+        .iter()
+        .map(|path| item_id("row", path))
+        .find(|row| ui.exists(row.clone()) && ui.snapshot(row.clone()).bounds().contains(&button))
+        .expect("a result is listed where the button was");
+
+    // The second click of a double-click on the button lands on that
+    // result, and isn't a double-click on it, or a click at all.
+    ui.second_click(under.clone());
+    assert_eq!(ui.system_calls(), []);
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+
+    // A double-click of its own is one.
+    ui.double_click(under);
+    assert!(
+        matches!(ui.system_calls().as_slice(), [SystemCall::Open(_)]),
+        "{:?}",
+        ui.system_calls()
+    );
+}
+
+#[gpui_kit::test]
+fn a_double_click_on_a_button_under_no_results_doesnt_press_the_next_one(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-nothing-next");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Projects"));
+    ui.click("search-scope");
+    ui.click("search");
+    ui.type_text("budget");
+    ui.click("kind");
+    ui.click_menu_item("Folder");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+
+    // Budget.csv is no folder, so This Computer has nothing either. The one
+    // button left is then in the middle, where part of the first one was.
+    let first = ui.snapshot("empty-widen-scope").bounds();
+    ui.click("empty-widen-scope");
+    assert_eq!(ui.read(|f| f.search_scope()), SearchScope::Computer);
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    let next = ui.snapshot("empty-any-kind").bounds().center();
+    assert!(first.contains(&next), "{first:?} doesn't hold {next:?}");
+
+    // The second click of a double-click there isn't a click on that one.
+    ui.second_click("empty-any-kind");
+    assert_eq!(ui.read(|f| f.config().kind_filter), KindFilter::Folder);
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+
+    // A click of its own is one.
+    ui.click("empty-any-kind");
+    assert_eq!(ui.read(|f| f.config().kind_filter), KindFilter::Any);
+    assert_eq!(ui.names(), ["Budget.csv"]);
+}
+
+#[gpui_kit::test]
+fn a_message_and_its_buttons_fit_a_narrow_pane(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-nothing-narrow");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Projects"));
+    ui.click("search-scope");
+    ui.click("search");
+    ui.type_text("budget");
+    ui.click("kind");
+    ui.click_menu_item("Folder");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    let (widen, any_kind) = ("empty-widen-scope", "empty-any-kind");
+    let side_by_side = ui.snapshot(widen).bounds().top() == ui.snapshot(any_kind).bounds().top();
+    assert!(side_by_side, "there is room for both on one line");
+
+    // Too narrow for either line of text, or for the two buttons abreast.
+    ui.resize(360., 600.);
+    let area = ui.snapshot("content").bounds();
+    let inside = |ui: &mut Ui, id: &'static str| {
+        let part = ui.snapshot(id).bounds();
+        assert!(
+            part.left() > area.left() && part.right() < area.right(),
+            "{id} at {part:?} isn't clear of the edges of {area:?}"
+        );
+        part
+    };
+    inside(&mut ui, "message-title");
+    inside(&mut ui, "message-detail");
+    let (first, second) = (inside(&mut ui, widen), inside(&mut ui, any_kind));
+    assert!(
+        second.top() >= first.bottom(),
+        "{second:?} is under {first:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn an_empty_folder_says_so_and_offers_nothing(cx: &mut TestAppContext) {
+    let fx = Fixture::new("empty-folder");
+    std::fs::create_dir(fx.path("Empty")).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Empty"));
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Items"));
+    assert_eq!(message_detail(&mut ui), "This folder is empty.");
+    for button in ["empty-remove-filter", "empty-widen-scope", "empty-any-kind"] {
+        assert!(!ui.exists(button), "{button}");
+    }
+}
+
 #[gpui_kit::test]
 fn a_folder_whose_index_is_still_being_built_doesnt_say_no_results(cx: &mut TestAppContext) {
     let fx = Fixture::new("search-outside");
@@ -3767,6 +3999,144 @@ fn a_filter_waits_for_the_rows_a_search_has_yet_to_find(cx: &mut TestAppContext)
 
     ui.settle();
     assert_eq!(ui.names(), ["big.log"]);
+}
+
+#[gpui_kit::test]
+fn a_filter_that_keeps_nothing_says_so_and_offers_to_remove_it(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-keeps-nothing");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    let filter_out_everything = |ui: &mut Ui| {
+        ui.press(&cmd("alt-f"));
+        ui.type_text("size > 1gb");
+        ui.press("enter");
+        assert!(ui.names().is_empty(), "{:?}", ui.names());
+    };
+
+    // The folder has four items, so it isn't empty.
+    filter_out_everything(&mut ui);
+    assert_eq!(
+        ui.snapshot("message-title").label(),
+        Some("No Items Pass the Filter")
+    );
+    assert_eq!(message_detail(&mut ui), "4 items are hidden by the filter.");
+    ui.click("empty-remove-filter");
+    assert_eq!(ui.names().len(), 4);
+    assert_eq!(ui.read(|f| f.filter_text().to_string()), "");
+    assert!(!ui.exists("filter-input"));
+    assert!(ui.files_focused());
+
+    // A search that found something has results, which the filter hides.
+    filter_out_everything(&mut ui);
+    ui.click("search");
+    ui.type_text("atlas");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert_eq!(
+        ui.snapshot("message-title").label(),
+        Some("No Items Pass the Filter")
+    );
+    assert_eq!(message_detail(&mut ui), "2 items are hidden by the filter.");
+    assert!(ui.exists("empty-remove-filter"));
+
+    // One that found nothing has none for the filter to hide.
+    ui.type_text("qqzz");
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Results"));
+    assert!(!ui.exists("empty-remove-filter"));
+}
+
+#[gpui_kit::test]
+fn an_item_in_a_collapsed_group_isnt_hidden_by_the_filter(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-collapsed-group");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::Kind), cx));
+    ui.update(|f, _, cx| f.set_filter("name =~ 'Road'".into(), cx));
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+
+    // The one item that passes the filter is in the one group left. With
+    // that collapsed nothing is listed, and the filter isn't why.
+    ui.click(gpui_kit::SharedString::from("group-Markdown"));
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert_eq!(ui.read(|f| f.group_headers()), ["Markdown"]);
+    assert!(!ui.exists("empty-remove-filter"));
+}
+
+#[gpui_kit::test]
+fn a_filter_that_is_still_running_doesnt_say_nothing_passes(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-running");
+    std::fs::write(fx.path("big.log"), "").unwrap();
+    std::fs::write(fx.path("Projects/large.log"), "").unwrap();
+    std::fs::create_dir(fx.path("Empty")).unwrap();
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    ui.press(&cmd("alt-f"));
+    ui.type_text("name =~ 'log'");
+    ui.press("enter");
+    assert_eq!(ui.names(), ["big.log"]);
+
+    // Go to a folder and stop where it has been read and the filter's run
+    // over its items has only started.
+    let go_until_filtering = |ui: &mut Ui, folder: &str| {
+        let (view, dir) = (ui.view.clone(), fx.path(folder));
+        ui.window(|window, cx| {
+            view.update(cx, |f, cx| f.navigate(Location::Folder(dir), window, cx))
+        });
+        for _ in 0..1000 {
+            if ui.read(|f| f.is_filtering()) {
+                return;
+            }
+            ui.cx.executor().tick();
+        }
+        panic!("the filter never ran over the items of {folder}");
+    };
+
+    // What the filter kept in the folder before is none of this folder's
+    // items, which says nothing about them.
+    go_until_filtering(&mut ui, "Projects");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(ui.exists("skeleton"), "placeholders until the run ends");
+    assert!(!ui.exists("message-title"));
+    ui.settle();
+    assert_eq!(ui.names(), ["large.log"]);
+
+    // A run over no items has nothing to keep, so an empty folder says what
+    // it is at once.
+    go_until_filtering(&mut ui, "Empty");
+    assert!(!ui.exists("skeleton"));
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Items"));
+    ui.settle();
+    assert_eq!(ui.snapshot("message-title").label(), Some("No Items"));
 }
 
 #[gpui_kit::test]
