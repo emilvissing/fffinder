@@ -11,13 +11,22 @@ use crate::workspace::Workspace;
 use fffinder_core::ops::Mode;
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::base::actions::Cancel;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::notification::NotificationType;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::PathBuf;
+
+// The widest a tab is drawn and the space between two tabs, in points. The
+// strip the tabs scroll in is as wide as its tabs at their widest, which is
+// worked out from these same numbers so the two can't disagree.
+const TAB_MAX_WIDTH: f32 = 240.;
+const TAB_GAP: f32 = 6.;
 
 /// A tab being dragged to a new place in the tab bar.
 #[derive(Clone)]
@@ -281,7 +290,7 @@ impl Finder {
         }
         let host = self.host.as_ref()?.upgrade()?;
         let me = cx.entity_id();
-        let (titles, active) = {
+        let (titles, active, scroll) = {
             let workspace = host.read(cx);
             if workspace.tabs().len() < 2 {
                 return None;
@@ -300,8 +309,15 @@ impl Finder {
                     (id, title)
                 })
                 .collect();
-            (titles, workspace.active_index())
+            (
+                titles,
+                workspace.active_index(),
+                workspace.tab_scroll().clone(),
+            )
         };
+        // Where the strip of tabs was drawn last, before this frame lays it
+        // out again.
+        let drawn_at = scroll.bounds();
         let theme = cx.theme();
         let (bar, border, muted, hover) = (
             theme.tab_bar,
@@ -311,6 +327,7 @@ impl Finder {
         );
         let selected_bg = theme.background;
         let highlight = theme.drop_target;
+        let count = titles.len() as f32;
         let tabs = titles.into_iter().enumerate().map(|(ix, (id, title))| {
             let on = ix == active;
             let weak = host.downgrade();
@@ -322,7 +339,7 @@ impl Finder {
                 .id(("tab", ix))
                 .flex_1()
                 .min_w(ui(80.))
-                .max_w(ui(240.))
+                .max_w(ui(TAB_MAX_WIDTH))
                 .h(ui(28.))
                 .px(ui(10.))
                 .gap(ui(6.))
@@ -380,7 +397,22 @@ impl Finder {
                     });
                 })
                 .test_support()
-                .context_menu(move |menu, _, _| {
+                .context_menu(move |menu, window, cx| {
+                    // The kit draws a menu like this one where the mouse was
+                    // pressed, and only while its tab is still there. A
+                    // window that changes size can move the tabs from under
+                    // it. The menu would then stay open out of sight, and be
+                    // back, without the keyboard, when its tab is. So it
+                    // closes, as the Back and Forward buttons' menus do.
+                    let size = window.viewport_size();
+                    cx.observe_window_bounds(window, move |menu, window, cx| {
+                        if window.viewport_size() != size
+                            && menu.focus_handle(cx).is_focused(window)
+                        {
+                            window.dispatch_action(Box::new(Cancel), cx);
+                        }
+                    })
+                    .detach();
                     let (close, split) = (menu_host.clone(), menu_host.clone());
                     menu.item(
                         PopupMenuItem::new("Close Tab").on_click(move |_, window, cx| {
@@ -412,11 +444,25 @@ impl Finder {
                 .h(ui(36.))
                 .flex_shrink_0()
                 .px(ui(10.))
-                .gap(ui(6.))
+                .gap(ui(TAB_GAP))
                 .bg(bar)
                 .border_b_1()
                 .border_color(border)
-                .children(tabs)
+                .child(
+                    // Tabs that don't all fit scroll in here, which keeps
+                    // the + in the bar. With room to spare the strip ends
+                    // with its last tab, so the + still follows the tabs.
+                    h_flex()
+                        .id("tabs")
+                        .flex_1()
+                        .min_w_0()
+                        .max_w(ui(count * TAB_MAX_WIDTH + (count - 1.) * TAB_GAP))
+                        .gap(ui(TAB_GAP))
+                        .overflow_x_scroll()
+                        .track_scroll(&scroll)
+                        .children(tabs)
+                        .test_support(),
+                )
                 .child(
                     div()
                         .id("new-tab")
@@ -430,6 +476,18 @@ impl Finder {
                         }))
                         .test_support(),
                 )
+                // The strip scrolls to a tab from where it was last drawn.
+                // When this frame draws it somewhere else (a bar that is new
+                // or back, or one that the window, split view or the sidebar
+                // gave other room), a tab asked for was scrolled to from the
+                // wrong place, and the tab that shows may be out of view. So
+                // this frame asks for that tab again, for the next frame.
+                .on_prepaint(move |_, window, _| {
+                    if scroll.bounds() != drawn_at {
+                        scroll.scroll_to_item(active);
+                        window.request_animation_frame();
+                    }
+                })
                 .test_support()
                 .into_any_element(),
         )

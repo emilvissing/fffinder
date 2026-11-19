@@ -291,6 +291,277 @@ fn files_have_no_open_in_new_tab(cx: &mut TestAppContext) {
     assert!(!ui.menu_labels().contains(&"Open in New Tab".to_string()));
 }
 
+/// Which tab shows, counted from the first.
+fn showing(ui: &Ui) -> usize {
+    ui.workspace
+        .clone()
+        .expect("opened with tabs")
+        .read_with(ui.cx, |w, _| w.active_index())
+}
+
+/// Whether the tab at `ix` is whole inside the strip the tabs scroll in.
+fn tab_in_view(ui: &mut Ui, ix: usize) -> bool {
+    let strip = ui.snapshot("tabs").bounds();
+    let tab = ui.snapshot(("tab", ix)).bounds();
+    let close_enough = px(0.5);
+    strip.left() - close_enough <= tab.left() && tab.right() <= strip.right() + close_enough
+}
+
+/// A window 850 points wide with ten tabs, the last one showing. Its tab
+/// bar has 590 points for tabs that want 854.
+fn more_tabs_than_fit<'a>(cx: &'a mut TestAppContext, dir: &'a std::path::Path) -> Ui<'a> {
+    let mut ui = with_tabs(cx, dir);
+    ui.resize(850., 600.);
+    for _ in 0..9 {
+        ui.press(&cmd("t"));
+    }
+    assert_eq!((tabs(&ui).0, showing(&ui)), (10, 9));
+    ui
+}
+
+/// What Open in New Tab does for `count` folders at once: a tab at `dir` for
+/// each, with no frame drawn until the last is open.
+fn open_tabs_at_once(ui: &mut Ui, dir: &std::path::Path, count: usize) {
+    let workspace = ui.workspace.clone().expect("opened with tabs");
+    let folder = fffinder::model::Location::Folder(dir.to_path_buf());
+    ui.window(|window, cx| {
+        workspace.update(cx, |w, cx| {
+            for _ in 0..count {
+                w.new_tab(folder.clone(), window, cx);
+            }
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn tabs_that_do_not_fit_scroll_and_the_new_tab_button_stays_in_reach(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tabs-scroll");
+    let mut ui = more_tabs_than_fit(cx, &fx.dir);
+
+    let bar = ui.snapshot("tab-bar").bounds();
+    let plus = ui.snapshot("new-tab").bounds();
+    assert!(
+        plus.right() <= bar.right(),
+        "the + is at {plus:?}, and the bar ends at {:?}",
+        bar.right()
+    );
+    assert!(tab_in_view(&mut ui, 9), "the tab just opened");
+    assert!(
+        !ui.snapshot(("tab", 0usize)).visible(),
+        "the first is scrolled away"
+    );
+
+    // A tab switched to scrolls into view, at either end.
+    ui.press("ctrl-tab");
+    assert_eq!(showing(&ui), 0);
+    assert!(tab_in_view(&mut ui, 0));
+    ui.press("ctrl-shift-tab");
+    assert_eq!(showing(&ui), 9);
+    assert!(tab_in_view(&mut ui, 9));
+
+    // The + and a close button still do their work at the bar's far end.
+    ui.click("new-tab");
+    assert_eq!((tabs(&ui).0, showing(&ui)), (11, 10));
+    assert!(tab_in_view(&mut ui, 10));
+    ui.click(("close-tab", 10usize));
+    assert_eq!((tabs(&ui).0, showing(&ui)), (10, 9));
+    assert!(tab_in_view(&mut ui, 9));
+}
+
+#[gpui_kit::test]
+fn the_new_tab_button_follows_the_tabs_while_they_fit(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tabs-fit");
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.resize(1100., 700.);
+    ui.press(&cmd("t"));
+
+    let first = ui.snapshot(("tab", 0usize)).bounds();
+    let last = ui.snapshot(("tab", 1usize)).bounds();
+    let plus = ui.snapshot("new-tab").bounds();
+    let bar = ui.snapshot("tab-bar").bounds();
+
+    // Two tabs at their widest leave the bar room to spare, and the + is as
+    // close to the last tab as the tabs are to each other.
+    assert!(bar.right() - plus.right() > px(100.), "{plus:?} in {bar:?}");
+    assert_eq!(plus.left() - last.right(), last.left() - first.right());
+}
+
+#[gpui_kit::test]
+fn the_wheel_scrolls_tabs_that_do_not_fit(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tabs-wheel");
+    let mut ui = more_tabs_than_fit(cx, &fx.dir);
+    // Back at the first tab the bar is at its start.
+    ui.press("ctrl-tab");
+    let first = |ui: &mut Ui| ui.snapshot(("tab", 0usize)).bounds().left();
+    let start = first(&mut ui);
+
+    // A mouse's wheel only turns up and down. Over the tabs that is sideways.
+    ui.scroll("tabs", point(px(0.), px(-100.)));
+    assert_eq!(first(&mut ui), start - px(100.));
+    ui.scroll("tabs", point(px(-50.), px(0.)));
+    assert_eq!(first(&mut ui), start - px(150.));
+
+    // It stops with the last tab at the bar's end, and switches to nothing.
+    ui.scroll("tabs", point(px(0.), px(-1000.)));
+    assert!(tab_in_view(&mut ui, 9));
+    assert_eq!(showing(&ui), 0);
+}
+
+#[gpui_kit::test]
+fn closing_a_tab_moves_the_tab_bar_only_when_it_was_the_one_showing(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tabs-close");
+    let mut ui = more_tabs_than_fit(cx, &fx.dir);
+    // The first tab shows, and the bar is scrolled to its far end.
+    ui.press("ctrl-tab");
+    ui.scroll("tabs", point(px(0.), px(-1000.)));
+    assert!(tab_in_view(&mut ui, 9));
+
+    // A tab closed there leaves the bar there, for the next one to close.
+    ui.click(("close-tab", 9usize));
+    assert_eq!((tabs(&ui).0, showing(&ui)), (9, 0));
+    assert!(tab_in_view(&mut ui, 8));
+    assert!(!ui.snapshot(("tab", 0usize)).visible());
+
+    // Closing the tab that shows brings the bar to the one that takes over.
+    ui.press(&cmd("w"));
+    assert_eq!((tabs(&ui).0, showing(&ui)), (8, 0));
+    assert!(tab_in_view(&mut ui, 0));
+}
+
+#[gpui_kit::test]
+fn the_new_tab_button_stays_in_its_pane_in_split_view(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tabs-split");
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.resize(1100., 700.);
+    for _ in 0..4 {
+        ui.press(&cmd("t"));
+    }
+
+    // Half the window is too little for five tabs.
+    ui.press(&cmd("\\"));
+
+    let bar = ui.snapshot("tab-bar").bounds();
+    let plus = ui.snapshot("new-tab").bounds();
+    assert!(
+        plus.right() <= bar.right(),
+        "the + is at {plus:?}, and the bar ends at {:?}",
+        bar.right()
+    );
+    // The other pane isn't in its way.
+    ui.click("new-tab");
+    assert_eq!(tabs(&ui).0, 6);
+}
+
+/// A tab bar scrolls to a tab from where it was last laid out, and a bar
+/// that is new never was. So its first frame has to scroll in the next one,
+/// and ask for that frame itself: nothing else may.
+#[gpui_kit::test]
+fn a_new_tab_bar_scrolls_to_the_tab_that_shows_in_its_second_frame(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+    let fx = Fixture::new("tabs-at-once");
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.resize(1400., 600.);
+    // The frames asked for so far, as by a toolbar that refits, aren't the
+    // tab bar's.
+    ui.window(|window, cx| window.simulate_next_frame(cx));
+
+    // Fourteen folders at once, without the frame the harness draws after
+    // every step.
+    open_tabs_at_once(&mut ui, &fx.dir, 14);
+    // What the platform does when the window's next frame is due.
+    ui.window(|window, cx| window.simulate_next_frame(cx));
+
+    let (strip, last) = ui.window(|window, _| {
+        (
+            window.find("tabs").bounds(),
+            window.find(("tab", 14usize)).bounds(),
+        )
+    });
+    assert!(
+        strip.left() <= last.left() && last.right() <= strip.right(),
+        "the tab that shows is at {last:?}, and the tabs have {strip:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_tab_that_shows_stays_in_view_when_the_tab_bar_has_less_room(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tabs-less-room");
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.resize(1100., 700.);
+    for _ in 0..7 {
+        ui.press(&cmd("t"));
+    }
+    // Eight tabs fit a window this wide, with nothing scrolled.
+    assert!(tab_in_view(&mut ui, 0) && tab_in_view(&mut ui, 7));
+
+    // Split view leaves them half the window, which holds three.
+    ui.press(&cmd("\\"));
+    assert!(tab_in_view(&mut ui, 7), "in split view");
+    assert!(!ui.snapshot(("tab", 0usize)).visible());
+    ui.press(&cmd("\\"));
+    assert!(tab_in_view(&mut ui, 0) && tab_in_view(&mut ui, 7));
+
+    // A narrower window holds six.
+    ui.resize(850., 700.);
+    assert!(tab_in_view(&mut ui, 7), "in a narrower window");
+    assert!(!ui.snapshot(("tab", 0usize)).visible());
+}
+
+/// A tab bar goes when its second-last tab closes, and the next one may
+/// have less room than it had. A tab is scrolled to from where the bar is
+/// now, not from where it was then.
+#[gpui_kit::test]
+fn a_tab_bar_that_comes_back_scrolls_to_the_tab_that_shows(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tabs-back");
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.resize(1100., 700.);
+    ui.press(&cmd("t"));
+    ui.press(&cmd("w"));
+    assert_eq!(tabs(&ui).0, 1);
+
+    // Split view leaves the next bar less room than those two tabs had.
+    ui.press(&cmd("\\"));
+    open_tabs_at_once(&mut ui, &fx.dir, 6);
+    ui.settle();
+    assert_eq!((tabs(&ui).0, showing(&ui)), (7, 6));
+    assert!(tab_in_view(&mut ui, 6));
+}
+
+#[gpui_kit::test]
+fn a_tabs_menu_closes_when_the_window_changes_size(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tabs-menu-resized");
+    let mut ui = more_tabs_than_fit(cx, &fx.dir);
+    let menu = ["Close Tab", "Move Tab to New Window"];
+    ui.right_click(("tab", 7usize));
+    assert_eq!(ui.menu_labels(), menu);
+
+    // A narrower window scrolls the tabs to keep the one that shows in
+    // view, so this tab is no longer where it was pressed, and that is where
+    // its menu is drawn. Left open, the menu would be back when the tab
+    // is, in a window as wide as it was, and without the keyboard.
+    ui.resize(760., 600.);
+    assert!(!ui.menu_open());
+    ui.resize(850., 600.);
+    assert!(!ui.menu_open(), "the menu is closed, not only out of sight");
+    ui.press(&cmd("t"));
+    assert_eq!(tabs(&ui).0, 11, "the keyboard is back with the files");
+
+    // A menu closed by hand has nothing left to close: a dialog opened
+    // since stays through the next change of size.
+    ui.right_click(("tab", 7usize));
+    ui.press("escape");
+    ui.press(&cmd("shift-g"));
+    ui.resize(760., 600.);
+    assert!(ui.dialog_open());
+    ui.close_dialog();
+
+    // A window that comes to the front reports its bounds as well. It is no
+    // bigger or smaller for that, and a menu stays open through it.
+    ui.right_click(("tab", 7usize));
+    ui.activate();
+    assert_eq!(ui.menu_labels(), menu);
+}
+
 // ----- the sidebar ---------------------------------------------------------------------
 
 #[gpui_kit::test]

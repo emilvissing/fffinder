@@ -13,6 +13,10 @@ use gpui_kit::*;
 pub struct Workspace {
     tabs: Vec<Entity<Finder>>,
     active: usize,
+    /// Where the tab bar is scrolled to when the tabs don't all fit. Each
+    /// tab's browser draws the bar while it shows, so the place is kept here
+    /// for all of them.
+    tab_scroll: ScrollHandle,
     /// The other pane, while split view is on.
     split: Option<Entity<Finder>>,
     /// Remembers the window's place as it moves, and saves it if the window
@@ -75,6 +79,7 @@ impl Workspace {
         Workspace {
             tabs: vec![first],
             active: 0,
+            tab_scroll: ScrollHandle::new(),
             split: None,
             _placement_watches: placement_watches,
             unsaved_placement: None,
@@ -135,6 +140,12 @@ impl Workspace {
         self.active
     }
 
+    /// The tab bar's scroll position, for the strip that holds the tabs and
+    /// nothing else: it shows a tab by its place among them.
+    pub fn tab_scroll(&self) -> &ScrollHandle {
+        &self.tab_scroll
+    }
+
     /// The browser beside the active one in split view, if the window is
     /// split.
     pub fn split_pane(&self) -> Option<&Entity<Finder>> {
@@ -175,6 +186,7 @@ impl Workspace {
         self.active += 1;
         self.tabs.insert(self.active, tab);
         self.focus_active(window, cx);
+        self.tab_scroll.scroll_to_item(self.active);
         self.tabs_changed(cx);
     }
 
@@ -184,6 +196,7 @@ impl Workspace {
             self.leave_active_tab(window, cx);
             self.active = ix;
             self.focus_active(window, cx);
+            self.tab_scroll.scroll_to_item(self.active);
             self.tabs_changed(cx);
         }
     }
@@ -204,11 +217,18 @@ impl Workspace {
             window.remove_window();
             return;
         }
+        // Closing the tab that shows puts another in its place, and the tab
+        // bar scrolls to that one. Closing any other leaves the bar where it
+        // is, under the mouse that closed it.
+        let showing = ix == self.active;
         self.tabs.remove(ix);
         if self.active > ix || self.active == self.tabs.len() {
             self.active = self.active.saturating_sub(1);
         }
         self.focus_active(window, cx);
+        if showing {
+            self.tab_scroll.scroll_to_item(self.active);
+        }
         self.tabs_changed(cx);
     }
 
