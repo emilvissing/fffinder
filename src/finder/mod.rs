@@ -46,12 +46,13 @@ use fffinder_core::{
 };
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollbarHandle as _;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::{ActiveTheme as _, ElementExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -301,6 +302,18 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// What the window showed when a search began, to go back to when it ends.
+struct BeforeSearch {
+    /// The selected items.
+    selected: Vec<PathBuf>,
+    /// The view it was in. Another one, chosen during the search, scrolls to
+    /// the selection when the search ends.
+    view: ViewMode,
+    /// Where the list and the icon view were scrolled to.
+    list: Point<Pixels>,
+    grid: Point<Pixels>,
+}
+
 pub struct Finder {
     focus: FocusHandle,
     files_focus: FocusHandle,
@@ -332,6 +345,12 @@ pub struct Finder {
     /// Holds the window that happens in, and the field's selection when the
     /// key was pressed: a caret that has moved since is back to editing.
     enter_results: Option<(AnyWindowHandle, std::ops::Range<usize>)>,
+    /// The search isn't the one the results on screen answered, and hasn't
+    /// answered yet itself. Its results start at the top with nothing
+    /// selected, where a search that only runs again keeps both.
+    new_search: bool,
+    /// The selection and scroll position a search took the place of.
+    before_search: Option<BeforeSearch>,
 
     rows: Vec<Row>,
     /// The groups `rows` are in, when the view uses groups.
@@ -585,6 +604,8 @@ impl Finder {
             search_abort: AbortOnDrop::default(),
             search_gen: 0,
             enter_results: None,
+            new_search: false,
+            before_search: None,
             rows: Vec::new(),
             groups: Vec::new(),
             collapsed_groups: HashSet::new(),
@@ -963,12 +984,19 @@ impl Finder {
         // A Return or Down Arrow still waiting to move into the items, say
         // for a filter to finish, was pressed for the place the window left.
         self.enter_results = None;
+        // What a search would go back to when it ends was that place's too.
+        self.before_search = None;
         self.show_folder_view(cx);
         self.columns.clear();
         self.active_column = 0;
         self.expanded.clear();
         self.children.clear();
         self.folder_stats.clear();
+        // The offsets move at once, so a search that starts before the views
+        // are next drawn goes back to this place's top when it ends, not to
+        // where the last place was scrolled. The scrolls after them replace
+        // one still waiting for an item of the place the window left.
+        self.scroll_views_to_top();
         self.list_scroll.scroll_to_item(0, ScrollStrategy::Top);
         self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
         if let Some(folder) = self.current_folder() {
@@ -1492,8 +1520,10 @@ impl Finder {
             self.search_stats = None;
             self.searching = false;
             self.search_waiting = false;
+            self.new_search = false;
             self.selection.clear();
             self.rebuild_rows(cx);
+            self.return_to_before_search(cx);
             return;
         }
         if !was_searching {
@@ -1501,9 +1531,56 @@ impl Finder {
                 key: SortKey::Relevance,
                 ascending: true,
             };
+            self.before_search = Some(BeforeSearch {
+                selected: self
+                    .selection
+                    .indices()
+                    .filter_map(|ix| self.rows.get(ix))
+                    .map(|row| row.entry.path.clone())
+                    .collect(),
+                // Not the effective view: with words to search for, column
+                // view already counts as the list.
+                view: self.config.view_mode,
+                list: self.list_scroll.offset(),
+                grid: self.grid_scroll.offset(),
+            });
             self.drop_stale_results(cx);
         }
-        self.run_search(!immediate, cx);
+        self.run_new_search(!immediate, cx);
+    }
+
+    /// The search ended: select what was selected when it began, and scroll
+    /// back to where the window was. Rows that have gone since are skipped,
+    /// and a list that got shorter is scrolled as far as it goes.
+    fn return_to_before_search(&mut self, cx: &mut Context<Self>) {
+        let Some(before) = self.before_search.take() else {
+            return;
+        };
+        let selected: HashSet<&Path> = before.selected.iter().map(PathBuf::as_path).collect();
+        let items: BTreeSet<usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| selected.contains(row.entry.path.as_path()))
+            .map(|(ix, _)| ix)
+            .collect();
+        // With none of them left, the gallery keeps the item it just picked.
+        if !items.is_empty() {
+            self.selection.select_items(items);
+            self.selection_changed(cx);
+        }
+        // Both go back, whichever is showing: the results put both at the
+        // top, and the other one would be found there when it's next chosen.
+        self.list_scroll.set_offset(before.list);
+        self.grid_scroll.set_offset(before.grid);
+        // The gallery's strip follows the selection. So does a view chosen
+        // during the search, as it would had it been chosen in the folder:
+        // where it was last scrolled to needn't show what's selected.
+        if (before.view != self.config.view_mode || before.view == ViewMode::Gallery)
+            && let Some(ix) = self.selection.cursor()
+        {
+            self.scroll_to(ix);
+        }
     }
 
     /// The rows aren't results of the search about to run: they're a
@@ -1523,6 +1600,14 @@ impl Finder {
                 .update(cx, |s, cx| s.set_value("", window, cx));
             self.set_query(String::new(), true, cx);
         }
+    }
+
+    /// Run the search after its words, scope, kind, or Name or Contents
+    /// changed. What it finds isn't what was scrolled through and selected
+    /// in, so its results start at the top with nothing selected.
+    fn run_new_search(&mut self, debounce: bool, cx: &mut Context<Self>) {
+        self.new_search = self.is_searching();
+        self.run_search(debounce, cx);
     }
 
     /// Run the current query on the background executor; `debounce` waits
@@ -1609,6 +1694,12 @@ impl Finder {
                     let retry = stats.indexing;
                     this.results = rows;
                     this.search_stats = Some(stats);
+                    // Only for the first answer to a new search. One that
+                    // runs again leaves the selection and the scroll alone.
+                    if std::mem::take(&mut this.new_search) {
+                        this.selection.clear();
+                        this.scroll_views_to_top();
+                    }
                     this.rebuild_rows(cx);
                     this.selection_changed(cx);
                     retry
@@ -1643,7 +1734,7 @@ impl Finder {
     pub fn set_scope(&mut self, scope: SearchScope, cx: &mut Context<Self>) {
         if self.scope != scope {
             self.scope = scope;
-            self.run_search(false, cx);
+            self.run_new_search(false, cx);
             // The toolbar shows the scope even when nothing is searched.
             cx.notify();
         }
@@ -1661,7 +1752,7 @@ impl Finder {
         if self.config.kind_filter != kind {
             self.config.kind_filter = kind;
             self.settings_changed(cx);
-            self.run_search(false, cx);
+            self.run_new_search(false, cx);
         }
     }
 
@@ -1672,7 +1763,7 @@ impl Finder {
             if self.is_searching() {
                 self.drop_stale_results(cx);
             }
-            self.run_search(false, cx);
+            self.run_new_search(false, cx);
         }
     }
 
@@ -2109,10 +2200,24 @@ impl Finder {
                 .grid_scroll
                 .scroll_to_item(self.icon_line_index(ix), ScrollStrategy::Nearest),
             ViewMode::Gallery => self.strip_scroll.scroll_to_item(ix, ScrollStrategy::Center),
-            _ => self
+            ViewMode::List => self
                 .list_scroll
                 .scroll_to_item(self.list_line_of(ix), ScrollStrategy::Nearest),
+            // Each column scrolls itself. A scroll asked of the list would
+            // wait until the list is next drawn, and then move a search's
+            // results.
+            ViewMode::Columns => {}
         }
+    }
+
+    /// Put the list and the icon view at the top, for rows that aren't the
+    /// ones they were scrolled through. The offsets move at once. A scroll
+    /// to the first item would wait until each view is next drawn, and that
+    /// can be after a search has ended and put a folder's place back.
+    fn scroll_views_to_top(&self) {
+        let top = point(Pixels::ZERO, Pixels::ZERO);
+        self.list_scroll.set_offset(top);
+        self.grid_scroll.set_offset(top);
     }
 
     /// The letters typed so far for type-to-select, with `text` added: those

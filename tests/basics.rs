@@ -1191,6 +1191,452 @@ fn the_menu_still_warns_without_a_second_pane(cx: &mut TestAppContext) {
     );
 }
 
+// ----- where a search starts, and where it leaves you ------------------------------------
+
+/// The first item the window lists.
+fn first_item(ui: &Ui) -> std::path::PathBuf {
+    ui.read(|f| f.rows_for_test()[0].entry.path.clone())
+}
+
+/// The names of the items drawn as `kind`: `row` in the list, `tile` in the
+/// icon view, `strip` in the gallery. Each draws only what's on screen.
+fn on_screen(ui: &mut Ui, kind: &'static str) -> Vec<String> {
+    let items: Vec<(String, std::path::PathBuf)> = ui.read(|f| {
+        f.rows_for_test()
+            .iter()
+            .map(|r| (r.entry.name.clone(), r.entry.path.clone()))
+            .collect()
+    });
+    ui.window(|window, cx| {
+        use gpui_kit::test::TestWindowExt as _;
+        window.render_frame(cx);
+        items
+            .into_iter()
+            .filter(|(_, path)| window.try_find(item_id(kind, path)).is_some())
+            .map(|(name, _)| name)
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn new_results_start_at_the_top_of_the_list(cx: &mut TestAppContext) {
+    let fx = long_folder("results-top-list");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press("end");
+    assert!(
+        !ui.exists(item_id("row", &fx.path("Budget.csv"))),
+        "the folder is scrolled to its end"
+    );
+
+    ui.click("search");
+    ui.type_text("item");
+    assert!(ui.names().len() >= 200, "{}", ui.names().len());
+    assert!(
+        ui.exists(item_id("row", &first_item(&ui))),
+        "the best match is on screen, not where the folder was scrolled to"
+    );
+
+    // And when the words change under results that were scrolled.
+    ui.scroll("list-columns", point(px(0.), px(-3000.)));
+    assert!(!ui.exists(item_id("row", &first_item(&ui))));
+    ui.type_text("txt");
+    assert_eq!(ui.read(|f| f.query().to_string()), "itemtxt");
+    assert!(ui.names().len() >= 200, "{}", ui.names().len());
+    assert!(ui.exists(item_id("row", &first_item(&ui))));
+}
+
+#[gpui_kit::test]
+fn new_results_start_at_the_top_of_the_icon_view(cx: &mut TestAppContext) {
+    let fx = long_folder("results-top-icons");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-icons");
+    ui.press("end");
+    assert!(
+        !ui.exists(item_id("tile", &fx.path("Budget.csv"))),
+        "the folder is scrolled to its end"
+    );
+
+    ui.click("search");
+    ui.type_text("item");
+    assert!(ui.names().len() >= 200, "{}", ui.names().len());
+    assert!(ui.exists(item_id("tile", &first_item(&ui))));
+}
+
+#[gpui_kit::test]
+fn new_results_start_at_the_top_in_column_view_too(cx: &mut TestAppContext) {
+    let fx = long_folder("results-top-columns");
+    std::fs::create_dir(fx.path("Zebra")).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-columns");
+    // Going back selects the folder that was left, the last of this one.
+    ui.go_to(&fx.path("Zebra"));
+    ui.press(&cmd("["));
+    assert_eq!(ui.folder().as_deref(), Some(fx.dir.as_path()));
+
+    // Column view lists its results.
+    ui.click("search");
+    ui.type_text("item");
+    assert!(ui.names().len() >= 200, "{}", ui.names().len());
+    assert!(ui.exists(item_id("row", &first_item(&ui))));
+}
+
+#[gpui_kit::test]
+fn other_words_let_go_of_the_result_that_was_selected(cx: &mut TestAppContext) {
+    let fx = long_folder("results-selection");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.click("search");
+    ui.type_text("item");
+    ui.press("down");
+    ui.press("end");
+    let last = ui.selected();
+    assert_eq!(last.len(), 1);
+    assert_ne!(last[0], ui.names()[0]);
+
+    // Every item still matches, the selected one among them.
+    ui.click("search");
+    ui.type_text("txt");
+    assert!(ui.names().contains(&last[0]), "{:?}", ui.names());
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+
+    // So Down Arrow goes to the best match, not on from one out of view.
+    ui.press("down");
+    assert!(ui.files_focused());
+    assert_eq!(ui.selected(), [ui.names()[0].clone()]);
+    assert!(ui.exists(item_id("row", &first_item(&ui))));
+}
+
+#[gpui_kit::test]
+fn return_after_other_words_selects_their_first_result(cx: &mut TestAppContext) {
+    let fx = long_folder("results-selection-return");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.click("search");
+    ui.type_text("item");
+    ui.press("down");
+    ui.press("end");
+    assert_ne!(ui.selected(), [ui.names()[0].clone()]);
+
+    // Return comes before the results for the words as they are now.
+    ui.click("search");
+    ui.type_without_settling("txt");
+    ui.press_without_settling("enter");
+    ui.settle();
+
+    assert!(ui.files_focused());
+    assert_eq!(ui.selected(), [ui.names()[0].clone()]);
+    assert!(ui.exists(item_id("row", &first_item(&ui))));
+}
+
+#[gpui_kit::test]
+fn a_change_of_scope_kind_or_contents_starts_at_the_top_too(cx: &mut TestAppContext) {
+    let fx = long_folder("results-top-controls");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    // Every item has an x in its name, and another inside it.
+    ui.click("search");
+    ui.type_text("x");
+    let select_the_last = |ui: &mut Ui| {
+        ui.click("search");
+        ui.press("down");
+        ui.press("end");
+        assert_eq!(ui.selected().len(), 1);
+        assert!(
+            !ui.exists(item_id("row", &first_item(ui))),
+            "the first result is out of view"
+        );
+    };
+    let at_the_top = |ui: &mut Ui, changed: &str| {
+        assert!(ui.names().len() >= 200, "{changed}: {}", ui.names().len());
+        assert!(ui.selected().is_empty(), "{changed}: {:?}", ui.selected());
+        assert!(ui.exists(item_id("row", &first_item(ui))), "{changed}");
+    };
+
+    select_the_last(&mut ui);
+    ui.click("scope-folder");
+    at_the_top(&mut ui, "the scope");
+
+    select_the_last(&mut ui);
+    ui.click("kind");
+    ui.click_menu_item("Document");
+    at_the_top(&mut ui, "the kind");
+
+    select_the_last(&mut ui);
+    ui.click("by-contents");
+    at_the_top(&mut ui, "name or contents");
+}
+
+#[gpui_kit::test]
+fn a_search_that_runs_again_keeps_its_place(cx: &mut TestAppContext) {
+    let fx = long_folder("results-again");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.click("search");
+    ui.type_text("item");
+    ui.press("down");
+    ui.press("end");
+    let last = ui.selected();
+    let shown = on_screen(&mut ui, "row");
+    assert!(shown.contains(&last[0]), "{last:?} in {shown:?}");
+    assert!(!ui.exists(item_id("row", &first_item(&ui))));
+
+    // Refresh asks for the same results again.
+    ui.press(&cmd("r"));
+
+    assert_eq!(ui.selected(), last);
+    assert_eq!(on_screen(&mut ui, "row"), shown);
+}
+
+#[gpui_kit::test]
+fn ending_a_search_goes_back_to_the_folders_place(cx: &mut TestAppContext) {
+    let fx = long_folder("search-place-list");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    // The last item is selected, and the list is scrolled back up from it.
+    ui.press("end");
+    ui.scroll("list-columns", point(px(0.), px(1200.)));
+    let shown = on_screen(&mut ui, "row");
+    for end in ["Budget.csv", "Roadmap.md"] {
+        assert!(!shown.contains(&end.to_string()), "{shown:?}");
+    }
+
+    ui.click("search");
+    ui.type_text("item");
+    assert!(ui.exists(item_id("row", &first_item(&ui))));
+    ui.press("escape");
+
+    assert_eq!(ui.read(|f| f.query().to_string()), "");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert_eq!(on_screen(&mut ui, "row"), shown);
+
+    // And from a search that found nothing, so never drew a list.
+    ui.type_text("qqzzqqzz");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    ui.press("escape");
+
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert_eq!(on_screen(&mut ui, "row"), shown);
+}
+
+#[gpui_kit::test]
+fn ending_a_search_goes_back_to_the_folders_place_in_the_icon_view(cx: &mut TestAppContext) {
+    let fx = long_folder("search-place-icons");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-icons");
+    ui.press("end");
+    ui.scroll("content", point(px(0.), px(700.)));
+    let shown = on_screen(&mut ui, "tile");
+    for end in ["Budget.csv", "Roadmap.md"] {
+        assert!(!shown.contains(&end.to_string()), "{shown:?}");
+    }
+
+    ui.click("search");
+    ui.type_text("item");
+    assert!(ui.exists(item_id("tile", &first_item(&ui))));
+    // From the results, Escape lets go of the selection, then ends the search.
+    ui.press("down");
+    assert!(ui.files_focused());
+    ui.press("escape");
+    ui.press("escape");
+
+    assert_eq!(ui.read(|f| f.query().to_string()), "");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert_eq!(on_screen(&mut ui, "tile"), shown);
+}
+
+#[gpui_kit::test]
+fn ending_a_search_in_the_gallery_shows_the_item_it_was_on(cx: &mut TestAppContext) {
+    let fx = long_folder("search-place-gallery");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-gallery");
+    ui.press("end");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert!(ui.exists(item_id("strip", &fx.path("Roadmap.md"))));
+
+    ui.click("search");
+    ui.type_text("budget");
+    assert_eq!(ui.selected(), ["Budget.csv"], "the gallery shows a result");
+    ui.press("escape");
+
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    let strip = on_screen(&mut ui, "strip");
+    assert!(strip.contains(&"Roadmap.md".to_string()), "{strip:?}");
+    assert!(!strip.contains(&"Budget.csv".to_string()), "{strip:?}");
+}
+
+#[gpui_kit::test]
+fn a_gallery_chosen_during_a_search_still_shows_an_item(cx: &mut TestAppContext) {
+    let fx = long_folder("search-place-gallery-none");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    assert!(ui.selected().is_empty());
+    ui.click("search");
+    ui.type_text("item");
+
+    // Nothing was selected in the folder, so there's nothing to select again.
+    ui.click("view-gallery");
+    ui.click("search");
+    ui.press("escape");
+
+    assert_eq!(ui.selected(), ["Budget.csv"], "the folder's first item");
+}
+
+#[gpui_kit::test]
+fn ending_a_search_goes_back_to_where_recents_was_scrolled_to(cx: &mut TestAppContext) {
+    let fx = long_folder("search-place-recents");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // Column view lists Recents, as it lists results.
+    ui.click("view-columns");
+    ui.click("recents");
+    // The first item is selected, and scrolled out of view.
+    let first = ui.names()[0].clone();
+    ui.select(&first);
+    ui.scroll("list-columns", point(px(0.), px(-1200.)));
+    let shown = on_screen(&mut ui, "row");
+    assert!(shown.len() > 5, "{shown:?}");
+    assert!(!shown.contains(&first), "{shown:?}");
+
+    ui.click("search");
+    ui.type_text("item");
+    assert!(ui.exists(item_id("row", &first_item(&ui))));
+    ui.press("escape");
+
+    // This is the view the search began in, so nothing scrolls to the item.
+    assert_eq!(ui.selected(), [first]);
+    assert_eq!(on_screen(&mut ui, "row"), shown);
+}
+
+#[gpui_kit::test]
+fn a_view_chosen_during_a_search_shows_what_was_selected(cx: &mut TestAppContext) {
+    let fx = long_folder("search-place-other-view");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press("end");
+    ui.click("search");
+    ui.type_text("item");
+
+    // The list's place means nothing to the icons.
+    ui.click("view-icons");
+    ui.click("search");
+    ui.press("escape");
+
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert!(ui.exists(item_id("tile", &fx.path("Roadmap.md"))));
+}
+
+#[gpui_kit::test]
+fn a_view_chosen_during_a_search_isnt_left_where_the_results_were(cx: &mut TestAppContext) {
+    let fx = long_folder("search-place-other-view-top");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-icons");
+    assert!(ui.selected().is_empty());
+    ui.click("search");
+    ui.type_text("item");
+
+    // The list is first drawn for the results, and scrolled through them.
+    ui.click("view-list");
+    ui.scroll("list-columns", point(px(0.), px(-3000.)));
+    assert!(!ui.exists(item_id("row", &first_item(&ui))));
+    ui.click("search");
+    ui.press("escape");
+
+    // Nothing is selected to scroll to, and the folder's list was at its top.
+    assert_eq!(ui.read(|f| f.query().to_string()), "");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+    assert!(ui.exists(item_id("row", &fx.path("Budget.csv"))));
+}
+
+#[gpui_kit::test]
+fn a_search_in_the_gallery_leaves_the_list_where_it_was(cx: &mut TestAppContext) {
+    let fx = long_folder("search-place-gallery-list");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.scroll("list-columns", point(px(0.), px(-1200.)));
+    let shown = on_screen(&mut ui, "row");
+    let picked = shown[5].clone();
+    ui.select(&picked);
+
+    // Results start at the top of the list too, though it isn't showing.
+    ui.click("view-gallery");
+    ui.click("search");
+    ui.type_text("budget");
+    ui.press("escape");
+    assert_eq!(ui.selected(), [picked]);
+
+    ui.click("view-list");
+    assert_eq!(on_screen(&mut ui, "row"), shown);
+}
+
+#[gpui_kit::test]
+fn going_to_another_folder_from_a_search_starts_at_its_top(cx: &mut TestAppContext) {
+    let fx = long_folder("search-place-leave");
+    for ix in 0..200 {
+        std::fs::write(fx.path(&format!("Projects/page {ix:03}.txt")), "x").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press("end");
+    ui.click("search");
+    ui.type_text("item");
+
+    ui.go_to(&fx.path("Projects"));
+
+    assert_eq!(ui.read(|f| f.query().to_string()), "");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+    assert!(ui.exists(item_id("row", &fx.path("Projects/atlas"))));
+}
+
+#[gpui_kit::test]
+fn a_folder_renamed_during_a_search_is_shown_from_its_top(cx: &mut TestAppContext) {
+    let fx = long_folder("search-place-renamed");
+    for ix in 0..200 {
+        std::fs::write(fx.path(&format!("Projects/page {ix:03}.txt")), "x").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.go_to(&fx.path("Projects"));
+    ui.click("view-list");
+    ui.press("end");
+    assert!(!ui.exists(item_id("row", &fx.path("Projects/atlas"))));
+
+    // The folder the window is in is one of the results.
+    ui.click("search");
+    ui.type_text("projects");
+    retype_name(&mut ui, "Projects", "Plans");
+    ui.press("enter");
+    assert_eq!(ui.folder(), Some(fx.path("Plans")));
+    assert_eq!(ui.read(|f| f.query().to_string()), "projects");
+
+    // Escape lets go of the selection first, if there is one.
+    ui.press("escape");
+    ui.press("escape");
+
+    assert_eq!(ui.read(|f| f.query().to_string()), "");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+    assert!(ui.exists(item_id("row", &fx.path("Plans/atlas"))));
+}
+
+#[gpui_kit::test]
+fn a_search_sent_along_with_a_folder_ends_at_that_folders_top(cx: &mut TestAppContext) {
+    let fx = long_folder("search-place-sent");
+    for ix in 0..200 {
+        std::fs::write(fx.path(&format!("Projects/page {ix:03}.txt")), "x").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press("end");
+
+    // `fff gui` and a second launch can name a folder and words together.
+    let projects = fx.path("Projects");
+    ui.update(|f, window, cx| f.open_request(Some(&projects), Some("page"), false, window, cx));
+    assert!(ui.names().len() >= 200, "{}", ui.names().len());
+    ui.press("escape");
+
+    assert_eq!(ui.folder(), Some(projects));
+    assert_eq!(ui.read(|f| f.query().to_string()), "");
+    assert!(ui.exists(item_id("row", &fx.path("Projects/atlas"))));
+}
+
 // ----- the selection after a removal ---------------------------------------------------
 
 #[gpui_kit::test]
