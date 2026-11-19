@@ -20,6 +20,7 @@ use crate::theme::palette;
 use crate::theme::ui;
 use fffinder_core::config::{DEFAULT_PREVIEW_FONT_SIZE, FONT_SIZE_RANGE};
 use fffinder_core::{FileEntry, FileKind, ViewMode, format};
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -955,12 +956,15 @@ fn preview_body(
                 ),
             ];
             v_flex()
-                .id(("font-preview", super::views::path_id(&entry.path)))
                 .size_full()
                 .bg(theme.background)
                 .p(ui(16.))
                 .gap(ui(10.))
                 .overflow_y_scrollbar()
+                // The scrollbar wrapper keeps the scroll position under its own
+                // ID, not the element's. Made from the file's path, it starts
+                // each preview at its top, not where the last one was left.
+                .id(("font-preview", super::views::path_id(&entry.path)))
                 .child(
                     div()
                         .text_size(ui(12.))
@@ -983,14 +987,17 @@ fn preview_body(
             format!("{items} items")
         })),
         Preview::Text { text, truncated } => div()
-            .id(("text-preview", super::views::path_id(&entry.path)))
             .size_full()
             .bg(theme.muted)
             .p(ui(12.))
             .overflow_y_scrollbar()
+            // The wrapper's ID, so that each file has its own scroll position.
+            .id(("text-preview", super::views::path_id(&entry.path)))
             .font_family(theme.mono_font_family.clone())
             .text_size(ui(text_size))
-            .child(text)
+            // The scrollbar wrapper hides its own element from UI tests, so
+            // the text inside is the observed one.
+            .child(div().id("preview-text").test_support().child(text))
             .when(truncated, |this| {
                 this.child(
                     div()
@@ -1006,11 +1013,12 @@ fn preview_body(
             comments,
             truncated,
         } => div()
-            .id(("code-preview", super::views::path_id(&entry.path)))
             .size_full()
             .bg(theme.muted)
             .p(ui(12.))
             .overflow_y_scrollbar()
+            // The wrapper's ID, so that each file has its own scroll position.
+            .id(("code-preview", super::views::path_id(&entry.path)))
             .font_family(theme.mono_font_family.clone())
             .text_size(ui(text_size))
             .child({
@@ -1020,7 +1028,8 @@ fn preview_body(
                 };
                 spans.extend(comments.into_iter().map(|range| (range, comment)));
                 spans.sort_by_key(|(range, _)| range.start);
-                StyledText::new(text).with_highlights(spans)
+                let text = StyledText::new(text).with_highlights(spans);
+                div().id("preview-text").test_support().child(text)
             })
             .when(truncated, |this| {
                 this.child(
@@ -1051,12 +1060,16 @@ fn preview_body(
                 .overflow_hidden()
                 .child(
                     div()
-                        .id(("table-preview", super::views::path_id(&entry.path)))
                         .flex_1()
                         .min_h_0()
                         .overflow_scrollbar()
+                        // The wrapper's ID, so that each file has its own
+                        // scroll position.
+                        .id(("table-preview", super::views::path_id(&entry.path)))
                         .child(
                             v_flex()
+                                .id("preview-table")
+                                .test_support()
                                 .min_w(width)
                                 .text_size(ui(text_size))
                                 .child(

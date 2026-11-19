@@ -477,9 +477,13 @@ impl<'a> Ui<'a> {
 
     /// Scroll with the mouse over `id`, by `delta` points.
     pub fn scroll(&mut self, id: impl Into<ElementId>, delta: Point<Pixels>) {
-        let id = id.into();
-        let position = self.snapshot(id.clone()).bounds().center();
-        self.step(format!("scroll {id:?}"), |window, cx| {
+        let position = self.snapshot(id).bounds().center();
+        self.scroll_point(position, delta);
+    }
+
+    /// Scroll with the mouse at `position`, by `delta` points.
+    pub fn scroll_point(&mut self, position: Point<Pixels>, delta: Point<Pixels>) {
+        self.step(format!("scroll {position:?}"), |window, cx| {
             window.dispatch_event(
                 gpui_kit::ScrollEvent {
                     position,

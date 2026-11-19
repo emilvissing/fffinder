@@ -949,6 +949,98 @@ fn the_preview_pane_follows_the_selection(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_preview_starts_at_its_first_line_however_far_the_last_one_was_scrolled(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("pane-scroll");
+    for name in ["a.txt", "b.txt"] {
+        let lines: String = (1..=400).map(|ix| format!("{name} line {ix}\n")).collect();
+        std::fs::write(fx.path(name), lines).unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("shift-p"));
+    let text_top = |ui: &mut Ui| ui.snapshot("preview-text").bounds().origin;
+
+    ui.select("a.txt");
+    let top = text_top(&mut ui);
+    ui.select("b.txt");
+    assert_eq!(text_top(&mut ui), top);
+
+    // Over the first lines: the middle of the text is far below the pane.
+    ui.scroll_point(top + point(px(20.), px(20.)), point(px(0.), px(-300.)));
+    assert!(text_top(&mut ui).y < top.y - px(100.), "b.txt scrolled");
+
+    ui.select("a.txt");
+    assert_eq!(text_top(&mut ui), top, "a.txt is not where b.txt was left");
+}
+
+#[gpui_kit::test]
+fn quick_look_shows_each_file_from_its_first_line(cx: &mut TestAppContext) {
+    let fx = Fixture::new("quick-look-scroll");
+    for name in ["a.rs", "b.rs"] {
+        let lines: String = (1..=400)
+            .map(|ix| format!("fn line_{ix}() {{}} // {name}\n"))
+            .collect();
+        std::fs::write(fx.path(name), lines).unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.select("a.rs");
+    ui.press("space");
+    let text_top = |ui: &mut Ui| ui.snapshot("preview-text").bounds().origin;
+
+    let top = ui.in_quick_look(|ui| text_top(ui));
+    ui.in_quick_look(|ui| ui.press("down"));
+    assert_eq!(ui.selected(), ["b.rs"]);
+    ui.in_quick_look(|ui| {
+        ui.scroll_point(top + point(px(20.), px(20.)), point(px(0.), px(-300.)));
+        let scrolled = text_top(ui);
+        assert!(scrolled.y < top.y - px(100.), "b.rs scrolled");
+        // Bigger text is still b.rs, so it stays where it was being read.
+        ui.click("ql-text-bigger");
+        assert_eq!(text_top(ui), scrolled, "b.rs kept its place");
+        ui.press("up");
+    });
+    assert_eq!(ui.selected(), ["a.rs"]);
+    let back = ui.in_quick_look(|ui| text_top(ui));
+    assert_eq!(back, top, "a.rs is not where b.rs was left");
+}
+
+#[gpui_kit::test]
+fn a_table_preview_starts_at_its_left_edge_however_far_the_last_one_was_scrolled(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("pane-table-scroll");
+    for name in ["a.zip", "b.zip"] {
+        let progress = fffinder_core::ops::Progress::default();
+        fffinder_core::archive::compress(&[fx.path("Projects")], &fx.path(name), &progress)
+            .unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("shift-p"));
+    // As narrow as it goes, so that a table is wider than the pane.
+    ui.drag_by("resize-preview", 200.);
+    let table_left = |ui: &mut Ui| ui.snapshot("preview-table").bounds().origin;
+
+    ui.select("a.zip");
+    let left = table_left(&mut ui);
+    ui.select("b.zip");
+    assert_eq!(table_left(&mut ui), left);
+
+    ui.scroll_point(left + point(px(20.), px(20.)), point(px(-100.), px(0.)));
+    assert!(table_left(&mut ui).x < left.x - px(50.), "b.zip scrolled");
+
+    ui.select("a.zip");
+    assert_eq!(
+        table_left(&mut ui),
+        left,
+        "a.zip is not where b.zip was left"
+    );
+}
+
+#[gpui_kit::test]
 fn the_preview_pane_resizes_from_its_left_edge(cx: &mut TestAppContext) {
     let fx = Fixture::new("pane-width");
     let mut ui = Ui::open(cx, &fx.dir);
