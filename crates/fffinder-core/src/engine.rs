@@ -600,15 +600,7 @@ impl Engine {
         // Typo-tolerant matches are a fallback: when some results contain every
         // word as an in-order subsequence (fzf-style), keep only those. With
         // typos turned off, they're never kept.
-        let base = req.scope.as_deref();
-        let strict = |hit: &RawHit| {
-            let shown = base
-                .and_then(|b| hit.path.strip_prefix(b).ok())
-                .unwrap_or(&hit.path)
-                .to_string_lossy()
-                .to_lowercase();
-            words.iter().all(|w| is_subsequence(w, &shown))
-        };
+        let strict = |hit: &RawHit| words.iter().all(|w| is_subsequence(w, &hit.rel));
         if !words.is_empty() && (!settings.typos || raw.iter().any(&strict)) {
             raw.retain(strict);
         }
@@ -787,6 +779,17 @@ impl Engine {
                     ));
                 }
             }
+        }
+        // Each hit's path from the searched folder down, which is where
+        // `search` looks for the words.
+        let searched = scope.as_deref().unwrap_or(&base);
+        for hit in &mut part.hits {
+            hit.rel = hit
+                .path
+                .strip_prefix(searched)
+                .unwrap_or(&hit.path)
+                .to_string_lossy()
+                .to_lowercase();
         }
         part
     }
@@ -1398,6 +1401,12 @@ struct RootPart {
 
 struct RawHit {
     path: PathBuf,
+    /// Its path inside the folder that was searched, or an app's name alone,
+    /// in lowercase, which is where a search's words are looked for. Nothing
+    /// above the search location is in it, because fff-search matches nothing
+    /// there: letters found in `/Users/alice` would pass a near miss off as a
+    /// match. Empty when no search made the hit.
+    rel: String,
     is_dir: bool,
     size: u64,
     modified: u64,
@@ -1415,6 +1424,7 @@ impl RawHit {
     ) -> RawHit {
         RawHit {
             path,
+            rel: String::new(),
             is_dir: false,
             size,
             modified,
@@ -1426,6 +1436,7 @@ impl RawHit {
     fn dir(path: PathBuf, score: i32) -> RawHit {
         RawHit {
             path,
+            rel: String::new(),
             is_dir: true,
             size: 0,
             modified: 0,
@@ -1526,7 +1537,11 @@ fn app_hits(entries: &[PathBuf], words: &[String]) -> Vec<RawHit> {
                     .sum()
             };
             let depth = path.components().count() as i32;
-            Some(RawHit::dir(path.clone(), matched + depth * DEPTH_PENALTY))
+            // Only an app's name is searched, whatever folder it is in.
+            Some(RawHit {
+                rel: name,
+                ..RawHit::dir(path.clone(), matched + depth * DEPTH_PENALTY)
+            })
         })
         .collect()
 }
@@ -2345,6 +2360,77 @@ mod tests {
         engine.set_search_settings(settings);
         assert_eq!(names("bduget"), Vec::<String>::new());
         assert_eq!(names("bdgt"), ["budget.txt"], "gaps still match");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn letters_in_the_search_locations_own_path_dont_count() {
+        // The folder that is searched has "budget" in its own name, which
+        // fff-search never sees: it matches the path inside the folder.
+        let dir = std::env::temp_dir().join(format!("budget-box-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("invoices")).unwrap();
+        for file in ["budget.txt", "bduget.txt", "invoices/inovice.pdf"] {
+            std::fs::write(dir.join(file), "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let find = |query: &str, kind: KindFilter, files_only: bool, scope: Option<&Path>| {
+            let request = SearchRequest {
+                query: query.into(),
+                scope: scope.map(Path::to_path_buf),
+                kind,
+                files_only,
+                limit: 50,
+                ..Default::default()
+            };
+            let hits = engine.search(&request).hits;
+            hits.into_iter().map(|h| h.entry.name).collect::<Vec<_>>()
+        };
+        let names = |query: &str| find(query, KindFilter::Any, true, None);
+
+        assert_eq!(names("budget"), ["budget.txt"], "the near miss is dropped");
+        assert_eq!(names("bduget"), ["bduget.txt"]);
+        assert_eq!(
+            find("budget", KindFilter::Any, true, Some(&dir)),
+            ["budget.txt"],
+            "and the same when only that folder is searched"
+        );
+
+        let mut settings = engine.search_settings();
+        settings.typos = false;
+        engine.set_search_settings(settings);
+        // The b, u and g are in the folder's name, and the d, e and t in each
+        // file's.
+        assert_eq!(names("bugdet"), Vec::<String>::new());
+        assert_eq!(names("budget"), ["budget.txt"]);
+        // A folder inside the search location does count, in each kind of
+        // search.
+        assert_eq!(names("invoice"), ["inovice.pdf"]);
+        assert_eq!(
+            find("invoice", KindFilter::Any, false, None),
+            ["invoices", "inovice.pdf"]
+        );
+        assert_eq!(
+            find("invoice", KindFilter::Folder, false, None),
+            ["invoices"]
+        );
+        // Searched itself, that folder is the one whose name doesn't count.
+        let invoices = dir.join("invoices");
+        assert_eq!(
+            find("invoice", KindFilter::Any, true, Some(&invoices)),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            find("inovice", KindFilter::Any, true, Some(&invoices)),
+            ["inovice.pdf"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
