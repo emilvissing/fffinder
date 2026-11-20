@@ -20,6 +20,7 @@ use serde_json::Value as Json;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 /// How Quick Look shows a structured file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -390,6 +391,8 @@ impl Explorer {
 /// Explore mode's state for the file Quick Look shows.
 pub(super) struct Explore {
     path: PathBuf,
+    /// When the file was last modified, as its row had it when it was opened.
+    modified: Option<SystemTime>,
     state: ExploreState,
     rows_scroll: UniformListScrollHandle,
     sideways: ScrollHandle,
@@ -470,7 +473,8 @@ impl Finder {
     }
 
     /// Start opening the selected file for explore mode, when Quick Look is
-    /// open in that mode, unless it is already open.
+    /// open in that mode, unless it is already open as it is now. A file
+    /// that has changed since is opened again, from its top.
     pub(super) fn ensure_explore(&mut self, cx: &mut Context<Self>) {
         if !self.quick_look_open || self.quick_look_mode != QuickLookMode::Explore {
             return;
@@ -478,7 +482,8 @@ impl Finder {
         let Some(entry) = self.primary_entry() else {
             return;
         };
-        if self.explore.as_ref().is_some_and(|e| e.path == entry.path) {
+        let open = |e: &Explore| e.path == entry.path && e.modified == entry.modified;
+        if self.explore.as_ref().is_some_and(open) {
             return;
         }
         let Some(nu) = cx.global::<AppState>().nu.clone() else {
@@ -488,7 +493,7 @@ impl Finder {
             self.explore = None;
             return;
         }
-        let path = entry.path;
+        let (path, modified) = (entry.path, entry.modified);
         let task = cx.spawn({
             let path = path.clone();
             async move |this, cx| {
@@ -514,6 +519,7 @@ impl Finder {
         });
         self.explore = Some(Explore {
             path,
+            modified,
             state: ExploreState::Loading { _task: task },
             rows_scroll: UniformListScrollHandle::new(),
             sideways: ScrollHandle::new(),

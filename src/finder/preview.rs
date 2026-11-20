@@ -37,7 +37,7 @@ use std::io::Read as _;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 const TEXT_LIMIT: usize = 64 * 1024;
 const TABLE_ROWS: usize = 200;
@@ -314,15 +314,40 @@ pub(super) fn read_text(path: &Path) -> Option<(String, bool)> {
     (bad < 16).then_some((text, truncated))
 }
 
+/// What an item's row says of it that its preview depends on: when it was
+/// last modified, and how big a file is. A preview made for one stamp is
+/// out of date for an item whose row has another.
+pub(super) type PreviewStamp = (Option<SystemTime>, Option<u64>);
+
+/// The stamp of `entry`, from nothing but the entry. A row's date needn't
+/// be the disk's: a search result has the index's, in whole seconds. Held
+/// against a date read from the disk, such a row would never match its
+/// preview, and the gallery, which asks for its preview with every frame,
+/// would have it read over and over. A folder's size is left out because it
+/// isn't the row's own: it's filled in from the index some time after the
+/// folder is listed.
+fn preview_stamp(entry: &FileEntry) -> PreviewStamp {
+    (entry.modified, entry.size.filter(|_| !entry.is_dir))
+}
+
 impl Finder {
-    /// Start loading the preview for `entry` unless it is cached or loading.
+    /// Start loading the preview for `entry` unless it is cached or loading
+    /// for the item as `entry` has it. A preview made before the item
+    /// changed stays up until the new one is read, so nothing spins in
+    /// between.
     pub fn ensure_preview(&mut self, entry: &FileEntry, cx: &mut Context<Self>) {
         let path = entry.path.clone();
-        if self.previews.contains_key(&path) || self.preview_tasks.contains_key(&path) {
+        let stamp = preview_stamp(entry);
+        // What's being read is what the cache is about to hold.
+        let current = match self.preview_tasks.get(&path) {
+            Some((loading, _)) => Some(loading),
+            None => self.previews.get(&path).map(|(cached, _)| cached),
+        };
+        if current == Some(&stamp) {
             return;
         }
         if self.previews.len() > 256 {
-            self.previews.clear();
+            self.previews.retain(|cached, _| *cached == path);
         }
         let nu = cx.global::<AppState>().nu.clone();
         let dark = cx.theme().is_dark();
@@ -350,27 +375,51 @@ impl Finder {
                     }
                 }
                 this.preview_tasks.remove(&entry.path);
-                this.previews.insert(entry.path.clone(), preview);
+                this.previews.insert(entry.path.clone(), (stamp, preview));
                 cx.notify();
             })
             .ok();
             cx.refresh();
         });
-        self.preview_tasks.insert(path, task);
+        // A load for the item as it was before is dropped here, which stops
+        // it: the one that lands is for the item as it is now.
+        self.preview_tasks.insert(path, (stamp, task));
     }
 
     pub fn preview_of(&self, entry: &FileEntry) -> Preview {
         self.previews
             .get(&entry.path)
-            .cloned()
+            .map(|(_, preview)| preview.clone())
             .unwrap_or(Preview::Loading)
+    }
+
+    /// Forget every preview, the ones still being read too, and read the
+    /// shown item's again. Only the gallery asks for its preview as it
+    /// draws: anywhere else the item would wait for one until another item
+    /// is selected.
+    pub(super) fn forget_previews(&mut self, cx: &mut Context<Self>) {
+        self.previews.clear();
+        self.preview_tasks.clear();
+        self.selection_changed(cx);
+    }
+
+    /// The text `path`'s preview shows, when it has been read and is text.
+    #[doc(hidden)]
+    pub fn preview_text_for_test(&self, path: &Path) -> Option<String> {
+        match &self.previews.get(path)?.1 {
+            Preview::Text { text, .. }
+            | Preview::Code { text, .. }
+            | Preview::Markdown { text } => Some(text.to_string()),
+            _ => None,
+        }
     }
 
     /// The line of `path`'s preview that's marked as what the content
     /// search found, as the preview has it.
     #[doc(hidden)]
     pub fn preview_match_for_test(&self, path: &Path) -> Option<String> {
-        let (Preview::Text { text, .. } | Preview::Code { text, .. }) = self.previews.get(path)?
+        let (_, Preview::Text { text, .. } | Preview::Code { text, .. }) =
+            self.previews.get(path)?
         else {
             return None;
         };

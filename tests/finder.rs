@@ -1110,6 +1110,33 @@ fn recents_follows_the_files_that_are_written_to(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn recents_previews_a_file_as_it_was_last_written(cx: &mut TestAppContext) {
+    let fx = Fixture::new("recents-preview");
+    let written = |name: &str, minutes: u64| written_ago(&fx, name, minutes);
+    written("notes.txt", 10);
+    written("Roadmap.md", 20);
+    written("Budget.csv", 30);
+    written("Projects/atlas/Project Atlas.txt", 40);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("shift-f"));
+    ui.press(&cmd("shift-p"));
+    let roadmap = fx.path("Roadmap.md");
+    let text = |ui: &Ui| ui.read(|f| f.preview_text_for_test(&roadmap));
+    ui.select("Roadmap.md");
+    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n"));
+
+    // Written to, which puts it first once the index reports it.
+    std::fs::write(&roadmap, "# Roadmap\n\nShip it.\n").unwrap();
+    written("Roadmap.md", 5);
+    ui.reindex();
+    ui.report_change(Some(&roadmap), Some(&roadmap));
+    ui.look_for_changes(2);
+    assert_eq!(ui.names()[0], "Roadmap.md", "{:?}", ui.names());
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n\nShip it.\n"));
+}
+
+#[gpui_kit::test]
 fn recents_waits_half_a_minute_at_most_for_writing_to_stop(cx: &mut TestAppContext) {
     let fx = Fixture::new("recents-follows-two");
     let written = |name: &str, minutes: u64| written_ago(&fx, name, minutes);
@@ -2071,6 +2098,69 @@ fn quick_look_explores_with_a_nu_chosen_while_it_is_open(cx: &mut TestAppContext
             assert!(ui.exists(crumb(1)), "Return goes into deps");
         });
     }
+}
+
+#[gpui_kit::test]
+fn quick_look_explores_a_file_again_once_it_has_changed(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("explore-changed");
+    // Half a file, as one still being written is. It's ten minutes old, so
+    // that the rest of it comes with another date.
+    std::fs::write(fx.path("app.json"), r#"{"deps": "#).unwrap();
+    written_ago(&fx, "app.json", 10);
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    let crumb = |depth: usize| ("explore-crumb", depth);
+    ui.select("app.json");
+    ui.press(&cmd("space"));
+    ui.in_quick_look(|ui| assert!(ui.exists("explore-failure")));
+
+    std::fs::write(fx.path("app.json"), r#"{"deps": {"serde": "1"}}"#).unwrap();
+    ui.update(|f, _, cx| f.reload_quietly(cx));
+    ui.in_quick_look(|ui| {
+        assert!(!ui.exists("explore-failure"), "the whole file is data");
+        ui.press("enter");
+        assert!(ui.exists(crumb(1)), "Return goes into deps");
+    });
+}
+
+#[gpui_kit::test]
+fn quick_look_opens_a_pdf_again_once_it_has_changed(cx: &mut TestAppContext) {
+    let fx = Fixture::new("pdf-changed");
+    let testdata = |name: &str| {
+        let core = concat!(env!("CARGO_MANIFEST_DIR"), "/crates/fffinder-core");
+        format!("{core}/testdata/{name}")
+    };
+    // Ten minutes old, so that the document that takes its place comes
+    // with another date.
+    std::fs::copy(testdata("pages.pdf"), fx.path("Manual.pdf")).unwrap();
+    written_ago(&fx, "Manual.pdf", 10);
+    let mut ui = Ui::open(cx, &fx.dir);
+    let shown = |ui: &Ui| ui.read(|f| f.shown_pdf_page());
+    ui.click("view-list");
+    ui.select("Manual.pdf");
+    ui.press("space");
+    ui.in_quick_look(|ui| {
+        ui.press("pagedown");
+        assert_eq!(shown(ui), Some((2, 2)));
+    });
+
+    // The folder read again with the document as it was: the page stays.
+    ui.update(|f, _, cx| f.reload_quietly(cx));
+    assert_eq!(shown(&ui), Some((2, 2)));
+
+    std::fs::copy(testdata("twelve.pdf"), fx.path("Manual.pdf")).unwrap();
+    ui.update(|f, _, cx| f.reload_quietly(cx));
+    assert_eq!(shown(&ui), Some((1, 12)), "the new one, at its first page");
 }
 
 #[gpui_kit::test]

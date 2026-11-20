@@ -559,8 +559,10 @@ pub struct Finder {
     active_column: usize,
     content_height: Pixels,
 
-    previews: HashMap<PathBuf, Preview>,
-    preview_tasks: HashMap<PathBuf, Task<()>>,
+    /// Each item's preview, and the one being read for it, with the size
+    /// and date of the item it was made for.
+    previews: HashMap<PathBuf, (preview::PreviewStamp, Preview)>,
+    preview_tasks: HashMap<PathBuf, (preview::PreviewStamp, Task<()>)>,
     /// The PDF the large preview shows page by page.
     pdf: Option<pdf::PdfView>,
     quick_look_open: bool,
@@ -763,7 +765,7 @@ impl Finder {
                 if this.config.appearance == fffinder_core::Appearance::System {
                     crate::theme::apply(this.config.appearance, Some(window), cx);
                     // Code previews are colored for light or dark.
-                    this.previews.clear();
+                    this.forget_previews(cx);
                 }
             }),
             cx.observe_window_activation(window, |this, window, cx| {
@@ -1547,8 +1549,10 @@ impl Finder {
                         this.selection.toggle(ix);
                     }
                     this.scroll_to(first);
-                    this.selection_changed(cx);
                 }
+                // For what stays selected too: its file may have come back
+                // another size or date, and its preview is read again then.
+                this.selection_changed(cx);
                 cx.notify();
             })
             .ok();
@@ -1682,6 +1686,8 @@ impl Finder {
                 if fresh {
                     this.listing = entries;
                     this.rebuild_rows(cx);
+                    // The selected file may be the one that was written to.
+                    this.selection_changed(cx);
                 }
             })
             .ok();
@@ -3265,7 +3271,7 @@ impl Finder {
             Appearance::Dark
         };
         crate::theme::apply(self.config.appearance, Some(window), cx);
-        self.previews.clear();
+        self.forget_previews(cx);
         self.settings_changed(cx);
     }
 
@@ -3277,7 +3283,7 @@ impl Finder {
     ) {
         self.config.appearance = appearance;
         crate::theme::apply(appearance, Some(window), cx);
-        self.previews.clear();
+        self.forget_previews(cx);
         self.settings_changed(cx);
         cx.notify();
     }
@@ -3329,7 +3335,7 @@ impl Finder {
         }
         if self.config.appearance != before.appearance {
             crate::theme::apply(self.config.appearance, Some(window), cx);
-            self.previews.clear();
+            self.forget_previews(cx);
         }
         if self.config.ui_scale != before.ui_scale {
             crate::theme::set_ui_scale(self.config.ui_scale(), cx);
@@ -3640,10 +3646,8 @@ impl Finder {
         // Scripts and structured files are previewed and explored with `nu`.
         // A preview still being read with the old one would be kept as that
         // one made it, so it's dropped too.
-        self.previews.clear();
-        self.preview_tasks.clear();
         self.explore = None;
-        self.selection_changed(cx);
+        self.forget_previews(cx);
         // A filter runs again, as if it had just been typed.
         self.filter_keep = None;
         self.filter_source = None;
@@ -3977,6 +3981,14 @@ impl Finder {
                 {
                     pane.entries = entries;
                     pane.stamp = stamp;
+                    // The item that's previewed is the active pane's, and
+                    // its preview is read again if it came back changed. A
+                    // pane that fills in for a folder just selected is never
+                    // the active one, and asking then would read a preview
+                    // of that folder, which the column view doesn't show.
+                    if col == this.active_column {
+                        this.selection_changed(cx);
+                    }
                     cx.notify();
                 }
             })

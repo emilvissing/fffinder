@@ -240,6 +240,9 @@ impl Finder {
                 this.children
                     .insert(dir, super::OpenFolder { entries, stamp });
                 this.rebuild_rows(cx);
+                // The selected item may be one of these, and its preview is
+                // read again if it came back changed.
+                this.selection_changed(cx);
             })
             .ok();
         })

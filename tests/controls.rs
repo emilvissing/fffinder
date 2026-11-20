@@ -3281,6 +3281,54 @@ fn a_preview_still_being_read_is_read_again_with_the_nu_found(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+fn a_preview_is_colored_again_when_the_appearance_changes(cx: &mut TestAppContext) {
+    let fx = Fixture::new("appearance-preview");
+    for name in ["main.rs", "other.rs"] {
+        std::fs::write(fx.path(name), "fn main() {\n    let answer = 42;\n}\n").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.dispatch(TogglePreviewPane);
+    // The colors of the code in the selected item's preview.
+    let colors = |ui: &Ui| {
+        let shown = ui.read(|f| f.primary_entry()).expect("an item is selected");
+        ui.read(|f| match f.preview_of(&shown) {
+            Preview::Code { spans, .. } => Some(
+                spans
+                    .iter()
+                    .map(|(_, style)| style.color)
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+    };
+
+    ui.select("main.rs");
+    let light = colors(&ui).expect("code is colored");
+    ui.press(&cmd("shift-d"));
+    let dark = colors(&ui).expect("the preview is read again, not left waiting");
+    assert_ne!(dark, light, "in the colors that go with the dark window");
+    assert!(ui.exists("preview-text"));
+
+    // And one still being read for the dark window when it turns light.
+    let other = ui.names().iter().position(|name| name == "other.rs");
+    ui.update(|f, window, cx| {
+        f.click_row(other.unwrap(), Default::default(), 1, window, cx);
+        f.set_appearance(Appearance::Light, window, cx);
+    });
+    assert_eq!(colors(&ui), Some(light));
+
+    // Quick Look waits for no other item either, with the pane hidden.
+    ui.dispatch(TogglePreviewPane);
+    ui.select("main.rs");
+    ui.press("space");
+    ui.in_quick_look(|ui| assert!(ui.exists("preview-text")));
+    ui.press(&cmd("shift-d"));
+    assert_eq!(colors(&ui), Some(dark));
+    ui.in_quick_look(|ui| assert!(ui.exists("preview-text")));
+}
+
+#[gpui_kit::test]
 fn go_to_folder_lists_matches_for_the_path_it_opens_with(cx: &mut TestAppContext) {
     let fx = Fixture::new("goto-opens");
     let mut ui = Ui::open(cx, &fx.dir);

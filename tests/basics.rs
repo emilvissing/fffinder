@@ -1341,6 +1341,171 @@ fn the_preview_pane_follows_the_selection(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_preview_is_read_again_when_its_file_comes_back_changed(cx: &mut TestAppContext) {
+    let fx = Fixture::new("pane-changed");
+    let log = fx.path("log.txt");
+    let lines =
+        |what: &str| -> String { (1..=400).map(|ix| format!("line {ix} {what}\n")).collect() };
+    std::fs::write(&log, lines("as written")).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("shift-p"));
+    let first_line = |ui: &Ui| {
+        let text = ui.read(|f| f.preview_text_for_test(&log));
+        text.and_then(|text| text.lines().next().map(str::to_string))
+    };
+    let text_top = |ui: &mut Ui| ui.snapshot("preview-text").bounds().origin;
+
+    ui.select("log.txt");
+    assert_eq!(first_line(&ui).as_deref(), Some("line 1 as written"));
+    let top = text_top(&mut ui);
+    ui.scroll_point(top + point(px(20.), px(20.)), point(px(0.), px(-300.)));
+    let read_at = text_top(&mut ui);
+    assert!(read_at.y < top.y - px(100.), "scrolled on");
+
+    // One line longer, with the date it had: only its size says it changed.
+    let written = std::fs::metadata(&log).unwrap().modified().unwrap();
+    let dated = |when: std::time::SystemTime| {
+        let file = std::fs::File::options().write(true).open(&log).unwrap();
+        file.set_modified(when).unwrap();
+    };
+    std::fs::write(&log, lines("saved once") + "the end\n").unwrap();
+    dated(written);
+    ui.update(|f, _, cx| f.reload_quietly(cx));
+    assert_eq!(first_line(&ui).as_deref(), Some("line 1 saved once"));
+    assert_eq!(text_top(&mut ui), read_at, "still where it was being read");
+
+    // As long as it was, a minute later: only its date says so. By now
+    // more previews have been read than the window keeps, and the one
+    // that's showing isn't let go with the others.
+    let others: Vec<_> = (0..300)
+        .map(|ix| fx.path(&format!("Projects/atlas/other {ix}.txt")))
+        .collect();
+    for other in &others {
+        std::fs::write(other, "x").unwrap();
+    }
+    ui.update(|f, _, cx| {
+        for other in &others {
+            let other = fffinder_core::FileEntry::from_path(other).unwrap();
+            f.ensure_preview(&other, cx);
+        }
+    });
+    std::fs::write(&log, lines("SAVED ONCE") + "the end\n").unwrap();
+    dated(written + std::time::Duration::from_secs(60));
+    ui.update(|f, _, cx| f.reload_quietly(cx));
+    assert_eq!(first_line(&ui).as_deref(), Some("line 1 SAVED ONCE"));
+    assert_eq!(text_top(&mut ui), read_at, "and still there");
+
+    // The gallery asks for its preview with every frame it draws, and has
+    // it read once more for a file that changed, not once more a frame.
+    ui.click("view-gallery");
+    ui.select("log.txt");
+    std::fs::write(&log, lines("saved twice")).unwrap();
+    ui.update(|f, _, cx| f.reload_quietly(cx));
+    assert_eq!(first_line(&ui).as_deref(), Some("line 1 saved twice"));
+}
+
+#[gpui_kit::test]
+fn previews_show_what_other_programs_save(cx: &mut TestAppContext) {
+    let fx = Fixture::new("outside-saves");
+    let (notes, plan) = (fx.path("notes.txt"), fx.path("Projects/plan.txt"));
+    let atlas = fx.path("Projects/atlas/Project Atlas.txt");
+    std::fs::write(&plan, "the plan\n").unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    let text = |ui: &Ui, path: &std::path::Path| ui.read(|f| f.preview_text_for_test(path));
+    // As most programs save: under another name, which then takes the
+    // file's. That moves the folder's change time, so the next look for
+    // changes reads the folder again, and no other folder.
+    let save = |path: &std::path::Path, text: &str| {
+        let draft = path.with_extension("draft");
+        std::fs::write(&draft, text).unwrap();
+        std::fs::rename(&draft, path).unwrap();
+    };
+
+    ui.click("view-list");
+    ui.press(&cmd("shift-p"));
+    ui.select("notes.txt");
+    assert_eq!(text(&ui, &notes).as_deref(), Some("plain notes\n"));
+    save(&notes, "plain notes, and a few more\n");
+    ui.look_for_changes(1);
+    assert_eq!(
+        text(&ui, &notes).as_deref(),
+        Some("plain notes, and a few more\n"),
+        "the window's own folder"
+    );
+
+    ui.select("Projects");
+    ui.press("right");
+    ui.select("plan.txt");
+    assert_eq!(text(&ui, &plan).as_deref(), Some("the plan\n"));
+    save(&plan, "the plan, as it is now\n");
+    ui.look_for_changes(1);
+    assert_eq!(
+        text(&ui, &plan).as_deref(),
+        Some("the plan, as it is now\n"),
+        "a folder open in the list"
+    );
+
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/atlas")));
+    ui.click(item_id("crow", &atlas));
+    assert_eq!(text(&ui, &atlas).as_deref(), Some("atlas"));
+    save(&atlas, "atlas, with its index");
+    ui.look_for_changes(1);
+    assert_eq!(
+        text(&ui, &atlas).as_deref(),
+        Some("atlas, with its index"),
+        "a column pane"
+    );
+}
+
+#[gpui_kit::test]
+fn refresh_reads_the_shown_preview_again(cx: &mut TestAppContext) {
+    let fx = Fixture::new("pane-refresh");
+    let notes = fx.path("notes.txt");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("shift-p"));
+    ui.select("notes.txt");
+    assert!(ui.exists("preview-text"));
+
+    // Written over where it is, and as long and as old as it was: nothing
+    // about its row or its folder says that it changed.
+    let written = std::fs::metadata(&notes).unwrap().modified().unwrap();
+    std::fs::write(&notes, "other notes\n").unwrap();
+    let file = std::fs::File::options().write(true).open(&notes).unwrap();
+    file.set_modified(written).unwrap();
+    ui.press(&cmd("r"));
+
+    assert_eq!(
+        ui.read(|f| f.preview_text_for_test(&notes)).as_deref(),
+        Some("other notes\n")
+    );
+    assert!(ui.exists("preview-text"), "shown, not waited for");
+
+    // The same for the column view's card, with the file in the column of
+    // its own folder.
+    let atlas = fx.path("Projects/atlas/Project Atlas.txt");
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/atlas")));
+    ui.click(item_id("crow", &atlas));
+    assert!(ui.exists("preview-text"));
+    let written = std::fs::metadata(&atlas).unwrap().modified().unwrap();
+    std::fs::write(&atlas, "ATLAS").unwrap();
+    let file = std::fs::File::options().write(true).open(&atlas).unwrap();
+    file.set_modified(written).unwrap();
+    ui.press(&cmd("r"));
+
+    assert_eq!(
+        ui.read(|f| f.preview_text_for_test(&atlas)).as_deref(),
+        Some("ATLAS")
+    );
+    assert!(ui.exists("preview-text"), "shown in the card");
+}
+
+#[gpui_kit::test]
 fn a_preview_starts_at_its_first_line_however_far_the_last_one_was_scrolled(
     cx: &mut TestAppContext,
 ) {
@@ -1564,6 +1729,31 @@ fn a_preview_marks_no_line_when_the_file_changed_after_the_search(cx: &mut TestA
     assert_eq!(marked_line(&ui), None, "line 300 is another line now");
     assert!(!ui.exists("preview-match"));
     assert_eq!(text_top(&mut ui), unscrolled, "the file opens at its top");
+}
+
+#[gpui_kit::test]
+fn a_preview_follows_a_changed_file_once_its_search_has_run_again(cx: &mut TestAppContext) {
+    let fx = files_with_a_match("rerun-match");
+    let near = fx.path("near.txt");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("shift-p"));
+    ui.click("search");
+    ui.type_text("needle-zebra");
+    ui.click("by-contents");
+    ui.select("near.txt");
+    assert_eq!(marked_line(&ui).as_deref(), Some("line 2 needle-zebra"));
+
+    // A line more above the match, so the search finds it on line 3 next
+    // time, where the preview as it was read before has another line.
+    let found = std::fs::read_to_string(&near).unwrap();
+    std::fs::write(&near, format!("one more\n{found}")).unwrap();
+    ui.update(|f, _, cx| f.run_search(false, cx));
+
+    assert_eq!(ui.selected(), ["near.txt"]);
+    let text = ui.read(|f| f.preview_text_for_test(&near)).unwrap();
+    assert!(text.starts_with("one more\nline 1\n"), "read again");
+    assert_eq!(marked_line(&ui).as_deref(), Some("line 2 needle-zebra"));
 }
 
 #[gpui_kit::test]
