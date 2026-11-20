@@ -443,8 +443,8 @@ h3 {{ font: 600 14px var(--text); margin: 0; display: flex; align-items: center;
   <section class="status" aria-label="Where things stand">
     <div class="line">
       <span><span class="big">{n_landed}</span> <span class="unit">landed</span></span>
-      <span><span class="big">{n_flight}</span> <span class="unit">being worked on</span></span>
-      <span><span class="big">{n_queued}</span> <span class="unit">queued</span></span>
+      {'' if final else f'<span><span class="big">{n_flight}</span> <span class="unit">being worked on</span></span>'}
+      {'' if final else f'<span><span class="big">{n_queued}</span> <span class="unit">queued</span></span>'}
       {f'<span><span class="big">{len(later)}</span> <span class="unit">saved for later</span></span>' if later else ''}
     </div>
     <div class="bar" role="img" aria-label="{n_landed} of {total} landed, {n_flight} in progress">
