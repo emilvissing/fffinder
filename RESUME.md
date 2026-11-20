@@ -20,15 +20,15 @@ Small builds for all lanes come from /home/user/.cargo/config.toml and /home/use
 New lane: seed-lane.sh; prune inherited artifacts: prune-lane.sh. Cross-platform checks: xcheck.sh (worktree /home/user/fast/xcheck).
 Background watcher: watch.sh (re-arm after each notification). Changelog at the end: mkchangelog.py.
 
-## 16:45 UTC, after the usage limit and a container restart
+## 16:45 UTC, after a pause and a container restart
 
-All three earlier workflows ended at about 10:10 UTC when the Fable usage limit was hit (reset 16:00 UTC); the container restarted at 16:41.
+All three earlier workflows ended at about 10:10 UTC; the container restarted at 16:41.
 Relaunched with the queue script (fffinder-polish-queue-wf_a453dfef-918.js), max_turns 1, to finish the six improvements that were in flight:
   lanes b,c: run wf_a621c71b-14d   lanes d,e: run wf_405cba75-499   lanes f,g: run wf_fcb90ce8-03d
 After a restart do not resume these by run id blindly: just launch the queue script again on the lanes; next.sh gives each lane its unfinished improvement first.
 The cross-check cache in /dev/shm is lost on a restart (a cold xcheck run takes about 11 minutes).
 
-## Since 21:20 UTC, Nov 19 (after the user reset the usage limit)
+## Since 21:20 UTC, Nov 19
 
 - Watcher: use `watch3.sh 6900` (background, timeout 7200000) from now on; it is watch2 plus `prune-probes.sh` (deletes binaries of throwaway tests whose source is gone) when disk is under 5 GB.
 - After each notification: `python3 digest.py`, read the new done record in full, route "Found, not fixed" (new brief only for clear user-visible bugs of value 3 or more; notes into queued briefs' `orchestrator_notes`; the rest into final-pass-notes.md), then `./xcheck-if-due.sh 3` (or 1 after a change to crates/fffinder-core or platform code).
