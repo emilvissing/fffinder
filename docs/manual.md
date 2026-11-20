@@ -303,7 +303,7 @@ As in Finder, typing letters while the files have focus selects the first item w
 
 The Sort and View Options menu has:
 
-- **Sort By**: Relevance (only while searching), Name, Date Modified, Date Created, Size, and Kind. Choosing the current key again reverses the order. The list view's Date Last Opened header sorts by that date too, and in search results and Recents, the Folder header sorts by folder.
+- **Sort By**: Relevance (only while searching), Name, Date Modified, Date Created, Size, and Kind. Choosing the current key again reverses the order, except for Relevance, which has none to reverse. The list view's Date Last Opened header sorts by that date too, and in search results and Recents, the Folder header sorts by folder.
 - **Ascending** and **Descending**. Both are disabled for Relevance.
 - **Keep Folders on Top**. See [The list view](#the-list-view).
 - **Show Hidden Files**.

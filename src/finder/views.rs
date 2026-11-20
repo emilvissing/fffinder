@@ -169,6 +169,13 @@ impl Presses {
         !stray
     }
 
+    /// The press was stopped before it reached what it landed on, as the rest
+    /// of a double-click on a button under the file area's message. It counts
+    /// as one the views left alone, so the press after it is a click again.
+    pub(super) fn left_alone(&mut self) {
+        self.last = Some(Pressed::LeftAlone);
+    }
+
     /// Presses were made that the browser didn't hear of, in a window over
     /// its own or while its tab was hidden. What it remembers is out of date.
     fn forget(&mut self) {
@@ -1612,6 +1619,21 @@ mod tests {
         presses.began();
         assert!(!presses.in_empty_space(2));
         assert_eq!(press(&mut presses, "/a", 3), Some(1));
+    }
+
+    #[test]
+    fn the_click_after_a_press_that_was_stopped_on_its_way_is_a_first_click() {
+        let mut presses = Presses::default();
+
+        // A double-click on a button under the file area's message, where
+        // an item is listed once the button has gone. The file area stops
+        // the second press before the item hears of it.
+        presses.began();
+        presses.began();
+        presses.left_alone();
+
+        assert_eq!(press(&mut presses, "/a", 3), Some(1));
+        assert_eq!(press(&mut presses, "/a", 4), Some(4));
     }
 
     #[test]

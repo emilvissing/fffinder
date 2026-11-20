@@ -589,9 +589,10 @@ pub struct Finder {
     /// propagation, so the empty-space menu around the item checks this and
     /// stays closed for the same click.
     item_menu_at: Option<Point<Pixels>>,
-    /// A button under the file area's message was clicked, and no click has
-    /// begun in the file area since. The second press of a double-click on
-    /// the button finds what the first one put in its place.
+    /// A button under the file area's message was clicked, and the left
+    /// button hasn't been pressed in the file area since. The second press
+    /// of a double-click on the button finds what the first one put in its
+    /// place.
     message_button_clicked: bool,
     /// What the last presses of the mouse landed on, for telling a
     /// double-click on an item from a second click that only ends up on it.
@@ -3253,6 +3254,12 @@ impl Finder {
 
     pub fn set_sort(&mut self, key: SortKey, cx: &mut Context<Self>) {
         let current = self.sort_order();
+        // Relevance has no direction to turn around. Chosen again, it is
+        // the sort the results already have, and no change to search again
+        // for.
+        if key == SortKey::Relevance && current.key == key {
+            return;
+        }
         let order = if current.key == key {
             SortOrder {
                 key,
@@ -4340,6 +4347,7 @@ fn content_search(
 impl Render for Finder {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.rename_frame_started();
+        self.check_filter_field(window, cx);
         let (background, foreground, font) = {
             let theme = cx.theme();
             (
@@ -4656,16 +4664,22 @@ impl Finder {
                 }
             }))
             // A double-click on a button under the message presses it once.
-            // The second press is no click on the item that is now where
-            // the button was, which it would open, or on the next button.
+            // Its second press is no click on what has come to where the
+            // button was. On an item or in empty space the views would leave
+            // it alone themselves, but not on the next button or on a
+            // group's header, so it is stopped here, whatever it lands on.
+            // Only that press is stopped, and the views count it as one
+            // they left alone: the press after it is a click again, or a
+            // double-click on what has come under the mouse would open
+            // nothing until the mouse rested or moved.
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
                 if event.button != MouseButton::Left || !this.message_button_clicked {
                     return;
                 }
+                this.message_button_clicked = false;
                 if event.click_count >= 2 {
+                    this.presses.left_alone();
                     cx.stop_propagation();
-                } else {
-                    this.message_button_clicked = false;
                 }
             }))
             .on_action(cx.listener(Self::escape))

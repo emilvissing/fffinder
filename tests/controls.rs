@@ -1060,6 +1060,46 @@ fn a_sort_chooses_among_every_match_not_among_the_ones_listed(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+fn relevance_chosen_again_is_no_other_sort(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-sort-relevance");
+    for name in ["a.log", "b.log", "c.log", "d.log"] {
+        std::fs::write(fx.path(name), "x").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.update(|f, _, cx| {
+        f.set_result_limit(3, cx);
+        f.set_query("*.log".into(), true, cx);
+    });
+    assert_eq!(ui.names().len(), 3, "three of the four fit");
+    let relevance = ui.read(|f| f.current_sort());
+    assert_eq!(relevance.key, SortKey::Relevance);
+
+    // A sort would choose which three are listed, so another sort searches
+    // again. Relevance has no direction to turn around: chosen again, it
+    // is the sort the list already has.
+    let view = ui.view.clone();
+    ui.window(|_, cx| {
+        view.update(cx, |f, cx| {
+            f.set_sort(SortKey::Relevance, cx);
+            assert!(!f.search_in_flight_for_test());
+        })
+    });
+    assert_eq!(ui.read(|f| f.current_sort()), relevance);
+
+    // The Sort menu's checked item can be clicked all the same.
+    ui.click("sort");
+    ui.click_menu_item("Relevance");
+    assert_eq!(ui.read(|f| f.current_sort()), relevance);
+
+    // Another sort is one this list is searched again for.
+    ui.click_without_settling("Size");
+    assert!(ui.read(|f| f.search_in_flight_for_test()));
+    ui.settle();
+    assert_eq!(ui.read(|f| f.current_sort().key), SortKey::Size);
+}
+
+#[gpui_kit::test]
 fn a_sort_by_a_word_stays_with_the_names_that_have_it(cx: &mut TestAppContext) {
     let fx = Fixture::new("search-sort-word");
     std::fs::create_dir_all(fx.path("ledger")).unwrap();
@@ -1987,6 +2027,66 @@ fn a_double_click_on_a_button_under_no_results_opens_nothing(cx: &mut TestAppCon
         "{:?}",
         ui.system_calls()
     );
+}
+
+#[gpui_kit::test]
+fn a_double_click_on_a_button_under_no_results_holds_up_no_click_after_it(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-nothing-then");
+    // Enough files that one of them is listed where the button was.
+    for n in 0..60 {
+        std::fs::write(fx.path(&format!("quokka {n:02}.txt")), "").unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.go_to(&fx.path("Projects"));
+    ui.click("search-scope");
+    ui.click("search");
+    ui.type_text("quokka");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+
+    let button = ui.snapshot("empty-widen-scope").bounds().center();
+    ui.click("empty-widen-scope");
+    let found: Vec<PathBuf> = ui.read(|f| {
+        f.rows_for_test()
+            .iter()
+            .map(|r| r.entry.path.clone())
+            .collect()
+    });
+    let under = found
+        .into_iter()
+        .find(|path| {
+            let row = item_id("row", path);
+            ui.exists(row.clone()) && ui.snapshot(row).bounds().contains(&button)
+        })
+        .expect("a result is listed where the button was");
+    let name = under.file_name().unwrap().to_string_lossy().into_owned();
+    ui.nth_click_point(button, 2);
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+
+    // Clicked on without a pause or a move, that result is clicked for the
+    // third and fourth time at that spot, as the system counts. They are
+    // its first click and its second: no pause is needed before a
+    // double-click opens it.
+    ui.nth_click_point(button, 3);
+    assert_eq!(ui.selected(), [name]);
+    assert_eq!(ui.system_calls(), []);
+    ui.nth_click_point(button, 4);
+    assert_eq!(ui.system_calls(), [SystemCall::Open(under)]);
+
+    // The same when it is the next button that has come under the pointer:
+    // no folder is named quokka, on This Computer either. The click after
+    // the double-click presses that button.
+    ui.click("search-scope");
+    ui.click("kind");
+    ui.click_menu_item("Folder");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    ui.click("empty-widen-scope");
+    let next = ui.snapshot("empty-any-kind").bounds().center();
+    ui.nth_click_point(next, 2);
+    assert_eq!(ui.read(|f| f.config().kind_filter), KindFilter::Folder);
+    ui.nth_click_point(next, 3);
+    assert_eq!(ui.read(|f| f.config().kind_filter), KindFilter::Any);
+    assert_eq!(ui.names().len(), 60);
 }
 
 #[gpui_kit::test]
@@ -4363,6 +4463,56 @@ fn the_keyboard_stays_in_the_window_when_a_smart_folder_takes_the_filter_bar_awa
     ui.press(&cmd("["));
     assert!(!ui.read(|f| f.is_searching()));
     assert!(ui.exists("filter-input"), "the window's own bar is back");
+}
+
+#[gpui_kit::test]
+fn the_files_get_the_keyboard_when_a_dialog_gives_it_back_to_a_filter_bar_that_went(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("smart-filter-dialog");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let filtered = atlas_folders(&fx);
+    ui.update(|f, _, cx| f.add_smart_folder(filtered, cx));
+
+    // A dialog gives the keyboard back to what had it when it opened: here
+    // the Smart Folder's filter field. Return goes to the folder first, which
+    // ends the search, and the bar goes with it.
+    ui.click(("smart", 0usize));
+    ui.click("filter-input");
+    ui.press(&cmd("shift-g"));
+    ui.type_text(&fx.dir.display().to_string());
+    ui.press("enter");
+    assert!(!ui.dialog_open());
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    assert!(!ui.exists("filter-input"));
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Budget.csv"]);
+
+    // The same when the window is sent somewhere else, as by `fff gui`,
+    // with any other dialog open over that field.
+    ui.click(("smart", 0usize));
+    ui.click("filter-input");
+    ui.press(&cmd("/"));
+    assert!(ui.dialog_open());
+    let dir = fx.dir.clone();
+    ui.update(|f, window, cx| f.open_request(Some(&dir), None, false, window, cx));
+    assert!(!ui.exists("filter-input"));
+    ui.press("escape");
+    assert!(!ui.dialog_open());
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Budget.csv"]);
+
+    // With the bar still there when the dialog closes, typing goes on in
+    // its field.
+    ui.click(("smart", 0usize));
+    ui.click("filter-input");
+    ui.press(&cmd("shift-g"));
+    ui.press("escape");
+    assert!(!ui.dialog_open());
+    ui.type_text("0");
+    assert_eq!(ui.read(|f| f.filter_text().to_string()), "size > 1kb0");
 }
 
 #[gpui_kit::test]

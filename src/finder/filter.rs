@@ -312,6 +312,27 @@ impl Finder {
         }
     }
 
+    /// A frame is about to be drawn. The bar's field may have the keyboard
+    /// though the bar isn't showing: a dialog gives the keyboard back to
+    /// what had it when the dialog opened, and the bar can go in the
+    /// meantime, as when Go to Folder is called from a Smart Folder's filter
+    /// field and ends that search. Keys pressed in a field that isn't drawn
+    /// go nowhere, and [`Self::keyboard_lost`] can't be the one to act: what
+    /// stopped being drawn with the keyboard was the dialog, no part of
+    /// this browser, and GPUI reports nothing lost when the keyboard then
+    /// lands on a field that isn't drawn. The files take the keyboard
+    /// before anything of this browser is drawn, so this frame draws them
+    /// with it and no other frame has to be asked for.
+    pub(super) fn check_filter_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filter_bar_open() {
+            return;
+        }
+        let field = self.filter_input.read(cx).focus_handle(cx);
+        if field.is_focused(window) {
+            self.focus_files(window, cx);
+        }
+    }
+
     /// Run a saved search: its place, kind, filter, and words.
     pub fn open_smart_folder(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(folder) = self.config.smart_folders.get(ix).cloned() else {
