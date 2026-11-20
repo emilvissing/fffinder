@@ -32,12 +32,6 @@ const TAB_GAP: f32 = 6.;
 #[derive(Clone)]
 struct DraggedTab(usize);
 
-impl Render for DraggedTab {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
-}
-
 impl Finder {
     /// Put this browser in a window's tabs.
     pub fn set_host(&mut self, host: WeakEntity<Workspace>) {
@@ -295,18 +289,21 @@ impl Finder {
             if workspace.tabs().len() < 2 {
                 return None;
             }
-            // This browser is being drawn, so it can't be read through its entity.
-            let titles: Vec<(EntityId, String)> = workspace
+            // This browser is being drawn, so it can't be read through its
+            // entity. Its own tab takes no dropped items: the folder it
+            // stands for is the one in the window, which takes them itself.
+            let titles: Vec<(EntityId, String, Option<PathBuf>)> = workspace
                 .tabs()
                 .iter()
                 .map(|tab| {
                     let id = tab.entity_id();
-                    let title = if id == me {
-                        self.title()
+                    let (title, folder) = if id == me {
+                        (self.title(), None)
                     } else {
-                        tab.read(cx).title()
+                        let tab = tab.read(cx);
+                        (tab.title(), tab.drop_folder())
                     };
-                    (id, title)
+                    (id, title, folder)
                 })
                 .collect();
             (
@@ -328,11 +325,12 @@ impl Finder {
         let selected_bg = theme.background;
         let highlight = theme.drop_target;
         let count = titles.len() as f32;
-        let tabs = titles.into_iter().enumerate().map(|(ix, (id, title))| {
+        let tabs = titles.into_iter().enumerate().map(|(ix, tab)| {
+            let (id, title, folder) = tab;
             let on = ix == active;
             let weak = host.downgrade();
             let (select, close, menu_host) = (weak.clone(), weak.clone(), weak.clone());
-            let drop_host = weak;
+            let (middle, drop_host) = (weak.clone(), weak);
             let label: SharedString = title.clone().into();
             let shown = StyledText::new(label.clone());
             h_flex()
@@ -388,13 +386,36 @@ impl Finder {
                         select.update(cx, |w, cx| w.select_tab(ix, window, cx)).ok();
                     });
                 })
-                .on_drag(DraggedTab(ix), |tab, _, _, cx| cx.new(|_| tab.clone()))
+                // The middle button opens a folder in a new tab everywhere
+                // else, and on a tab it closes that tab.
+                .on_mouse_down(MouseButton::Middle, move |event, window, cx| {
+                    let (middle, click_count) = (middle.clone(), event.click_count);
+                    window.defer(cx, move |window, cx| {
+                        middle
+                            .update(cx, |w, cx| {
+                                w.close_tab_at_press(id, click_count, window, cx)
+                            })
+                            .ok();
+                    });
+                })
+                .on_drag(DraggedTab(ix), move |_, _, _, cx| {
+                    cx.new(|_| super::list::DragLabel(label.clone()))
+                })
                 .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(highlight))
                 .on_drop(move |dragged: &DraggedTab, window, cx| {
                     let (from, host) = (dragged.0, drop_host.clone());
                     window.defer(cx, move |_, cx| {
                         host.update(cx, |w, cx| w.move_tab(from, ix, cx)).ok();
                     });
+                })
+                // A tab stands for the folder it shows, so items dropped on
+                // it go there, as on a folder's row or a crumb. This browser
+                // does the moving, and the tab reloads with the others. A
+                // drag held over a tab opens nothing: the wait that rows and
+                // crumbs have would take this browser to the tab's folder.
+                .map(|tab| match folder {
+                    Some(folder) => super::transfer::folder_drop_target(tab, folder, cx),
+                    None => tab,
                 })
                 .test_support()
                 .context_menu(move |menu, window, cx| {
@@ -413,12 +434,23 @@ impl Finder {
                         }
                     })
                     .detach();
-                    let (close, split) = (menu_host.clone(), menu_host.clone());
+                    let (close, others, split) =
+                        (menu_host.clone(), menu_host.clone(), menu_host.clone());
                     menu.item(
                         PopupMenuItem::new("Close Tab").on_click(move |_, window, cx| {
                             let close = close.clone();
                             window.defer(cx, move |window, cx| {
                                 close.update(cx, |w, cx| w.close_tab(id, window, cx)).ok();
+                            });
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Close Other Tabs").on_click(move |_, window, cx| {
+                            let others = others.clone();
+                            window.defer(cx, move |window, cx| {
+                                others
+                                    .update(cx, |w, cx| w.close_other_tabs(id, window, cx))
+                                    .ok();
                             });
                         }),
                     )

@@ -17,6 +17,9 @@ pub struct Workspace {
     /// tab's browser draws the bar while it shows, so the place is kept here
     /// for all of them.
     tab_scroll: ScrollHandle,
+    /// Whether the last change to the tabs was a tab closed by a press of
+    /// the middle button on it (see [`Self::close_tab_at_press`]).
+    closed_by_press: bool,
     /// The other pane, while split view is on.
     split: Option<Entity<Finder>>,
     /// Remembers the window's place as it moves, and saves it if the window
@@ -80,6 +83,7 @@ impl Workspace {
             tabs: vec![first],
             active: 0,
             tab_scroll: ScrollHandle::new(),
+            closed_by_press: false,
             split: None,
             _placement_watches: placement_watches,
             unsaved_placement: None,
@@ -235,6 +239,53 @@ impl Workspace {
         self.tabs_changed(cx);
     }
 
+    /// Close the tab holding `finder` for a press of the middle button on it,
+    /// the system's `click_count`th in a row at that spot. Quick presses at
+    /// one spot close one tab after another: each closes the tab that the
+    /// one before it brought under the pointer. A press counted second or
+    /// later closes nothing when the tab came under the pointer some other
+    /// way. It is then the rest of a double press on a folder near the top
+    /// of the files: the folder opened in a second tab, and the tab bar
+    /// came where the folder was.
+    pub fn close_tab_at_press(
+        &mut self,
+        finder: EntityId,
+        click_count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if click_count > 1 && !self.closed_by_press {
+            return;
+        }
+        self.close_tab(finder, window, cx);
+        // After the close, which counts as a change to the tabs like any other.
+        self.closed_by_press = true;
+    }
+
+    /// Close every tab but the one holding `finder`, and show that one.
+    pub fn close_other_tabs(
+        &mut self,
+        finder: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tabs.len() < 2 {
+            return;
+        }
+        let Some(kept) = self.tabs.iter().find(|t| t.entity_id() == finder).cloned() else {
+            return;
+        };
+        // The tab that shows goes too, unless it is the one kept, and a name
+        // being edited in it ends as it does when its tab is hidden.
+        if self.active().entity_id() != finder {
+            self.leave_active_tab(window, cx);
+        }
+        self.tabs = vec![kept];
+        self.active = 0;
+        self.focus_active(window, cx);
+        self.tabs_changed(cx);
+    }
+
     /// Put the tab at `from` where the one at `to` is.
     pub fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
@@ -305,6 +356,7 @@ impl Workspace {
     }
 
     fn tabs_changed(&mut self, cx: &mut Context<Self>) {
+        self.closed_by_press = false;
         // The active tab draws the tab bar.
         self.active().update(cx, |_, cx| cx.notify());
         cx.notify();

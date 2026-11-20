@@ -13,9 +13,9 @@ use gpui_kit::base::test_support::{self, ElementSnapshot};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Context, ElementId, Entity, InputEvent as _,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, TestAppContext,
-    Window, WindowOptions, point, px,
+    AnyWindowHandle, App, AppContext as _, Context, ElementId, Entity, FileDropEvent,
+    InputEvent as _, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    TestAppContext, Window, WindowOptions, point, px,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -502,6 +502,20 @@ impl<'a> Ui<'a> {
         });
     }
 
+    /// The same with `button`. The system counts the clicks of each button
+    /// by themselves.
+    pub fn nth_click_point_with(
+        &mut self,
+        button: MouseButton,
+        position: Point<Pixels>,
+        nth: usize,
+    ) {
+        self.step(
+            format!("click {nth} with {button:?} at {position:?}"),
+            |window, cx| click_point_as(window, position, button, nth, cx),
+        );
+    }
+
     pub fn right_click(&mut self, id: impl Into<ElementId>) {
         let id = id.into();
         self.step(format!("right-click {id:?}"), |window, cx| {
@@ -571,6 +585,28 @@ impl<'a> Ui<'a> {
                 .to_platform_input(),
                 cx,
             );
+            window.render_frame(cx);
+        });
+    }
+
+    /// Drop the files at `paths` on `to`, dragged in from another app.
+    pub fn drop_from_another_app(&mut self, paths: &[PathBuf], to: impl Into<ElementId>) {
+        let to = to.into();
+        let position = self.snapshot(to.clone()).bounds().center();
+        let paths = gpui_kit::ExternalPaths(paths.iter().cloned().collect());
+        self.step(format!("drop files on {to:?}"), |window, cx| {
+            // What the system reports as the files come over the window,
+            // move across it, and are let go, and when its drag has ended.
+            let reports = [
+                FileDropEvent::Entered { position, paths },
+                FileDropEvent::Pending { position },
+                FileDropEvent::Submit { position },
+                FileDropEvent::Exited,
+            ];
+            for report in reports {
+                window.render_frame(cx);
+                window.dispatch_event(report.to_platform_input(), cx);
+            }
             window.render_frame(cx);
         });
     }

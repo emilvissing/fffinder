@@ -860,6 +860,197 @@ fn closing_a_tab_moves_the_tab_bar_only_when_it_was_the_one_showing(cx: &mut Tes
     assert!(tab_in_view(&mut ui, 0));
 }
 
+/// The browser of the tab that shows.
+fn shown_tab(ui: &Ui) -> gpui_kit::Entity<fffinder::finder::Finder> {
+    ui.workspace
+        .clone()
+        .expect("opened with tabs")
+        .read_with(ui.cx, |w, _| w.active().clone())
+}
+
+/// Take the tab that shows to `dir`.
+fn show_folder(ui: &mut Ui, dir: std::path::PathBuf) {
+    let tab = shown_tab(ui);
+    let folder = fffinder::model::Location::Folder(dir);
+    ui.window(|window, cx| tab.update(cx, |f, cx| f.navigate(folder, window, cx)));
+    ui.settle();
+}
+
+#[gpui_kit::test]
+fn a_middle_click_closes_a_tab(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tabs-middle-click");
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.press(&cmd("t"));
+    ui.press(&cmd("t"));
+    let third = shown_tab(&ui);
+    assert_eq!((tabs(&ui).0, showing(&ui)), (3, 2));
+
+    // A tab that isn't showing goes, and the window stays on the one that is.
+    ui.click_with(MouseButton::Middle, ("tab", 0usize));
+    assert_eq!((tabs(&ui).0, showing(&ui)), (2, 1));
+    assert_eq!(shown_tab(&ui).entity_id(), third.entity_id());
+
+    // The tab that shows goes the same way, and one tab alone has no bar.
+    ui.click_with(MouseButton::Middle, ("tab", 1usize));
+    assert_eq!((tabs(&ui).0, showing(&ui)), (1, 0));
+    assert!(!ui.exists("tab-bar"));
+    let last = shown_tab(&ui);
+    assert!(
+        ui.window(|window, cx| last.read(cx).files_focused(window)),
+        "its files have the keyboard"
+    );
+}
+
+/// A folder whose first items are folders, so that one is where the tabs
+/// were when the tab bar goes, and where the first tab comes when there is
+/// a tab bar.
+fn folders_first(name: &str) -> Fixture {
+    let fx = Fixture::new(name);
+    for folder in ["0a", "0b", "0c", "0d", "0e", "0f"] {
+        std::fs::create_dir(fx.path(folder)).unwrap();
+    }
+    fx
+}
+
+#[gpui_kit::test]
+fn quick_middle_clicks_at_one_spot_close_tabs_and_open_no_folder(cx: &mut TestAppContext) {
+    let fx = folders_first("tabs-middle-quick");
+    let mut ui = with_tabs(cx, &fx.dir);
+    for (view, kind) in [("view-icons", "tile"), ("view-columns", "crow")] {
+        // Three tabs at one folder in this view, the first one showing.
+        ui.click(view);
+        for _ in 0..2 {
+            ui.press(&cmd("t"));
+            ui.click(view);
+        }
+        ui.click(("tab", 0usize));
+        let spot = ui.snapshot(("tab", 0usize)).bounds().center();
+
+        // Each press closes the tab that the one before it brought under
+        // the pointer.
+        ui.nth_click_point_with(MouseButton::Middle, spot, 1);
+        assert_eq!((tabs(&ui).0, showing(&ui)), (2, 0), "{view}");
+        ui.nth_click_point_with(MouseButton::Middle, spot, 2);
+        assert_eq!(tabs(&ui).0, 1, "{view}");
+
+        // The tab bar went with the second tab. A folder is at that spot
+        // now, and the next press in the row doesn't open it.
+        let under = item_at(&mut ui, kind, spot).expect("an item is where the tab was");
+        assert!(fx.path(&under).is_dir(), "{view}: {under}");
+        ui.nth_click_point_with(MouseButton::Middle, spot, 3);
+        assert_eq!(tabs(&ui).0, 1, "{view}: {under} is under it");
+
+        // A press of its own opens the folder in a tab.
+        ui.nth_click_point_with(MouseButton::Middle, spot, 1);
+        assert_eq!(tabs(&ui), (2, Some(fx.path(&under))), "{view}");
+        ui.press(&cmd("w"));
+        assert_eq!(tabs(&ui).0, 1);
+    }
+}
+
+#[gpui_kit::test]
+fn a_double_middle_click_on_a_folder_opens_one_tab_and_closes_none(cx: &mut TestAppContext) {
+    let fx = folders_first("tabs-middle-folder");
+    let inner = fx.path("0a/inner");
+    std::fs::create_dir_all(inner.join("innermost")).unwrap();
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.click("view-columns");
+    // A tab closed with the middle button earlier has nothing to say here.
+    ui.press(&cmd("t"));
+    ui.click_with(MouseButton::Middle, ("tab", 1usize));
+    assert_eq!(tabs(&ui).0, 1);
+    // The top of the first row, where the first tab is once there are two.
+    let row = ui.snapshot(item_id("crow", &fx.path("0a"))).bounds();
+    let spot = point(row.center().x, row.top() + px(6.));
+
+    ui.nth_click_point_with(MouseButton::Middle, spot, 1);
+    assert_eq!((tabs(&ui), showing(&ui)), ((2, Some(fx.path("0a"))), 1));
+    let tab = ui.snapshot(("tab", 0usize)).bounds();
+    assert!(tab.contains(&spot), "the first tab is there now: {tab:?}");
+
+    // The second press of a double press lands on that tab, the one the
+    // folder was middle-clicked in. It stays.
+    ui.nth_click_point_with(MouseButton::Middle, spot, 2);
+    assert_eq!((tabs(&ui), showing(&ui)), ((2, Some(fx.path("0a"))), 1));
+
+    // With a tab bar there already nothing moves, and the second press
+    // lands on the folder inside, where the one that opened was. It opens
+    // no tab of its own.
+    ui.click("view-icons");
+    let spot = ui.snapshot(item_id("tile", &inner)).bounds().center();
+    ui.nth_click_point_with(MouseButton::Middle, spot, 1);
+    assert_eq!(tabs(&ui), (3, Some(inner.clone())));
+    let innermost = ui.snapshot(item_id("tile", &inner.join("innermost")));
+    assert!(
+        innermost.bounds().contains(&spot),
+        "the folder inside is at that spot now"
+    );
+    ui.nth_click_point_with(MouseButton::Middle, spot, 2);
+    assert_eq!(tabs(&ui), (3, Some(inner)));
+}
+
+#[gpui_kit::test]
+fn close_other_tabs_keeps_the_one_clicked(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tabs-close-others");
+    let mut ui = with_tabs(cx, &fx.dir);
+    // Three tabs, each at a folder of its own, the third one showing.
+    ui.press(&cmd("t"));
+    show_folder(&mut ui, fx.path("Projects"));
+    let second = shown_tab(&ui);
+    ui.press(&cmd("t"));
+    show_folder(&mut ui, fx.path("Projects/atlas"));
+    let third = shown_tab(&ui).downgrade();
+    assert_eq!((tabs(&ui).0, showing(&ui)), (3, 2));
+
+    ui.right_click(("tab", 1usize));
+    ui.click_menu_item("Close Other Tabs");
+
+    assert_eq!(tabs(&ui), (1, Some(fx.path("Projects"))));
+    assert_eq!(shown_tab(&ui).entity_id(), second.entity_id());
+    assert!(!ui.exists("tab-bar"));
+    assert!(
+        ui.window(|window, cx| second.read(cx).files_focused(window)),
+        "its files have the keyboard"
+    );
+    assert!(
+        third.upgrade().is_none(),
+        "a closed tab's browser goes, and what it had running with it"
+    );
+
+    // The tab that shows can be the one kept, and goes on showing.
+    ui.press(&cmd("t"));
+    ui.press(&cmd("t"));
+    ui.click(("tab", 1usize));
+    let middle = shown_tab(&ui);
+    ui.right_click(("tab", 1usize));
+    ui.click_menu_item("Close Other Tabs");
+    assert_eq!((tabs(&ui).0, showing(&ui)), (1, 0));
+    assert_eq!(shown_tab(&ui).entity_id(), middle.entity_id());
+    assert!(
+        ui.window(|window, cx| middle.read(cx).files_focused(window)),
+        "its files have the keyboard"
+    );
+}
+
+#[gpui_kit::test]
+fn a_dragged_tab_shows_its_name(cx: &mut TestAppContext) {
+    let fx = Fixture::new("tabs-drag-name");
+    let mut ui = with_tabs(cx, &fx.dir);
+    ui.press(&cmd("t"));
+    show_folder(&mut ui, fx.path("Projects"));
+    let first = ui.snapshot(("tab", 0usize)).bounds().center();
+    let second = ui.snapshot(("tab", 1usize)).bounds().center();
+
+    ui.drag_and_hold(second, first);
+    assert_eq!(ui.snapshot("drag-label").label(), Some("Projects"));
+
+    // The first tab takes dropped items too. A tab let go over it still
+    // goes there, and its name is gone with the drag.
+    ui.release(first);
+    assert!(!ui.exists("drag-label"));
+    assert_eq!(showing(&ui), 0);
+}
+
 #[gpui_kit::test]
 fn the_new_tab_button_stays_in_its_pane_in_split_view(cx: &mut TestAppContext) {
     let fx = Fixture::new("tabs-split");
@@ -963,7 +1154,7 @@ fn a_tab_bar_that_comes_back_scrolls_to_the_tab_that_shows(cx: &mut TestAppConte
 fn a_tabs_menu_closes_when_the_window_changes_size(cx: &mut TestAppContext) {
     let fx = Fixture::new("tabs-menu-resized");
     let mut ui = more_tabs_than_fit(cx, &fx.dir);
-    let menu = ["Close Tab", "Move Tab to New Window"];
+    let menu = ["Close Tab", "Close Other Tabs", "Move Tab to New Window"];
     ui.right_click(("tab", 7usize));
     assert_eq!(ui.menu_labels(), menu);
 

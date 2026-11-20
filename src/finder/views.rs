@@ -429,6 +429,25 @@ impl Finder {
         self.presses.on_item(&entry.path, click_count)
     }
 
+    /// The middle button was pressed on the folder at `folder`, as the
+    /// system's `click_count`th press in a row at that spot: the folder opens
+    /// in a tab of its own. The rest of a double press opens nothing (see
+    /// [`Presses::is_stray`]). Its first press has done what was wanted, and
+    /// may have brought this folder under the pointer: it closed a tab, and
+    /// the tab bar with it, or it opened the folder it was on in the tab that
+    /// shows now.
+    fn middle_press_on_folder(
+        &mut self,
+        folder: Location,
+        click_count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.presses.is_stray(click_count) {
+            self.open_in_new_tabs(vec![folder], window, cx);
+        }
+    }
+
     /// Shared mouse handling for an item in the icon, list, or gallery views.
     /// `wrapper` hosts the context menu so the item itself stays observable
     /// in UI tests.
@@ -446,8 +465,8 @@ impl Finder {
             let el = super::transfer::spring_loaded(el, row.entry.path.clone(), cx);
             super::transfer::folder_drop_target(el, row.entry.path.clone(), cx).on_mouse_down(
                 MouseButton::Middle,
-                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                    this.open_in_new_tabs(vec![folder.clone()], window, cx)
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.middle_press_on_folder(folder.clone(), event.click_count, window, cx)
                 }),
             )
         } else {
@@ -1315,8 +1334,8 @@ impl Finder {
                 let row = super::transfer::spring_loaded(row, entry.path.clone(), cx);
                 super::transfer::folder_drop_target(row, entry.path.clone(), cx).on_mouse_down(
                     MouseButton::Middle,
-                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                        this.open_in_new_tabs(vec![folder.clone()], window, cx)
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.middle_press_on_folder(folder.clone(), event.click_count, window, cx)
                     }),
                 )
             })

@@ -544,6 +544,96 @@ fn dragging_onto_a_folder_moves_or_copies(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn dropping_on_a_tab_moves_or_copies_into_its_folder(cx: &mut TestAppContext) {
+    use fffinder::model::Location;
+    let fx = Fixture::new("drag-tab");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            workspace: true,
+            ..Default::default()
+        },
+    );
+    let workspace = ui.workspace.clone().expect("opened with tabs");
+    // A second tab at Projects, and the first one showing again.
+    ui.press(&cmd("t"));
+    let second = workspace.read_with(ui.cx, |w, _| w.active().clone());
+    let projects = fx.path("Projects");
+    ui.window(|window, cx| {
+        second.update(cx, |f, cx| {
+            f.navigate(Location::Folder(projects), window, cx)
+        })
+    });
+    ui.settle();
+    ui.click(("tab", 0usize));
+    ui.click("view-list");
+    let tab = ("tab", 1usize);
+
+    ui.drag(
+        item_id("name-cell", &fx.path("notes.txt")),
+        tab,
+        Modifiers::none(),
+    );
+    assert!(fx.path("Projects/notes.txt").exists());
+    assert!(
+        !fx.path("notes.txt").exists(),
+        "a drag within a volume moves"
+    );
+    let in_second = |ui: &Ui| -> Vec<String> {
+        second.read_with(ui.cx, |f, _| {
+            f.rows_for_test()
+                .iter()
+                .map(|r| r.entry.name.clone())
+                .collect()
+        })
+    };
+    assert!(
+        in_second(&ui).contains(&"notes.txt".to_string()),
+        "the tab it went to reloads: {:?}",
+        in_second(&ui)
+    );
+    assert_eq!(
+        workspace.read_with(ui.cx, |w, _| (w.tabs().len(), w.active_index())),
+        (2, 0),
+        "a drop shows no other tab"
+    );
+
+    // Option copies on macOS, Ctrl elsewhere.
+    let copy = Modifiers {
+        alt: cfg!(target_os = "macos"),
+        control: !cfg!(target_os = "macos"),
+        ..Modifiers::none()
+    };
+    ui.drag(item_id("name-cell", &fx.path("Budget.csv")), tab, copy);
+    assert!(fx.path("Projects/Budget.csv").exists());
+    assert!(fx.path("Budget.csv").exists(), "the copy key copies");
+
+    // Files from another app are copied in. The tab that shows takes none:
+    // its folder is the one in the window.
+    let elsewhere = Fixture::new("drag-tab-elsewhere");
+    let scan = elsewhere.path("Scan.pdf");
+    std::fs::write(&scan, "a scan").unwrap();
+    ui.drop_from_another_app(std::slice::from_ref(&scan), tab);
+    assert!(fx.path("Projects/Scan.pdf").exists());
+    assert!(scan.exists(), "files from another app are copied");
+    assert!(in_second(&ui).contains(&"Scan.pdf".to_string()));
+    ui.drop_from_another_app(std::slice::from_ref(&scan), ("tab", 0usize));
+    assert!(!fx.path("Scan.pdf").exists());
+
+    // A tab that shows search results is no folder, and takes nothing.
+    ui.window(|_, cx| second.update(cx, |f, cx| f.set_query("atlas".into(), true, cx)));
+    ui.settle();
+    ui.drag(
+        item_id("name-cell", &fx.path("Roadmap.md")),
+        tab,
+        Modifiers::none(),
+    );
+    assert!(fx.path("Roadmap.md").exists());
+    assert!(!fx.path("Projects/Roadmap.md").exists());
+}
+
+#[gpui_kit::test]
 fn undo_reverses_file_operations(cx: &mut TestAppContext) {
     let fx = Fixture::new("undo");
     let mut ui = Ui::open(cx, &fx.dir);

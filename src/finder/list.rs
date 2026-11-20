@@ -14,6 +14,7 @@ use fffinder_core::config::{
     SIDEBAR_WIDTH_RANGE, default_list_columns,
 };
 use fffinder_core::{ColumnSetting, FileEntry, ListColumn, SortKey, ViewMode, listing};
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::*;
@@ -50,12 +51,16 @@ pub(super) struct ResizeDrag(pub ResizeEdge);
 #[derive(Clone)]
 pub(super) struct ColumnMove(pub usize);
 
-/// What a dragged column header or sidebar row looks like: its name.
+/// What a dragged column header, sidebar row, or tab looks like: its name.
 pub(super) struct DragLabel(pub SharedString);
 
 impl Render for DragLabel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        super::views::drag_frame(cx).child(self.0.clone())
+        super::views::drag_frame(cx)
+            .id("drag-label")
+            .aria_label(self.0.clone())
+            .child(self.0.clone())
+            .test_support()
     }
 }
 
