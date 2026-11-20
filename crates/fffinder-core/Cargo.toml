@@ -27,6 +27,10 @@ flate2 = "1"
 fs4 = "1"
 # PDF pages for previews, drawn in pure Rust on every system.
 hayro = "0.8"
+# One spelling for a letter with an accent, which a name can store as one
+# character or as the letter and then the accent. The app's UI kit builds it
+# already, with these features.
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
 
 [target.'cfg(unix)'.dependencies]
 # Renames that refuse a taken name (`renamex_np`, `renameat2`), so a copy or

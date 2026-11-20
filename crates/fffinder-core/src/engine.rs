@@ -15,8 +15,14 @@ use fff_search::{
     PaginationArgs, ParserConfig, QueryParser, QueryTracker, Score, SearchResult, SharedFilePicker,
     SharedFrecency, SharedQueryTracker, WatchEvent, WatchEventKind, WatchId, WatchOptions,
 };
+use icu_normalizer::properties::{
+    CanonicalCombiningClassMapBorrowed, CanonicalCompositionBorrowed,
+    CanonicalDecompositionBorrowed, Decomposed,
+};
+use icu_normalizer::{ComposingNormalizerBorrowed, DecomposingNormalizerBorrowed};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -386,8 +392,9 @@ struct ChangeLog {
 
 /// A file an index took in, let go of, or both, when it was renamed.
 struct FileChange {
-    /// Where it is now, and its path inside the index's folder in lowercase,
-    /// which is where a search's words are looked for.
+    /// Where it is now, and its path inside the index's folder in lowercase
+    /// and spelled one way ([`as_compared`]), which is where a search's words
+    /// are looked for.
     now: Option<(PathBuf, String)>,
     /// Where it was.
     was: Option<PathBuf>,
@@ -437,7 +444,7 @@ impl Changes {
                     // searches, so those of the index's own path are left
                     // out.
                     let inside = path.strip_prefix(base).unwrap_or(path);
-                    (path.clone(), inside.to_string_lossy().to_lowercase())
+                    (path.clone(), as_compared(&inside.to_string_lossy()))
                 }),
                 was: was.cloned(),
             };
@@ -785,9 +792,11 @@ impl Engine {
             .as_deref()
             .filter(|scope| log.bases.iter().any(|base| scope.starts_with(base)));
         let may_list = |path: &Path, lower: &str| {
+            let bare = plain(lower);
+            let has = |word: &String| is_subsequence(word, looked_in(word, lower, bare.as_deref()));
             scope.is_none_or(|scope| path.starts_with(scope) && path != scope)
                 && (req.kind == KindFilter::Folder || req.kind.accepts(path))
-                && words.iter().all(|word| is_subsequence(word, lower))
+                && words.iter().all(has)
         };
         let mut matter = Vec::new();
         for (_, change) in log
@@ -937,24 +946,53 @@ impl Engine {
         // them a folder token that is the whole search is a word too.
         let folders =
             req.kind == KindFilter::Folder || (req.kind == KindFilter::Any && !req.files_only);
-        let typed = fold_glob_case(&query, case);
-        // Words reach fff-search in lowercase, so a capital in one doesn't
-        // narrow the search.
+        // What fff-search is given of the search in one spelling.
+        let given = |spelling: &str| {
+            let typed = fold_glob_case(spelling, case);
+            // Words reach fff-search in lowercase, so a capital in one
+            // doesn't narrow the search.
+            let lowered = fold_word_case(&typed, folders && !folder_tokens_filter(&typed));
+            // A capital is a preference instead, and only fff-search can
+            // rank by it: given `TEC` as typed, it scores
+            // `TaxExemptionController.java` for its three capitals, and
+            // given `tec` it sees a t, an e and a c like any other. So a
+            // search with such a word is made as typed as well, and each
+            // result keeps the higher of its two scores.
+            let as_typed = words_as_typed(&lowered, &typed);
+            let as_typed = (as_typed != lowered).then_some(as_typed);
+            (lowered, as_typed)
+        };
+        let spelled = spellings(&query);
+        let (lowered, as_typed) = given(&spelled[0]);
         let req = &SearchRequest {
-            query: fold_word_case(&typed, folders && !folder_tokens_filter(&typed)),
+            query: lowered,
             ..req.clone()
         };
-        // A capital is a preference instead, and only fff-search can rank by
-        // it: given `TEC` as typed, it scores `TaxExemptionController.java`
-        // for its three capitals, and given `tec` it sees a t, an e and a c
-        // like any other. So a search with such a word is made as typed as
-        // well, and each result keeps the higher of its two scores.
-        let as_typed = words_as_typed(&req.query, &typed);
-        let as_typed = (as_typed != req.query).then(|| SearchRequest {
-            query: as_typed,
+        let as_typed = as_typed.map(|query| SearchRequest {
+            query,
             ..req.clone()
         });
         let as_typed = as_typed.as_ref();
+        // fff-search compares a search with the names byte for byte, and a
+        // letter with an accent is one character in some names and two in
+        // others. So a search that has such a letter is made in each of its
+        // spellings too, and the results are merged in the same way. A
+        // search for one letter isn't: `search_root` looks through the names
+        // for it, in any spelling.
+        let respelled: Vec<SearchRequest> = spelled[1..]
+            .iter()
+            .filter(|spelling| !one_letter(spelling))
+            .flat_map(|spelling| {
+                let (lowered, as_typed) = given(spelling);
+                [Some(lowered), as_typed]
+            })
+            .flatten()
+            .map(|query| SearchRequest {
+                query,
+                ..req.clone()
+            })
+            .collect();
+        let respelled = &respelled;
         let wide = !exact.is_empty();
         // A sort that chooses a cut list's items chooses among every match,
         // so it is given as many as the phrases are checked in.
@@ -966,8 +1004,8 @@ impl Engine {
                 .map(|root| {
                     s.spawn(move || {
                         let mut part = self.search_root(root, req, limit, many);
-                        if let Some(as_typed) = as_typed {
-                            let ranked = self.search_root(root, as_typed, limit, many);
+                        for other in as_typed.into_iter().chain(respelled) {
+                            let ranked = self.search_root(root, other, limit, many);
                             keep_higher(&mut part.hits, ranked.hits);
                         }
                         part
@@ -989,7 +1027,7 @@ impl Engine {
         }
         let words: Vec<String> = fuzzy_text(&req.query)
             .split_whitespace()
-            .map(str::to_lowercase)
+            .map(as_compared)
             .collect();
         let checked = checked_words(&words);
         if wants_apps(req, &words) {
@@ -1020,16 +1058,15 @@ impl Engine {
         // among them are. fff-search lets a word go without two of its
         // letters or more and have the rest anywhere along the path, so to
         // it `debug-test.log` matches `bduget` as well as `budget.txt` does.
-        let strict = |hit: &RawHit| checked.iter().all(|w| is_subsequence(w, &hit.rel));
+        let strict = |hit: &RawHit| checked.iter().all(|w| is_subsequence(w, hit.looked_in(w)));
         if !words.is_empty() {
             if !settings.typos || raw.iter().any(&strict) {
                 raw.retain(strict);
             } else {
                 raw.retain(|hit| {
                     checked.iter().all(|w| {
-                        is_subsequence(w, &hit.rel)
-                            || near_miss(w, &hit.rel, typo_budget(w))
-                            || may_be_spelled_apart(w, &hit.rel)
+                        let text = hit.looked_in(w);
+                        is_subsequence(w, text) || near_miss(w, text, typo_budget(w))
                     })
                 });
             }
@@ -1102,8 +1139,7 @@ impl Engine {
         let scope_filter = scope_glob.as_deref().map(Constraint::Glob);
 
         let user = req.query.trim();
-        let single_char =
-            fuzzy_text(user).chars().count() == 1 && !user.contains(char::is_whitespace);
+        let single_char = one_letter(user);
         let mut query = if single_char {
             String::new()
         } else {
@@ -1149,14 +1185,23 @@ impl Engine {
             };
             scoped && !inside_package(path, scope.as_deref())
         };
+        let letter = as_compared(&fuzzy_text(user));
         let name_ok = |name: &str| {
-            !single_char
-                || name
-                    .to_lowercase()
-                    .contains(&fuzzy_text(user).to_lowercase())
+            if !single_char {
+                return true;
+            }
+            let lower = name.to_lowercase();
+            // Most names that have the letter have it as it was typed.
+            if lower.contains(&letter) {
+                return true;
+            }
+            let name = composed(&lower);
+            let bare = plain(&name);
+            looked_in(&letter, &name, bare.as_deref()).contains(&letter)
         };
 
         let folder_filters = folder_tokens_filter(user);
+        let scale;
         if req.kind == KindFilter::Folder {
             let config = WithFolders {
                 only: true,
@@ -1164,6 +1209,7 @@ impl Engine {
             };
             let mut parsed = QueryParser::new(config).parse(&query);
             part.loose = loose_text(&parsed.fuzzy_query, user);
+            scale = score_scale(&parsed.fuzzy_query);
             parsed.constraints.extend(scope_filter);
             let result = picker.fuzzy_search_directories(&parsed, options);
             part.total_matched = result.total_matched;
@@ -1186,6 +1232,7 @@ impl Engine {
             };
             let mut parsed = QueryParser::new(config).parse(&query);
             part.loose = loose_text(&parsed.fuzzy_query, user);
+            scale = score_scale(&parsed.fuzzy_query);
             parsed.constraints.extend(scope_filter);
             let folders = picker.fuzzy_search_directories(&parsed, options);
             // As in fff-search's own search of both, one that ends in a
@@ -1237,6 +1284,7 @@ impl Engine {
         } else {
             let mut parsed = QueryParser::default().parse(&query);
             part.loose = loose_text(&parsed.fuzzy_query, user);
+            scale = score_scale(&parsed.fuzzy_query);
             parsed.constraints.extend(scope_filter);
             let result = picker.fuzzy_search(&parsed, qt, options);
             part.total_matched = result.total_matched;
@@ -1255,15 +1303,17 @@ impl Engine {
             }
         }
         // Each hit's path from the searched folder down, which is where
-        // `search` looks for the words.
+        // `search` looks for the words, and its score as the search scores
+        // in the one spelling ([`score_scale`]), so that `search` can set it
+        // beside the scores of the same search spelled another way.
         let searched = scope.as_deref().unwrap_or(&base);
         for hit in &mut part.hits {
-            hit.rel = hit
-                .path
-                .strip_prefix(searched)
-                .unwrap_or(&hit.path)
-                .to_string_lossy()
-                .to_lowercase();
+            let inside = hit.path.strip_prefix(searched).unwrap_or(&hit.path);
+            hit.rel = as_compared(&inside.to_string_lossy());
+            hit.bare = plain(&hit.rel);
+            if let Some((whole, spelled)) = scale {
+                hit.score = (i64::from(hit.score) * whole / spelled) as i32;
+            }
         }
         part
     }
@@ -1675,7 +1725,7 @@ impl Engine {
             let words: Vec<String> = query
                 .unwrap_or_default()
                 .split_whitespace()
-                .map(str::to_lowercase)
+                .map(as_compared)
                 .collect();
             let roots = self.roots();
             let list = self.app_list();
@@ -1886,11 +1936,17 @@ impl Engine {
         // fff-search looks a search up under the text it is given, so a
         // search is remembered under the lowercase text `search` gives it,
         // in the form that takes when folders can be in the results, as they
-        // can in the window.
-        let query = query.map(|q| {
+        // can in the window. That is a text for each spelling the search is
+        // made in, and the file is found by the one that spells it as its
+        // name does.
+        let case = self.search_settings().case;
+        let queries: Vec<String> = query.map_or_else(Vec::new, |q| {
             let (query, _) = split_quoted(q);
-            let typed = fold_glob_case(&query, self.search_settings().case);
-            fold_word_case(&typed, !folder_tokens_filter(&typed))
+            let lowered = |spelling: &String| {
+                let typed = fold_glob_case(spelling, case);
+                fold_word_case(&typed, !folder_tokens_filter(&typed))
+            };
+            spellings(&query).iter().map(lowered).collect()
         });
         let roots = self.read_indexes().roots.clone();
         for root in roots.iter().filter(|r| path.starts_with(&r.path)) {
@@ -1899,11 +1955,12 @@ impl Engine {
             {
                 let _ = picker.update_single_file_frecency(path, tracker);
             }
-            if let Some(query) = query.as_deref().filter(|q| !q.is_empty())
-                && let Ok(mut qt) = self.queries.write()
+            if let Ok(mut qt) = self.queries.write()
                 && let Some(qt) = qt.as_mut()
             {
-                let _ = qt.track_query_completion(query, &root.path, path);
+                for query in queries.iter().filter(|q| !q.is_empty()) {
+                    let _ = qt.track_query_completion(query, &root.path, path);
+                }
             }
         }
     }
@@ -1935,11 +1992,14 @@ struct RootPart {
 struct RawHit {
     path: PathBuf,
     /// Its path inside the folder that was searched, or an app's name alone,
-    /// in lowercase, which is where a search's words are looked for. Nothing
-    /// above the search location is in it, because fff-search matches nothing
-    /// there: letters found in `/Users/alice` would pass a near miss off as a
-    /// match. Empty when no search made the hit.
+    /// in lowercase and spelled one way ([`as_compared`]), which is where a
+    /// search's words are looked for. Nothing above the search location is in
+    /// it, because fff-search matches nothing there: letters found in
+    /// `/Users/alice` would pass a near miss off as a match. Empty when no
+    /// search made the hit.
     rel: String,
+    /// `rel` without its accents, when it has any ([`plain`]).
+    bare: Option<String>,
     is_dir: bool,
     size: u64,
     modified: u64,
@@ -1958,6 +2018,7 @@ impl RawHit {
         RawHit {
             path,
             rel: String::new(),
+            bare: None,
             is_dir: false,
             size,
             modified,
@@ -1970,11 +2031,31 @@ impl RawHit {
         RawHit {
             path,
             rel: String::new(),
+            bare: None,
             is_dir: true,
             size: 0,
             modified: 0,
             git_status: None,
             score,
+        }
+    }
+
+    /// Where `word`, a word of the search, is looked for in the hit's path
+    /// (see [`looked_in`]).
+    fn looked_in(&self, word: &str) -> &str {
+        looked_in(word, &self.rel, self.bare.as_deref())
+    }
+
+    /// The hit's name as a search compares it ([`as_compared`]). `rel` ends
+    /// with it, spelled that way already, which saves spelling the name of
+    /// every hit a search ranks a second time.
+    fn name(&self) -> Cow<'_, str> {
+        match Path::new(&self.rel)
+            .file_name()
+            .and_then(|name| name.to_str())
+        {
+            Some(name) => Cow::Borrowed(name),
+            None => Cow::Owned(as_compared(&display_name(&self.path))),
         }
     }
 
@@ -2370,8 +2451,10 @@ fn app_hits(entries: &[PathBuf], words: &[String]) -> Vec<RawHit> {
     entries
         .iter()
         .filter_map(|path| {
-            let name = display_name(path).to_lowercase();
-            if !words.iter().all(|w| is_subsequence(w, &name)) {
+            let name = as_compared(&display_name(path));
+            let bare = plain(&name);
+            let has = |w: &String| is_subsequence(w, looked_in(w, &name, bare.as_deref()));
+            if !words.iter().all(has) {
                 return None;
             }
             let matched: i32 = if one_letter {
@@ -2389,6 +2472,7 @@ fn app_hits(entries: &[PathBuf], words: &[String]) -> Vec<RawHit> {
             // Only an app's name is searched, whatever folder it is in.
             Some(RawHit {
                 rel: name,
+                bare,
                 ..RawHit::dir(path.clone(), matched + depth * DEPTH_PENALTY)
             })
         })
@@ -2409,9 +2493,11 @@ const CASE_FIT: i32 = 5;
 /// * `name` - An app's name
 /// * `as_typed` - The search made as typed, which has only fuzzy words
 fn case_fit(name: &str, as_typed: &str) -> i32 {
+    let name = composed(name);
     as_typed
         .split_whitespace()
-        .filter(|word| word.chars().nth(1).is_some() && is_subsequence(word, name))
+        .map(composed)
+        .filter(|word| word.chars().nth(1).is_some() && is_subsequence(word, &name))
         .map(|word| word.chars().count() as i32 * CASE_FIT)
         .sum()
 }
@@ -2454,19 +2540,23 @@ fn loose_text(fuzzy: &FuzzyQuery, user: &str) -> bool {
     }
 }
 
-/// Whether `path`'s name holds each of `words` (lowercase) in order.
+/// Whether `path`'s name holds each of `words` ([`as_compared`]) in order.
 fn name_holds(path: &Path, words: &[String]) -> bool {
-    let name = display_name(path).to_lowercase();
-    words.iter().all(|w| is_subsequence(w, &name))
+    let name = as_compared(&display_name(path));
+    let bare = plain(&name);
+    words
+        .iter()
+        .all(|w| is_subsequence(w, looked_in(w, &name, bare.as_deref())))
 }
 
-/// Whether `path`'s name has each of `words` (lowercase) in it, letters in a
-/// row, which is what [`rerank`] ranks first. Without words, every name does.
+/// Whether `path`'s name has each of `words` ([`as_compared`]) in it, letters
+/// in a row, which is what [`rerank`] ranks first. Without words, every name
+/// does.
 fn name_has(path: &Path, words: &[String]) -> bool {
     if words.is_empty() {
         return true;
     }
-    let name = display_name(path).to_lowercase();
+    let name = as_compared(&display_name(path));
     words.iter().all(|word| name.contains(word.as_str()))
 }
 
@@ -2553,20 +2643,179 @@ fn near_miss(word: &str, text: &str, typos: usize) -> bool {
     prev[len] <= typos
 }
 
-/// Whether `text` may have `word` in it in a spelling that [`near_miss`]
-/// takes for typos. A letter beyond ASCII can be one character or two: `é`,
-/// or `e` and its accent. macOS stores the two in a name, and a keyboard
-/// types the one. Counted letter by letter, `señor.txt` is then two typos
-/// from `señor`, and a search for a file by its own name would find nothing.
-/// Nothing here can tell the two spellings apart, so where the word and the
-/// text both have a letter beyond ASCII, fff-search's match stands.
+/// `text` with each letter spelled the one way. A letter with an accent has
+/// two spellings that look the same: one character (`é`), which is what a
+/// keyboard types, or the letter and then its accent (`e`, U+0301), which is
+/// how macOS stores it in the names Finder and most apps make. Compared as
+/// they come, the two never match. Here each is the one character wherever
+/// there is one, and so is a Korean syllable that is stored as its parts.
+fn composed(text: &str) -> Cow<'_, str> {
+    // Text in ASCII has one spelling, and most names and words are that.
+    if text.is_ascii() {
+        return Cow::Borrowed(text);
+    }
+    ComposingNormalizerBorrowed::new_nfc().normalize(text)
+}
+
+/// `text` in lowercase and spelled one way ([`composed`]), which is how a
+/// search's words and the names they are looked for in are compared.
+fn as_compared(text: &str) -> String {
+    let lower = text.to_lowercase();
+    let respelled = match composed(&lower) {
+        Cow::Owned(composed) => Some(composed),
+        Cow::Borrowed(_) => None,
+    };
+    respelled.unwrap_or(lower)
+}
+
+/// `c` without its accents: `é`, `ü` and `ñ` are `e`, `u` and `n`.
+///
+/// # Returns
+///
+/// The letter, or `None` when `c` is an accent by itself
+fn unaccented(mut c: char) -> Option<char> {
+    if c.is_ascii() {
+        return Some(c);
+    }
+    let parts = CanonicalDecompositionBorrowed::new();
+    let class = CanonicalCombiningClassMapBorrowed::new();
+    // An accent is a character that goes on the one before it.
+    let accent = |c: char| class.get_u8(c) != 0;
+    // A letter comes apart into a letter and the last of its accents, so
+    // one with two (`ệ`) takes two turns. A Korean syllable comes apart as
+    // well, into parts that are no accents, and stays whole.
+    while let Decomposed::Expansion(letter, last) = parts.decompose(c)
+        && accent(last)
+    {
+        c = letter;
+    }
+    (!accent(c)).then_some(c)
+}
+
+/// Whether `text` has an accent, on a letter or by itself. Text in ASCII
+/// has none, and most names and words are that.
+fn accented(text: &str) -> bool {
+    !text.is_ascii() && text.chars().any(|c| unaccented(c) != Some(c))
+}
+
+/// `text` without its accents, when it has any ([`unaccented`]). A word
+/// typed without accents is looked for in this (see [`looked_in`]).
 ///
 /// # Arguments
 ///
-/// * `word` - A word of the search, in lowercase
-/// * `text` - What it is looked for in, in lowercase
-fn may_be_spelled_apart(word: &str, text: &str) -> bool {
-    !word.is_ascii() && !text.is_ascii()
+/// * `text` - A name, a path or a word, spelled one way ([`as_compared`])
+///
+/// # Returns
+///
+/// `None` for text that has no accent, which is most
+fn plain(text: &str) -> Option<String> {
+    accented(text).then(|| text.chars().filter_map(unaccented).collect())
+}
+
+/// What a word of a search is looked for in: a text, or the same text
+/// without its accents. A word typed without accents finds a letter with or
+/// without one, as it does in Finder, so `resume` finds `Résumé.pdf`. A word
+/// that has an accent was typed for it, and is looked for as it is spelled.
+///
+/// # Arguments
+///
+/// * `word` - A word of the search, [`as_compared`]
+/// * `text` - A name or a path, [`as_compared`]
+/// * `bare` - What [`plain`] makes of `text`
+fn looked_in<'a>(word: &str, text: &'a str, bare: Option<&'a str>) -> &'a str {
+    match bare {
+        Some(bare) if !accented(word) => bare,
+        _ => text,
+    }
+}
+
+/// The spellings a search is made in, the one that was typed first. A
+/// letter with an accent can be one character, or the letter and then the
+/// accent ([`composed`] says why there are two). fff-search compares a
+/// search with the names byte for byte, so a name that stores `é` one way is
+/// found only by a search that spells it the same. A search can also be
+/// typed neither way, with some of its letters apart and others not.
+///
+/// What a search leaves out, as `!café` does, it leaves out however a name
+/// spells it, so each of the searches has such a token in every spelling.
+/// Were it only in the search's own, a name left out of one search would
+/// come back with another.
+///
+/// # Arguments
+///
+/// * `typed` - The search, its tokens a space apart
+///
+/// # Returns
+///
+/// One search for one with a single spelling, as any in ASCII has
+fn spellings(typed: &str) -> Vec<String> {
+    if typed.is_ascii() {
+        return vec![typed.to_string()];
+    }
+    let apart = DecomposingNormalizerBorrowed::new_nfd();
+    // As typed, with each such letter as one character, and with each apart.
+    let spelled = |token: &str, way: usize| match way {
+        0 => token.to_string(),
+        1 => composed(token).into_owned(),
+        _ => apart.normalize(token).into_owned(),
+    };
+    let mut searches: Vec<String> = Vec::new();
+    for way in 0..3 {
+        let mut tokens: Vec<String> = Vec::new();
+        for token in typed.split_whitespace() {
+            let ways = if token.starts_with('!') {
+                0..3
+            } else {
+                way..way + 1
+            };
+            let own = tokens.len();
+            for token in ways.map(|way| spelled(token, way)) {
+                if !tokens[own..].contains(&token) {
+                    tokens.push(token);
+                }
+            }
+        }
+        let search = tokens.join(" ");
+        if !searches.contains(&search) {
+            searches.push(search);
+        }
+    }
+    searches
+}
+
+/// What brings the scores of a search made in one spelling to those of the
+/// same search with each letter as one character ([`composed`]). fff-search
+/// scores a match by the characters of the search it has, about 14 points
+/// for each, and a letter spelled apart is two characters or three. Left at
+/// that, a name that stores its accents apart ranks ahead of the same name
+/// stored the other way for nothing but its spelling: by 28 points for
+/// `résumé`, and for a Korean word of four syllables by more than
+/// [`rerank`] gives a name that is the word over a name that has it.
+///
+/// # Arguments
+///
+/// * `fuzzy` - What fff-search matches loosely of the search, which is what
+///   it scores by
+///
+/// # Returns
+///
+/// How many characters it scores with each letter as one character, and how
+/// many as the search is spelled. A score times the first over the second is
+/// on the one scale. `None` when the two are the same, as for any search in
+/// ASCII
+fn score_scale(fuzzy: &FuzzyQuery) -> Option<(i64, i64)> {
+    let parts: &[&str] = match fuzzy {
+        FuzzyQuery::Empty => &[],
+        FuzzyQuery::Text(text) => std::slice::from_ref(text),
+        FuzzyQuery::Parts(parts) => parts,
+    };
+    let (mut whole, mut spelled) = (0, 0);
+    // fff-search matches by no part shorter than two bytes.
+    for part in parts.iter().filter(|part| part.len() >= 2) {
+        whole += composed(part).chars().count() as i64;
+        spelled += part.chars().count() as i64;
+    }
+    (whole != spelled).then_some((whole, spelled))
 }
 
 /// What [`rerank`] takes off for each folder in a hit's path.
@@ -2578,8 +2827,9 @@ fn rerank(hit: &RawHit, words: &[String]) -> i32 {
     if words.is_empty() {
         return hit.score;
     }
-    let name = display_name(&hit.path).to_lowercase();
-    let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);
+    let name = hit.name();
+    let name = name.as_ref();
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
     let mut bonus = 0;
     let mut in_name = 0;
     for word in words {
@@ -2603,7 +2853,7 @@ fn rerank(hit: &RawHit, words: &[String]) -> i32 {
         // One word that is the whole name has an exact match's bonus above.
         // Several words that are the whole name between them match it as
         // exactly.
-        if words.len() > 1 && (spells(stem, words) || spells(&name, words)) {
+        if words.len() > 1 && (spells(stem, words) || spells(name, words)) {
             bonus += WHOLE_NAME;
         }
     }
@@ -2812,9 +3062,16 @@ fn strict_words(req: &SearchRequest) -> Vec<String> {
     let query = fold_word_case(&query, folders && !folder_tokens_filter(&query));
     let words: Vec<String> = fuzzy_text(&query)
         .split_whitespace()
-        .map(str::to_lowercase)
+        .map(as_compared)
         .collect();
     checked_words(&words)
+}
+
+/// Whether a search is for one letter, however the letter is spelled
+/// ([`composed`]). fff-search ignores a word that short, so `search_root`
+/// looks through the names for it.
+fn one_letter(user: &str) -> bool {
+    composed(&fuzzy_text(user)).chars().count() == 1 && !user.contains(char::is_whitespace)
 }
 
 /// The fuzzy words of a query, without constraint tokens.
@@ -2986,8 +3243,8 @@ fn ignores_case(case: SearchCase, text: &str) -> bool {
 /// * `case` - The letter case setting
 fn contains_phrase(name: &str, phrase: &str, case: SearchCase) -> bool {
     match ignores_case(case, phrase) {
-        true => name.to_lowercase().contains(&phrase.to_lowercase()),
-        false => name.contains(phrase),
+        true => as_compared(name).contains(&as_compared(phrase)),
+        false => composed(name).contains(composed(phrase).as_ref()),
     }
 }
 
@@ -3139,33 +3396,82 @@ fn words_as_typed(lowered: &str, typed: &str) -> String {
         .join(" ")
 }
 
-/// Greedy case-insensitive subsequence match of `needle` in `name`, for highlighting.
+/// The characters of `text` as a search compares them ([`as_compared`]),
+/// each with where its letter is in `text`. An accent that is stored apart
+/// from its letter is part of the letter, and so are the parts of a Korean
+/// syllable, so that what is lit of a name is never half a letter.
+fn letters(text: &str) -> Vec<(char, Range<usize>)> {
+    let class = CanonicalCombiningClassMapBorrowed::new();
+    let pairs = CanonicalCompositionBorrowed::new();
+    let mut letters: Vec<(char, Range<usize>)> = Vec::with_capacity(text.len());
+    for (at, c) in text.char_indices() {
+        let end = at + c.len_utf8();
+        // Most names are in ASCII, which has no accents and nothing that
+        // joins what is before it.
+        if c.is_ascii() {
+            letters.push((c.to_ascii_lowercase(), at..end));
+            continue;
+        }
+        // An accent goes on the letter before it, and some characters make
+        // one character with the one before them.
+        let joins = |last: char| class.get_u8(c) != 0 || pairs.compose(last, c).is_some();
+        let start = match letters.last() {
+            Some((last, letter)) if joins(*last) => letter.start,
+            _ => at,
+        };
+        while letters
+            .last()
+            .is_some_and(|(_, letter)| letter.start == start)
+        {
+            letters.pop();
+        }
+        let letter = as_compared(&text[start..end]);
+        letters.extend(letter.chars().map(|c| (c, start..end)));
+    }
+    letters
+}
+
+/// Greedy case-insensitive subsequence match of `needle` in `name`, for
+/// highlighting. The ranges are of `name` as it is stored, whichever way it
+/// spells a letter with an accent, and are whole letters ([`letters`]).
 pub fn highlight(name: &str, needle: &str) -> Vec<(usize, usize)> {
-    let needle: Vec<char> = needle
+    let needle: String = needle
         .chars()
         .filter(|c| !c.is_whitespace())
         .flat_map(char::to_lowercase)
         .collect();
+    let needle: Vec<char> = composed(&needle).chars().collect();
     if needle.is_empty() {
         return Vec::new();
     }
-    let lower = name.to_lowercase();
+    let mut name = letters(name);
+    // A letter typed without an accent is also the letter with one, as it
+    // is where the words are looked for ([`looked_in`]).
+    let same = |c: char, typed: char| c == typed || unaccented(c) == Some(typed);
+    // An accent that has no character of its own with its letter is one by
+    // itself in `name`, after the letter. To a search that has none typed
+    // so, it is part of the letter, and not between it and the next one.
+    if needle.iter().all(|typed| unaccented(*typed).is_some()) {
+        name.retain(|(c, _)| unaccented(*c).is_some());
+    }
     // Prefer a contiguous substring match when there is one.
-    let joined: String = needle.iter().collect();
-    if lower.len() == name.len()
-        && let Some(start) = lower.find(&joined)
-    {
-        return vec![(start, start + joined.len())];
+    let in_a_row = |run: &[(char, Range<usize>)]| {
+        let pairs = run.iter().zip(&needle);
+        pairs.into_iter().all(|((c, _), typed)| same(*c, *typed))
+    };
+    if let Some(start) = name.windows(needle.len()).position(in_a_row) {
+        let last = start + needle.len() - 1;
+        return vec![(name[start].1.start, name[last].1.end)];
     }
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut want = needle.iter().peekable();
-    for (i, c) in name.char_indices() {
-        let Some(&&w) = want.peek() else { break };
-        if c.to_lowercase().eq(std::iter::once(w)) {
-            let end = i + c.len_utf8();
+    for (c, letter) in &name {
+        let Some(&&typed) = want.peek() else { break };
+        if same(*c, typed) {
             match ranges.last_mut() {
-                Some(last) if last.1 == i => last.1 = end,
-                _ => ranges.push((i, end)),
+                // The letter after the last one, or more of the same letter.
+                Some(last) if last.1 >= letter.start => last.1 = letter.end,
+                _ => ranges.push((letter.start, letter.end)),
             }
             want.next();
         }
@@ -3206,18 +3512,19 @@ fn strip_trailing_separator(path: &Path) -> PathBuf {
 /// `scope`, a folder that is really at `real`, spelled the way it has to be
 /// searched by, when that isn't the way it was given. An index has a folder
 /// under the names the disk gives it on the way down from the root. So a
-/// folder given through a link, with `..` in its path, or in another letter
-/// case is in no index under the names it was given by, though by them it
-/// may look as if it were in a root. One that is really in a root is spelled
-/// the way that root is, and from there on by its real names. One that only
-/// looks as if it were in a root is spelled by its real path, and is then
-/// searched like any other folder outside the roots.
+/// folder given through a link, with `..` in its path, in another letter
+/// case, or with an accent spelled another way than the disk has it
+/// ([`composed`]) is in no index under the names it was given by, though by
+/// them it may look as if it were in a root. One that is really in a root is
+/// spelled the way that root is, and from there on by its real names. One
+/// that only looks as if it were in a root is spelled by its real path, and
+/// is then searched like any other folder outside the roots.
 ///
 /// # Arguments
 ///
 /// * `scope` - The folder as it was given
 /// * `real` - Where it is: its path with no link or `..` in it, and each name
-///   in the letter case the disk has it in
+///   in the letter case and the spelling the disk has it in
 /// * `roots` - The search roots
 /// * `follows_links` - Whether the roots' indexes follow links
 ///
@@ -3250,19 +3557,20 @@ fn index_spelling(
         // An index that follows links has a linked folder under the link's
         // name as well, and that is then the name to search it by. Under a
         // `..` it has nothing, and a path that is the folder's own but for
-        // its letter case doesn't lead through a link.
+        // its letter case, or for the way it spells a letter with an accent,
+        // doesn't lead through a link.
         let climbs = rest
             .components()
             .any(|part| part == std::path::Component::ParentDir);
-        let lower = |path: &Path| -> Vec<String> {
+        let compared = |path: &Path| -> Vec<String> {
             let names = path.components();
             names
-                .map(|name| name.as_os_str().to_string_lossy().to_lowercase())
+                .map(|name| as_compared(&name.as_os_str().to_string_lossy()))
                 .collect()
         };
         let recased = spellings
             .iter()
-            .any(|spelled| lower(spelled) == lower(scope));
+            .any(|spelled| compared(spelled) == compared(scope));
         if !climbs && !recased {
             return None;
         }
@@ -3361,6 +3669,12 @@ mod tests {
             searched("/var/work/Docs", "/private/var/work/docs"),
             by("/var/work/docs")
         );
+        // With an accent as one character, where the disk has it after its
+        // letter and takes the name either way, as macOS does.
+        assert_eq!(
+            searched("/home/me/Caf\u{e9}", "/home/me/Cafe\u{301}"),
+            by("/home/me/Cafe\u{301}")
+        );
         assert_eq!(
             searched("/home/me/link", "/home/me/src/lib"),
             by("/home/me/src/lib")
@@ -3385,7 +3699,8 @@ mod tests {
         assert_eq!(searched("/tmp/a/../b", "/tmp/b"), as_given);
 
         // An index that follows links has a folder under a link's name. It
-        // has none under a `..`, or in another letter case than the disk's.
+        // has none under a `..`, in another letter case than the disk's, or
+        // with an accent spelled another way.
         let followed = |scope: &str, real: &str| spelling(scope, real, true);
         assert_eq!(followed("/home/me/link", "/home/me/src/lib"), as_given);
         assert_eq!(followed("/home/me/data", "/mnt/data"), as_given);
@@ -3402,6 +3717,10 @@ mod tests {
             by("/home/me/Documents")
         );
         assert_eq!(
+            followed("/home/me/caf\u{e9}", "/home/me/Cafe\u{301}"),
+            by("/home/me/Cafe\u{301}")
+        );
+        assert_eq!(
             followed("/private/var/work/docs", "/private/var/work/docs"),
             by("/var/work/docs")
         );
@@ -3412,6 +3731,51 @@ mod tests {
         assert_eq!(highlight("Project Atlas.txt", "proj"), vec![(0, 4)]);
         assert_eq!(highlight("main.rs", "mrs"), vec![(0, 1), (5, 7)]);
         assert!(highlight("abc", "xyz").is_empty());
+    }
+
+    #[test]
+    fn what_is_lit_of_a_name_is_where_the_name_has_it_as_stored() {
+        // The accents apart from their letters, as macOS stores them: ten
+        // bytes for the six letters. Typed as one character each.
+        let apart = "Re\u{301}sume\u{301}.pdf";
+        assert_eq!(highlight(apart, "r\u{e9}sum\u{e9}"), vec![(0, 10)]);
+        // The other way round, and the same way.
+        let whole = "R\u{e9}sum\u{e9}.pdf";
+        assert_eq!(highlight(whole, "re\u{301}sume\u{301}"), vec![(0, 8)]);
+        assert_eq!(highlight(whole, "r\u{e9}sum\u{e9}"), vec![(0, 8)]);
+        // A letter typed without its accent is lit with it, never half.
+        assert_eq!(highlight(apart, "resume"), vec![(0, 10)]);
+        assert_eq!(highlight(whole, "resume"), vec![(0, 8)]);
+        assert_eq!(highlight(apart, "rsm"), vec![(0, 1), (4, 5), (6, 7)]);
+        assert_eq!(highlight(apart, "eu"), vec![(1, 4), (5, 6)]);
+        // One typed with an accent is that letter and no other.
+        assert!(highlight("resume.pdf", "r\u{e9}sum\u{e9}").is_empty());
+        assert!(highlight(apart, "r\u{e8}sum\u{e8}").is_empty());
+        // Letters apart, with a space between the words.
+        let dessert = "cre\u{300}me bru\u{302}le\u{301}e.txt";
+        assert_eq!(
+            highlight(dessert, "cr\u{e8}me br\u{fb}l\u{e9}e"),
+            vec![(0, 7), (8, 18)]
+        );
+        // A Korean syllable stored as its three parts is one letter.
+        let korean = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}.txt";
+        assert_eq!(highlight(korean, "\u{ae00}"), vec![(9, 18)]);
+        assert!(highlight(korean, "\u{d558}").is_empty(), "not half of one");
+        // An accent that has no character of its own with its letter.
+        assert_eq!(highlight("ax\u{303}b", "x\u{303}b"), vec![(1, 5)]);
+        assert_eq!(highlight("ax\u{303}b", "xb"), vec![(1, 5)]);
+        // It is not between its letter and the next: the two are in a row,
+        // which is what is lit where a name has the letters in a row.
+        assert_eq!(highlight("xx\u{303}b", "xb"), vec![(1, 5)]);
+        // Other alphabets, as before.
+        assert_eq!(
+            highlight(
+                "\u{41c}\u{43e}\u{441}\u{43a}\u{432}\u{430} 2024.txt",
+                "\u{43c}\u{43e}\u{441}"
+            ),
+            vec![(0, 6)]
+        );
+        assert_eq!(highlight("\u{6771}\u{4eac}.txt", "\u{4eac}"), vec![(3, 6)]);
     }
 
     #[test]
@@ -3428,6 +3792,108 @@ mod tests {
     fn subsequence() {
         assert!(is_subsequence("mrs", "main.rs"));
         assert!(!is_subsequence("engine", "crates/nu_plugin_fff/cargo.toml"));
+    }
+
+    #[test]
+    fn a_letter_with_an_accent_is_compared_in_one_spelling() {
+        // The letter and then its accent, and the two as one character.
+        assert_eq!(composed("Re\u{301}sume\u{301}"), "R\u{e9}sum\u{e9}");
+        assert_eq!(composed("R\u{e9}sum\u{e9}"), "R\u{e9}sum\u{e9}");
+        assert_eq!(
+            as_compared("RE\u{301}SUME\u{301}.PDF"),
+            "r\u{e9}sum\u{e9}.pdf"
+        );
+        assert_eq!(as_compared("Budget 2024.TXT"), "budget 2024.txt");
+        // The three parts of a Korean syllable.
+        assert_eq!(as_compared("\u{1112}\u{1161}\u{11ab}"), "\u{d55c}");
+
+        assert_eq!(plain("r\u{e9}sum\u{e9}").as_deref(), Some("resume"));
+        assert_eq!(plain("vi\u{1ec7}t").as_deref(), Some("viet"), "two on one");
+        assert_eq!(
+            plain("\u{3b1}\u{3b8}\u{3ae}\u{3bd}\u{3b1}").as_deref(),
+            Some("\u{3b1}\u{3b8}\u{3b7}\u{3bd}\u{3b1}")
+        );
+        // An accent that has no character of its own with its letter.
+        assert_eq!(plain("x\u{303}y").as_deref(), Some("xy"));
+        // Nothing to take off: no accent is among the parts of these.
+        for text in [
+            "budget.txt",
+            "\u{d55c}\u{ae00}",
+            "\u{6771}\u{4eac}",
+            "stra\u{df}e",
+            "\u{43c}\u{43e}\u{441}\u{43a}\u{432}\u{430}",
+        ] {
+            assert_eq!(plain(text), None, "{text}");
+        }
+
+        // A word typed without accents is looked for among letters without
+        // them, and a word typed with one among the letters as they are.
+        let (name, bare) = ("r\u{e9}sum\u{e9}.pdf", Some("resume.pdf"));
+        assert_eq!(looked_in("resume", name, bare), "resume.pdf");
+        assert_eq!(looked_in("r\u{e9}sume", name, bare), name);
+        assert_eq!(looked_in("resume", "resume.pdf", None), "resume.pdf");
+
+        // The spellings a search is made in, the one typed first.
+        assert_eq!(
+            spellings("r\u{e9}sum\u{e9} *.pdf"),
+            ["r\u{e9}sum\u{e9} *.pdf", "re\u{301}sume\u{301} *.pdf"]
+        );
+        assert_eq!(
+            spellings("re\u{301}sume\u{301}"),
+            ["re\u{301}sume\u{301}", "r\u{e9}sum\u{e9}"]
+        );
+        assert_eq!(
+            spellings("\u{d55c}"),
+            ["\u{d55c}", "\u{1112}\u{1161}\u{11ab}"]
+        );
+        // Typed neither way: one letter whole, the other apart.
+        assert_eq!(
+            spellings("r\u{e9}sume\u{301}"),
+            [
+                "r\u{e9}sume\u{301}",
+                "r\u{e9}sum\u{e9}",
+                "re\u{301}sume\u{301}"
+            ]
+        );
+        // The ohm sign is spelled as the Greek letter both ways.
+        assert_eq!(spellings("10\u{2126}"), ["10\u{2126}", "10\u{3a9}"]);
+        for one_spelling in [
+            "budget *.pdf",
+            "\u{43c}\u{43e}\u{441}\u{43a}\u{432}\u{430}",
+            "\u{6771}\u{4eac}",
+        ] {
+            assert_eq!(spellings(one_spelling), [one_spelling]);
+        }
+        // What a search leaves out is left out of each of its searches in
+        // every spelling, or one of them would bring it back.
+        assert_eq!(
+            spellings("budget !caf\u{e9}"),
+            ["budget !caf\u{e9} !cafe\u{301}"]
+        );
+        assert_eq!(
+            spellings("r\u{e9}sum\u{e9} !caf\u{e9} !draft"),
+            [
+                "r\u{e9}sum\u{e9} !caf\u{e9} !cafe\u{301} !draft",
+                "re\u{301}sume\u{301} !caf\u{e9} !cafe\u{301} !draft"
+            ]
+        );
+
+        // fff-search scores by the characters of the words it matches by,
+        // of which a spelling with the letters apart has more.
+        let scale = |query: &str| score_scale(&QueryParser::default().parse(query).fuzzy_query);
+        assert_eq!(scale("re\u{301}sume\u{301}"), Some((6, 8)));
+        assert_eq!(
+            scale("\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}"),
+            Some((2, 6))
+        );
+        // A lone letter is none of them, nor is a filter.
+        assert_eq!(
+            scale("cre\u{300}me a bru\u{302}le\u{301}e *.pdf"),
+            Some((11, 14))
+        );
+        for one_scale in ["r\u{e9}sum\u{e9}", "budget 2024", "*.pdf", ""] {
+            assert_eq!(scale(one_scale), None, "{one_scale}");
+        }
     }
 
     #[test]
@@ -3687,6 +4153,11 @@ mod tests {
             9 * CASE_FIT,
             "fff-search ignores a lone letter"
         );
+        assert_eq!(
+            case_fit("Cafe\u{301}.app", "Caf\u{e9}"),
+            4 * CASE_FIT,
+            "however the name stores an accent"
+        );
     }
 
     #[test]
@@ -3945,6 +4416,31 @@ mod tests {
             told(listed - 1..listed),
             paths(&[&format!("/home/me/{CHANGES_KEPT}.txt")])
         );
+    }
+
+    #[test]
+    fn a_new_file_is_a_searchs_business_however_its_name_stores_an_accent() {
+        let engine = no_roots();
+        let base = Path::new("/home/me");
+        engine.changes.reports(base.to_path_buf());
+        // The accents apart from their letters, as macOS stores them.
+        let new = "/home/me/Documents/Re\u{301}sume\u{301}.pdf";
+        engine
+            .changes
+            .note(base, &[reported(WatchEventKind::Created, new, None)]);
+        let told = |query: &str| {
+            let search = SearchRequest {
+                query: query.into(),
+                ..Default::default()
+            };
+            engine.changes_for(&search, 0..1, |_| false)
+        };
+        let it = Some(vec![PathBuf::from(new)]);
+
+        assert_eq!(told("r\u{e9}sum\u{e9}"), it, "typed as one character each");
+        assert_eq!(told("re\u{301}sume\u{301}"), it);
+        assert_eq!(told("docu RESUME"), it, "and typed without them");
+        assert_eq!(told("r\u{e8}sum\u{e8}"), Some(Vec::new()), "other accents");
     }
 
     #[test]
@@ -4576,12 +5072,142 @@ mod tests {
     fn a_name_that_stores_an_accent_apart_is_found_by_the_letter_typed() {
         let dir = std::env::temp_dir().join(format!("fff-apart-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // The first two as macOS stores them: the letter, then its accent.
+        // The first of each two as macOS stores it, the letter and then its
+        // accent, and the second with the two as one character. The last
+        // is a Korean name stored as the parts of its syllables.
         for file in [
             "sen\u{303}or.txt",
+            "Se\u{f1}or Lopez.txt",
             "Re\u{301}sume\u{301}.pdf",
+            "r\u{e9}sum\u{e9}-2024.pdf",
+            "Mu\u{308}nchen/karte.png",
+            "u\u{308}bung.txt",
+            "\u{fc}ber.txt",
             "senior.txt",
+            "notes.txt",
+            "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}.txt",
+        ] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let hits = |query: &str, files_only: bool| {
+            let request = SearchRequest {
+                query: query.into(),
+                files_only,
+                limit: 50,
+                ..Default::default()
+            };
+            engine.search(&request).hits
+        };
+        // The names in one spelling, whichever way the disk gives them back.
+        let find = |query: &str, files_only: bool| {
+            let mut names: Vec<String> = hits(query, files_only)
+                .iter()
+                .map(|h| composed(&h.entry.name).into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let names = |query: &str| find(query, true);
+        let senors = ["Se\u{f1}or Lopez.txt", "se\u{f1}or.txt"];
+        let resumes = ["R\u{e9}sum\u{e9}.pdf", "r\u{e9}sum\u{e9}-2024.pdf"];
+
+        // The names have the words whatever the setting: no typo is needed.
+        for typos in [true, false] {
+            let mut settings = engine.search_settings();
+            settings.typos = typos;
+            engine.set_search_settings(settings);
+            // As a keyboard types them: one character.
+            assert_eq!(names("se\u{f1}or"), senors, "typos: {typos}");
+            assert_eq!(names("r\u{e9}sum\u{e9}"), resumes, "typos: {typos}");
+            assert_eq!(names("R\u{e9}sum\u{e9}"), resumes, "with its capital");
+            // As a name copied out of Finder has them.
+            assert_eq!(names("sen\u{303}or"), senors, "typos: {typos}");
+            assert_eq!(names("re\u{301}sume\u{301}"), resumes);
+            // A quoted word is in a name letter for letter, and the letter
+            // is the same one in either spelling.
+            assert_eq!(names("\"se\u{f1}or\""), senors, "typos: {typos}");
+            assert_eq!(names("\"sen\u{303}or\""), senors);
+            // In a folder's name, and with folders among the results.
+            assert_eq!(names("m\u{fc}nchen"), ["karte.png"], "typos: {typos}");
+            assert_eq!(find("m\u{fc}nchen", false), ["M\u{fc}nchen", "karte.png"]);
+            // The folder is found without its accent too, as the next test
+            // finds files.
+            assert_eq!(find("munchen", false), ["M\u{fc}nchen", "karte.png"]);
+            assert_eq!(names("\u{d55c}\u{ae00}"), ["\u{d55c}\u{ae00}.txt"]);
+            // One letter is looked for in the names, and not in the folders
+            // they are in, as any one letter is.
+            let umlauts = ["\u{fc}ber.txt", "\u{fc}bung.txt"];
+            assert_eq!(names("\u{fc}"), umlauts, "typos: {typos}");
+            assert_eq!(names("u\u{308}"), umlauts, "typos: {typos}");
+            assert_eq!(
+                find("\u{fc}", false),
+                ["M\u{fc}nchen", "\u{fc}ber.txt", "\u{fc}bung.txt"]
+            );
+            // What a search leaves out stays out, in either spelling.
+            assert_eq!(names("se\u{f1}or !lopez"), ["se\u{f1}or.txt"]);
+            assert_eq!(
+                names("*.txt !\u{fc}b"),
+                [
+                    "Se\u{f1}or Lopez.txt",
+                    "notes.txt",
+                    "senior.txt",
+                    "se\u{f1}or.txt",
+                    "\u{d55c}\u{ae00}.txt"
+                ],
+                "typos: {typos}"
+            );
+            // A glob and a folder filter have a letter in either spelling.
+            // The globs have a capital, so they are matched case for case.
+            assert_eq!(names("*R\u{e9}sum\u{e9}*"), ["R\u{e9}sum\u{e9}.pdf"]);
+            assert_eq!(names("*Sen\u{303}or*"), ["Se\u{f1}or Lopez.txt"]);
+            assert_eq!(names("/m\u{fc}nchen/ karte"), ["karte.png"]);
+            // A name in ASCII has one spelling, and is held to it.
+            assert_eq!(names("senior"), ["senior.txt"]);
+            assert_eq!(names("xqz"), Vec::<String>::new());
+        }
+
+        // What is lit of a name is the word where the name has it, in the
+        // name as it is stored.
+        for hit in hits("se\u{f1}or", true) {
+            let name = &hit.entry.name;
+            let lit: String = hit.highlights.iter().map(|&(a, b)| &name[a..b]).collect();
+            assert_eq!(as_compared(&lit), "se\u{f1}or", "{name:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_word_typed_without_accents_finds_the_names_that_have_them() {
+        let dir = std::env::temp_dir().join(format!("fff-plain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Accents stored apart from their letters, as macOS stores them, and
+        // as one character with them.
+        for file in [
+            "sen\u{303}or.txt",
+            "Se\u{f1}or Lopez.txt",
+            "senor.txt",
+            "senior.txt",
+            "Re\u{301}sume\u{301}.pdf",
+            "r\u{e9}sum\u{e9}-2024.pdf",
+            "resume.pdf",
+            "Bjo\u{308}rk - Jo\u{301}ga.mp3",
+            // To fff-search a match for a misspelled "björk" as well.
+            "\u{dc}berblick.md",
+            "\u{391}\u{3b8}\u{3ae}\u{3bd}\u{3b1}.txt",
+            // Alphabets whose letters are spelled one way.
+            "\u{41c}\u{43e}\u{441}\u{43a}\u{432}\u{430} 2024.txt",
+            "\u{6771}\u{4eac}.txt",
             "notes.txt",
         ] {
             std::fs::write(dir.join(file), "").unwrap();
@@ -4594,7 +5220,8 @@ mod tests {
             search: Default::default(),
         });
         assert!(engine.wait_ready(Duration::from_secs(10)));
-        let names = |query: &str| {
+        // The names in one spelling, whichever way the disk gives them back.
+        let listed = |query: &str| {
             let request = SearchRequest {
                 query: query.into(),
                 files_only: true,
@@ -4602,27 +5229,193 @@ mod tests {
                 ..Default::default()
             };
             let hits = engine.search(&request).hits;
-            hits.into_iter().map(|h| h.entry.name).collect::<Vec<_>>()
+            hits.iter()
+                .map(|h| composed(&h.entry.name).into_owned())
+                .collect::<Vec<_>>()
         };
-        // Whether a search lists the name with accents that ends so,
-        // whichever way the disk spells it back.
-        let accented = |query: &str, end: &str| {
-            let found = names(query);
-            found
-                .iter()
-                .any(|name| !name.is_ascii() && name.ends_with(end))
+        let names = |query: &str| {
+            let mut names = listed(query);
+            names.sort();
+            names
+        };
+        let set_typos = |typos: bool| {
+            let mut settings = engine.search_settings();
+            settings.typos = typos;
+            engine.set_search_settings(settings);
+        };
+        let none = Vec::<String>::new();
+        let moscow = "\u{41c}\u{43e}\u{441}\u{43a}\u{432}\u{430} 2024.txt";
+
+        for typos in [true, false] {
+            set_typos(typos);
+            assert_eq!(
+                names("senor"),
+                [
+                    "Se\u{f1}or Lopez.txt",
+                    "senior.txt",
+                    "senor.txt",
+                    "se\u{f1}or.txt"
+                ],
+                "typos: {typos}"
+            );
+            assert_eq!(listed("senor")[0], "senor.txt", "as typed comes first");
+            assert_eq!(
+                names("resume"),
+                [
+                    "R\u{e9}sum\u{e9}.pdf",
+                    "resume.pdf",
+                    "r\u{e9}sum\u{e9}-2024.pdf"
+                ],
+                "typos: {typos}"
+            );
+            assert_eq!(listed("resume")[0], "resume.pdf", "as typed comes first");
+            // Greek, typed without the mark its capital goes without.
+            assert_eq!(
+                names("\u{3b1}\u{3b8}\u{3b7}\u{3bd}\u{3b1}"),
+                ["\u{391}\u{3b8}\u{3ae}\u{3bd}\u{3b1}.txt"]
+            );
+            // A word in another alphabet is found by its own letters.
+            assert_eq!(
+                names("\u{43c}\u{43e}\u{441}\u{43a}\u{432}\u{430}"),
+                [moscow],
+                "typos: {typos}"
+            );
+            assert_eq!(
+                names("\u{6771}\u{4eac}"),
+                ["\u{6771}\u{4eac}.txt"],
+                "typos: {typos}"
+            );
+            // A word typed with an accent is for the names that have it.
+            assert_eq!(
+                names("se\u{f1}or"),
+                ["Se\u{f1}or Lopez.txt", "se\u{f1}or.txt"],
+                "typos: {typos}"
+            );
+            assert_eq!(names("r\u{e8}sum\u{e8}"), none, "not for another accent");
+            // A quoted word is letter for letter.
+            assert_eq!(names("\"senor\""), ["senor.txt"]);
+            // One letter is looked for in the same way.
+            assert_eq!(
+                names("n"),
+                [
+                    "Se\u{f1}or Lopez.txt",
+                    "notes.txt",
+                    "senior.txt",
+                    "senor.txt",
+                    "se\u{f1}or.txt"
+                ],
+                "typos: {typos}"
+            );
+            assert_eq!(names("\u{f1}"), ["Se\u{f1}or Lopez.txt", "se\u{f1}or.txt"]);
+        }
+
+        // A typo in such a word is one typo, as in any other.
+        set_typos(true);
+        assert_eq!(names("bjrok"), ["Bj\u{f6}rk - J\u{f3}ga.mp3"]);
+        assert_eq!(names("bjr\u{f6}k"), ["Bj\u{f6}rk - J\u{f3}ga.mp3"]);
+        assert_eq!(
+            names("r\u{e9}smu\u{e9}"),
+            ["R\u{e9}sum\u{e9}.pdf", "r\u{e9}sum\u{e9}-2024.pdf"]
+        );
+        // Two letters that changed places, in another alphabet.
+        let misspelled = "\u{43c}\u{441}\u{43e}\u{43a}\u{432}\u{430}";
+        assert_eq!(names(misspelled), [moscow]);
+        set_typos(false);
+        for query in ["bjrok", "bjr\u{f6}k", "r\u{e9}smu\u{e9}", misspelled] {
+            assert_eq!(names(query), none, "{query}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn names_rank_alike_however_they_store_their_accents() {
+        let dir = std::env::temp_dir().join(format!("fff-ranked-apart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A Korean word of four syllables and a French one. Of the Korean
+        // names, the one that is the word has each syllable as one
+        // character, and the two with more to them are stored as macOS
+        // stores them, a syllable as its parts. The French names are the
+        // other way round: the one that is the word has each accent after
+        // its letter. The last two have the same word in the same place.
+        let korean = "\u{d55c}\u{ae00}\u{bb38}\u{c11c}";
+        let korean_apart = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}\
+                            \u{1106}\u{116e}\u{11ab}\u{1109}\u{1165}";
+        for file in [
+            format!("{korean}.txt"),
+            format!("{korean_apart} \u{110e}\u{1169}\u{110b}\u{1161}\u{11ab}.txt"),
+            format!("\u{1109}\u{1162} {korean_apart}.txt"),
+            "re\u{301}sume\u{301}.pdf".to_string(),
+            "r\u{e9}sum\u{e9} draft.pdf".to_string(),
+            "my r\u{e9}sum\u{e9}.pdf".to_string(),
+            "se\u{f1}or a.txt".to_string(),
+            "sen\u{303}or b.txt".to_string(),
+        ] {
+            std::fs::write(dir.join(file), "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        // The names in one spelling, whichever way the disk gives them back,
+        // each with its score.
+        let listed = |query: &str| {
+            let request = SearchRequest {
+                query: query.into(),
+                files_only: true,
+                limit: 50,
+                ..Default::default()
+            };
+            let hits = engine.search(&request).hits;
+            hits.iter()
+                .map(|h| (composed(&h.entry.name).into_owned(), h.score))
+                .collect::<Vec<_>>()
+        };
+        let names = |query: &str| -> Vec<String> {
+            listed(query).into_iter().map(|(name, _)| name).collect()
         };
 
-        // As a keyboard types them: one character. Letter for letter the
-        // names are two typos away for each accent, which is more than the
-        // words may have.
-        assert!(accented("se\u{f1}or", "or.txt"));
-        assert!(accented("r\u{e9}sum\u{e9}", ".pdf"));
-        // A name in ASCII has one spelling, and is held to it.
-        let found = names("se\u{f1}or");
-        assert!(found.iter().all(|name| !name.is_ascii()), "{found:?}");
-        // So is a word in ASCII, whatever the name has.
-        assert_eq!(names("xqz"), Vec::<String>::new());
+        // The name that is the word comes first, then the one that begins
+        // with it, as they do when every name is stored the same way.
+        // fff-search scores the Korean names stored apart far higher, for
+        // the seven characters more that the word has in their spelling,
+        // which would count for more than being the word does.
+        for typed in [korean, korean_apart] {
+            assert_eq!(
+                names(typed),
+                [
+                    "\u{d55c}\u{ae00}\u{bb38}\u{c11c}.txt",
+                    "\u{d55c}\u{ae00}\u{bb38}\u{c11c} \u{cd08}\u{c548}.txt",
+                    "\u{c0c8} \u{d55c}\u{ae00}\u{bb38}\u{c11c}.txt"
+                ],
+                "{typed}"
+            );
+        }
+        for typed in ["r\u{e9}sum\u{e9}", "re\u{301}sume\u{301}"] {
+            assert_eq!(
+                names(typed),
+                [
+                    "r\u{e9}sum\u{e9}.pdf",
+                    "r\u{e9}sum\u{e9} draft.pdf",
+                    "my r\u{e9}sum\u{e9}.pdf"
+                ],
+                "{typed}"
+            );
+        }
+        // Two names that match alike score alike, to within the few points
+        // of fff-search's bonuses that don't go by the length of the word.
+        // As fff-search scores them they are 14 points apart.
+        for typed in ["se\u{f1}or", "sen\u{303}or"] {
+            let found = listed(typed);
+            let [(_, a), (_, b)] = found[..] else {
+                panic!("{found:?}");
+            };
+            assert!((a - b).abs() <= 5, "{found:?}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4928,6 +5721,51 @@ mod tests {
         engine.track_open(&tree.join("b/readme.md"), Some("README"));
         assert_eq!(first("README"), "readme.md", "opened from this search");
         assert_eq!(first("Readme"), "readme.md", "in any letter case");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Left out on Windows for the reason the test above is.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_search_remembers_what_it_opened_however_its_accents_are_stored() {
+        let dir = std::env::temp_dir().join(format!("fff-opened-apart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tree = dir.join("tree");
+        // The second with its accents apart from their letters, as macOS
+        // stores them.
+        let (whole, apart) = ("a/r\u{e9}sum\u{e9}.pdf", "b/re\u{301}sume\u{301} 2024.pdf");
+        for file in [whole, apart] {
+            let path = tree.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![tree.clone()],
+            app_dirs: Vec::new(),
+            db_dir: Some(dir.join("db")),
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let first = |query: &str| {
+            let request = SearchRequest {
+                query: query.into(),
+                limit: 50,
+                ..Default::default()
+            };
+            let name = engine.search(&request).hits.swap_remove(0).entry.name;
+            composed(&name).into_owned()
+        };
+
+        // Typed as one character each, the search finds the second file in
+        // its other spelling, which is the one it has to be looked up under.
+        assert_eq!(first("r\u{e9}sum\u{e9}"), "r\u{e9}sum\u{e9}.pdf");
+        engine.track_open(&tree.join(apart), Some("r\u{e9}sum\u{e9}"));
+        assert_eq!(first("r\u{e9}sum\u{e9}"), "r\u{e9}sum\u{e9} 2024.pdf");
+        // And the other way round.
+        engine.track_open(&tree.join(whole), Some("re\u{301}sume\u{301}"));
+        assert_eq!(first("re\u{301}sume\u{301}"), "r\u{e9}sum\u{e9}.pdf");
+        assert_eq!(first("r\u{e9}sum\u{e9}"), "r\u{e9}sum\u{e9}.pdf");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5380,7 +6218,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let home = dir.join("Users/me");
         let apps = dir.join("Applications");
-        for app in ["Safari.app/Contents", "Notes.app", "Utilities/Terminal.app"] {
+        for app in [
+            "Safari.app/Contents",
+            "Notes.app",
+            "Utilities/Terminal.app",
+            // Its accent apart from the letter, as macOS stores it.
+            "Cafe\u{301}.app",
+        ] {
             std::fs::create_dir_all(apps.join(app)).unwrap();
         }
         std::fs::write(apps.join("Safari.app/Contents/Info.plist"), "plist").unwrap();
@@ -5434,6 +6278,14 @@ mod tests {
         // name, as it isn't in a file's path.
         assert!(at(&find("k safari", KindFilter::Any, false), "Safari.app").is_some());
         assert_eq!(find("k notes", KindFilter::Folder, false), ["Notes.app"]);
+        // An app's name has a letter whichever way it stores the accent,
+        // and for a word typed without the accent as well.
+        for query in ["caf\u{e9}", "Caf\u{e9}", "cafe\u{301}", "cafe"] {
+            let found = find(query, KindFilter::Any, false);
+            let found: Vec<_> = found.iter().map(|name| composed(name)).collect();
+            assert_eq!(found, ["Caf\u{e9}.app"], "{query}");
+        }
+        assert!(find("caf\u{e8}", KindFilter::Any, false).is_empty());
         let scoped = engine.search(&SearchRequest {
             query: "safari".into(),
             scope: Some(home.clone()),
@@ -5451,6 +6303,12 @@ mod tests {
         let listed = engine.list(true, Some("safari"), 0);
         let app = listed.iter().find(|i| i.path == apps.join("Safari.app"));
         assert_eq!(app.map(|i| i.root.as_path()), Some(apps.as_path()));
+        // An app is listed whichever way its name stores an accent too.
+        for query in ["caf\u{e9}", "CAFE\u{301}", "cafe"] {
+            let listed = engine.list(true, Some(query), 0);
+            let cafe = |i: &IndexedItem| composed(&display_name(&i.path)) == "Caf\u{e9}.app";
+            assert!(listed.iter().any(cafe), "{query}");
+        }
 
         // A new app is found on the next search; folder times can be coarse.
         std::thread::sleep(Duration::from_millis(20));

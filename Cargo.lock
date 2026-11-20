@@ -1915,6 +1915,7 @@ dependencies = [
  "flate2",
  "fs4",
  "hayro",
+ "icu_normalizer",
  "libc",
  "log",
  "plist",
