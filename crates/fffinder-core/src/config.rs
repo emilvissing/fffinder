@@ -350,8 +350,8 @@ pub struct SearchSettings {
     pub content_index: bool,
     /// Keep the most-used files in memory for content search.
     pub preload_files: bool,
-    /// Let name searches fall back to typo-tolerant matches when nothing
-    /// has the words' letters in order.
+    /// Let name searches list near misses of a word, with a typo or two in
+    /// it, when no result has the word as typed.
     pub typos: bool,
     /// Letter case in content search, quoted words, and globs.
     pub case: SearchCase,

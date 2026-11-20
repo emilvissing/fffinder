@@ -1052,27 +1052,29 @@ impl Engine {
             });
             total_matched = raw.len();
         }
-        // Typo-tolerant matches are a fallback: when some results contain every
-        // word as an in-order subsequence (fzf-style), keep only those. With
-        // typos turned off, they're never kept. Otherwise the near misses
-        // among them are. fff-search lets a word go without two of its
-        // letters or more and have the rest anywhere along the path, so to
-        // it `debug-test.log` matches `bduget` as well as `budget.txt` does.
-        let strict = |hit: &RawHit| checked.iter().all(|w| is_subsequence(w, hit.looked_in(w)));
+        // Typo-tolerant matches are a fallback, word by word: a result has
+        // to have each word's letters in order (fzf-style), and only for a
+        // word that may be misspelled will a near miss of it do instead.
+        // With typos turned off, no word may be. fff-search lets a word go
+        // without two of its letters or more and have the rest anywhere
+        // along the path, so to it `debug-test.log` matches `bduget` as well
+        // as `budget.txt` does.
+        let misspelled = if settings.typos {
+            may_be_misspelled(&checked, &raw)
+        } else {
+            Vec::new()
+        };
         if !words.is_empty() {
-            if !settings.typos || raw.iter().any(&strict) {
-                raw.retain(strict);
-            } else {
-                raw.retain(|hit| {
-                    checked.iter().all(|w| {
-                        let text = hit.looked_in(w);
-                        is_subsequence(w, text) || near_miss(w, text, typo_budget(w))
-                    })
-                });
-            }
+            raw.retain(|hit| {
+                checked.iter().all(|w| {
+                    let text = hit.looked_in(w);
+                    is_subsequence(w, text)
+                        || misspelled.contains(&w) && near_miss(w, text, typo_budget(w))
+                })
+            });
         }
         for hit in &mut raw {
-            hit.score = rerank(hit, &words);
+            hit.score = rerank(hit, &words, &misspelled);
         }
         raw.sort_by(by_rank);
         let mut seen = HashSet::new();
@@ -2586,6 +2588,47 @@ fn checked_words(words: &[String]) -> Vec<String> {
     }
 }
 
+/// The words of a search that may be misspelled, which a near miss can then
+/// stand in for ([`near_miss`]): the ones that no result has as typed, with
+/// their letters in a row. Letters that are only in order don't show that a
+/// word was found. In a folder of any size some path has them by accident,
+/// spread over its folders and its name, as `build/debug/target.txt` has
+/// those of `bduget`. Were that taken for the word, the search would list
+/// such paths and leave out `budget.txt`, which is one typo away. A word
+/// that a result does have in a row is taken as spelled right, and lists
+/// what it lists without typos: `main` brings no `mian.txt`.
+///
+/// A result here is a hit with every word's letters in order, which is
+/// listed whatever else is. A word is looked for where the check looks for
+/// it ([`RawHit::looked_in`]), so one typed without accents is as typed in
+/// a name that has them. A word that can have no typo ([`typo_budget`]) is
+/// never one of these.
+///
+/// # Arguments
+///
+/// * `checked` - The words the hits are checked for, [`as_compared`]
+/// * `raw` - What the search found, before the check
+fn may_be_misspelled<'a>(checked: &'a [String], raw: &[RawHit]) -> Vec<&'a String> {
+    let mut open: Vec<&String> = checked
+        .iter()
+        .filter(|word| typo_budget(word) > 0)
+        .collect();
+    let has = |hit: &RawHit, word: &String| hit.looked_in(word).contains(word.as_str());
+    for hit in raw {
+        if open.is_empty() {
+            break;
+        }
+        if open.iter().any(|word| has(hit, word))
+            && checked
+                .iter()
+                .all(|word| is_subsequence(word, hit.looked_in(word)))
+        {
+            open.retain(|word| !has(hit, word));
+        }
+    }
+    open
+}
+
 /// How many typos a near miss of `word` may have (see [`near_miss`]): none
 /// in a word of up to three letters, of which one typo leaves too little to
 /// tell what was meant, one in a word of up to seven, and two in a longer
@@ -2612,6 +2655,57 @@ fn typo_budget(word: &str) -> usize {
 /// * `text` - What it is looked for in, in lowercase
 /// * `typos` - The most typos the letters may have
 fn near_miss(word: &str, text: &str, typos: usize) -> bool {
+    near_miss_from(word, text.chars().map(|c| (c, true)), typos)
+}
+
+/// Whether a word of `name` begins with a near miss of `word`
+/// ([`near_miss`]). A word begins where the name does, after a character
+/// that is no letter or digit, and at a capital inside a word, as `Storage`
+/// does in `NSTextStorage.rs`. A word that was typed with a typo sits in a
+/// name like that. In the middle of a word the same letters are there by
+/// chance more often than not, as those of `encenc` are in `frecency`, which
+/// has all of them in a row but the first n.
+///
+/// # Arguments
+///
+/// * `word` - A word of the search, in lowercase
+/// * `name` - A name, as it is written
+/// * `typos` - The most typos the letters may have
+fn begins_near_miss(word: &str, name: &str, typos: usize) -> bool {
+    let written: Vec<char> = name.chars().collect();
+    // Whether a word begins at the letter `at`, which isn't the name's
+    // first. A capital begins one after a lowercase letter, and before one
+    // when capitals lead up to it, as the P of `HTMLParser` does.
+    let begins = |at: usize| {
+        let (before, c) = (written[at - 1], written[at]);
+        let after = written.get(at + 1);
+        let capital = c.is_uppercase()
+            && (before.is_lowercase() || after.is_some_and(|after| after.is_lowercase()));
+        !before.is_alphanumeric() || capital
+    };
+    let letters = written.iter().enumerate().flat_map(|(at, c)| {
+        let word_follows = at + 1 < written.len() && begins(at + 1);
+        // The few letters that are two in lowercase have a word after the
+        // second of them.
+        let lower = c.to_lowercase();
+        let last = lower.len() - 1;
+        lower
+            .enumerate()
+            .map(move |(part, letter)| (letter, part == last && word_follows))
+    });
+    near_miss_from(word, letters, typos)
+}
+
+/// [`near_miss`] for letters that can begin only in some places of a text.
+///
+/// # Arguments
+///
+/// * `word` - A word of the search, in lowercase
+/// * `text` - The letters of what it is looked for in, in lowercase, each
+///   with whether the letters looked for can begin after it. They can where
+///   the text begins
+/// * `typos` - The most typos the letters may have
+fn near_miss_from(word: &str, text: impl Iterator<Item = (char, bool)>, typos: usize) -> bool {
     let word: Vec<char> = word.chars().collect();
     let len = word.len();
     // Sellers' algorithm. Each letter of `text` has a column, which holds
@@ -2622,12 +2716,13 @@ fn near_miss(word: &str, text: &str, typos: usize) -> bool {
     let mut prev: Vec<usize> = (0..=len).collect();
     let mut cur = before.clone();
     let mut last = None;
-    for c in text.chars() {
+    for (c, begins_after) in text {
         if prev[len] <= typos {
             return true;
         }
-        // The letters can begin anywhere in `text`.
-        cur[0] = 0;
+        // Where the letters can't begin, they begin at the last place where
+        // they could, and each letter from there to here is one too many.
+        cur[0] = if begins_after { 0 } else { prev[0] + 1 };
         for i in 1..=len {
             let wrong = usize::from(word[i - 1] != c);
             cur[i] = (prev[i - 1] + wrong).min(prev[i] + 1).min(cur[i - 1] + 1);
@@ -2821,9 +2916,70 @@ fn score_scale(fuzzy: &FuzzyQuery) -> Option<(i64, i64)> {
 /// What [`rerank`] takes off for each folder in a hit's path.
 const DEPTH_PENALTY: i32 = 3;
 
+/// What a near miss of a word adds to a hit's rank when a word of the hit's
+/// own name begins with it ([`near_miss_bonus`]): less than a word adds that
+/// is in the name as typed, and enough to list the name that was meant ahead
+/// of the paths that have the word's letters in order by accident.
+const NEAR_NAME: i32 = 30;
+
+/// The fewest letters of a word whose near miss in a name is ranked up. One
+/// typo in four letters leaves three of them to go by, and many names have
+/// those side by side by chance: `lens.svg` and `icon.icns` are that close
+/// to `lcns`. Ranked up, they would bury what the letters find in order,
+/// which for `lcns` is `LICENSE`.
+const NEAR_NAME_LETTERS: usize = 5;
+
+/// What a near miss that is only in a folder's name takes off a hit's rank
+/// ([`near_miss_bonus`]). One near miss scores much like another, and
+/// without this `mian` lists everything in a folder named `Many` ahead of
+/// `main.rs`.
+const NEAR_FOLDER: i32 = 30;
+
+/// What [`rerank`] adds for a word that may be misspelled
+/// ([`may_be_misspelled`]) and that a hit's name doesn't have as typed. A
+/// near miss of it that begins a word of the name counts for the hit
+/// ([`begins_near_miss`]), when the word is long enough to tell by, and one
+/// that is only in a folder's name counts against it. Any other hit has a
+/// near miss inside a word of its name, or the word's letters in order
+/// along its path, and is left where fff-search ranks it, as every hit is
+/// when no word may be misspelled.
+///
+/// The word is looked for where the check looks for it
+/// ([`RawHit::looked_in`]): one typed without accents has its near misses
+/// in a name that has them, as `bjrok` has one in `Björk.mp3`.
+///
+/// # Arguments
+///
+/// * `hit` - A hit that the search lists
+/// * `word` - The word, [`as_compared`]
+fn near_miss_bonus(hit: &RawHit, word: &str) -> i32 {
+    let typos = typo_budget(word);
+    let path = hit.looked_in(word);
+    let name = Path::new(path).file_name().and_then(|name| name.to_str());
+    if near_miss(word, name.unwrap_or(path), typos) {
+        let long = word.chars().count() >= NEAR_NAME_LETTERS;
+        // In the name as it is written, for the capitals that begin its
+        // words, spelled the way the word is looked for in it.
+        let begins_word = || {
+            let written = display_name(&hit.path);
+            let written = composed(&written);
+            let bare = plain(&written);
+            begins_near_miss(word, looked_in(word, &written, bare.as_deref()), typos)
+        };
+        if long && begins_word() { NEAR_NAME } else { 0 }
+    } else if is_subsequence(word, path) {
+        0
+    } else {
+        // The hit is listed for a near miss, which the name doesn't have.
+        -NEAR_FOLDER
+    }
+}
+
 /// Finder-style ranking on top of fff's score: words found in the file
 /// name beat words found only in its folders, and shallower paths win ties.
-fn rerank(hit: &RawHit, words: &[String]) -> i32 {
+/// A word of `misspelled`, the ones that may be misspelled, also counts by
+/// where a near miss of it is ([`near_miss_bonus`]).
+fn rerank(hit: &RawHit, words: &[String], misspelled: &[&String]) -> i32 {
     if words.is_empty() {
         return hit.score;
     }
@@ -2844,6 +3000,9 @@ fn rerank(hit: &RawHit, words: &[String]) -> i32 {
                 .is_some_and(|c| !c.is_alphanumeric());
             bonus += if boundary { 55 } else { 40 };
         } else {
+            if misspelled.contains(&word) {
+                bonus += near_miss_bonus(hit, word);
+            }
             continue;
         }
         in_name += 1;
@@ -3053,8 +3212,9 @@ fn folder_glob(rel: &Path) -> String {
 /// The words a search's names are held to, as [`Engine::search`] makes them
 /// of the search: its fuzzy words in lowercase, those of quoted phrases too,
 /// without the ones fff-search doesn't match by (see [`checked_words`]).
-/// Unless typos are allowed and no name has them all, a search lists only
-/// what has each in its path with the letters in order.
+/// A search lists what has each in its path with the letters in order. Where
+/// typos are allowed it also lists near misses of the words that may be
+/// misspelled ([`may_be_misspelled`]), which only its hits tell.
 fn strict_words(req: &SearchRequest) -> Vec<String> {
     let (query, _) = split_quoted(&req.query);
     let folders =
@@ -3925,6 +4085,47 @@ mod tests {
     }
 
     #[test]
+    fn a_near_miss_begins_a_word_where_one_begins_in_a_name() {
+        // Where the name starts, and after a character that is no letter or
+        // digit.
+        assert!(begins_near_miss("bduget", "budget.txt", 1));
+        assert!(begins_near_miss("bduget", "Budget.txt", 1));
+        assert!(begins_near_miss("bduget", "report-budget.txt", 1));
+        assert!(begins_near_miss("bduget", "my budget.txt", 1));
+        assert!(begins_near_miss("москав", "архив Москва.txt", 1));
+        assert!(begins_near_miss("taxreturn", "2026 Tax Return.pdf", 2));
+        // At a capital inside a word: after a lowercase letter, and before
+        // one where capitals lead up to it.
+        assert!(begins_near_miss("stroage", "NSTextStorage.rs", 1));
+        assert!(begins_near_miss("apis", "newAPI.md", 1));
+        assert!(begins_near_miss("praser", "HTMLParser.java", 1));
+        assert!(!begins_near_miss("mlpars", "HTMLParser.java", 1));
+        // In the middle of a word it is a near miss still, and begins none.
+        // A digit is part of a word, as it is for a word that a name has as
+        // typed.
+        for inside in ["mybudget.txt", "MYBUDGET.TXT", "2026budget.txt"] {
+            assert!(near_miss("bduget", &inside.to_lowercase(), 1), "{inside}");
+            assert!(!begins_near_miss("bduget", inside, 1), "{inside}");
+        }
+        assert!(!begins_near_miss("encenc", "frecency.rs", 1));
+        // The typo can be in the word's first letter: a wrong one, two that
+        // changed places, one too many, and one missing, which leaves the
+        // name's own first letter over.
+        assert!(begins_near_miss("nudget", "budget.txt", 1));
+        assert!(begins_near_miss("ubdget", "budget.txt", 1));
+        assert!(begins_near_miss("bbudget", "budget.txt", 1));
+        assert!(begins_near_miss("udget", "budget.txt", 1));
+        assert!(!begins_near_miss("udget", "budget.txt", 0));
+        assert!(!begins_near_miss("uget", "budget.txt", 1), "two typos");
+        // A letter that is two in lowercase is two letters to a word, and a
+        // word after it begins after both.
+        let istanbul = "My-\u{130}stanbul.txt";
+        assert!(begins_near_miss("i\u{307}stanbul", istanbul, 0));
+        assert!(begins_near_miss("by", "a\u{130}By.txt", 0));
+        assert!(!begins_near_miss("\u{307}by", "a\u{130}By.txt", 0));
+    }
+
+    #[test]
     fn only_the_words_fff_search_matches_by_are_checked() {
         let checked = |words: &[&str]| {
             let words: Vec<String> = words.iter().map(|word| word.to_string()).collect();
@@ -3937,6 +4138,63 @@ mod tests {
         assert_eq!(checked(&["a", "b"]), "a b", "nothing longer beside them");
         assert_eq!(checked(&["a"]), "a");
         assert_eq!(checked(&[]), "");
+    }
+
+    /// A hit as a search of `/a` makes it of a path inside that folder.
+    fn found(rel: &str, score: i32) -> RawHit {
+        let path = Path::new("/a").join(rel);
+        let rel = as_compared(rel);
+        RawHit {
+            bare: plain(&rel),
+            rel,
+            ..RawHit::file(path, 1, 1, None, score)
+        }
+    }
+
+    #[test]
+    fn a_word_that_no_result_has_as_typed_may_be_misspelled() {
+        let misspelled = |checked: &[&str], paths: &[&str]| -> Vec<String> {
+            let checked: Vec<String> = checked.iter().map(|word| word.to_string()).collect();
+            let hits: Vec<RawHit> = paths.iter().map(|rel| found(rel, 0)).collect();
+            let open = may_be_misspelled(&checked, &hits);
+            open.into_iter().cloned().collect()
+        };
+        let none = Vec::<String>::new();
+        let accident = "build/debug/target.txt";
+
+        // Letters that are in order along a path don't show a word was
+        // found, and a hit that hasn't even those shows nothing.
+        assert_eq!(misspelled(&["bduget"], &[accident]), ["bduget"]);
+        assert_eq!(
+            misspelled(&["bduget"], &["finance/budget.xlsx"]),
+            ["bduget"]
+        );
+        assert_eq!(misspelled(&["bduget"], &[]), ["bduget"]);
+        // Letters in a row do, in a name or in a folder's.
+        assert_eq!(misspelled(&["bduget"], &[accident, "old/bduget.txt"]), none);
+        assert_eq!(misspelled(&["main"], &["Domain/index.html"]), none);
+        // A word that can have no typo is never one of them.
+        assert_eq!(misspelled(&["mna"], &["many/a.bin"]), none);
+        assert_eq!(misspelled(&["mna"], &[]), none);
+        // A word is looked for where the check looks for it: one typed
+        // without accents is as typed in a name that has them, however the
+        // name stores them, and one typed with an accent only where the
+        // name has it too.
+        let stored_apart = "cv/Re\u{301}sume\u{301}.pdf";
+        assert_eq!(misspelled(&["resume"], &["cv/Résumé.pdf"]), none);
+        assert_eq!(misspelled(&["resume"], &[stored_apart]), none);
+        assert_eq!(misspelled(&["résumé"], &[stored_apart]), none);
+        assert_eq!(misspelled(&["résumé"], &["cv/resume.pdf"]), ["résumé"]);
+        // Each word is judged by itself, and only by a hit that has every
+        // word's letters in order. The second hit here has "main" in a row
+        // and no more than a near miss of "bduget".
+        let both = ["main", "bduget"];
+        assert_eq!(
+            misspelled(&both, &["main/build/debug/target.txt"]),
+            ["bduget"]
+        );
+        assert_eq!(misspelled(&both, &["src/main budget.rs"]), both);
+        assert_eq!(misspelled(&both, &["main/bduget.txt"]), none);
     }
 
     #[test]
@@ -3986,14 +4244,14 @@ mod tests {
         let words = vec!["project".to_string(), "atlas".to_string()];
         let deep = RawHit::file("/a/b/c/d/e/projected.h".into(), 1, 1, None, 78);
         let good = RawHit::file("/a/Project Atlas.txt".into(), 1, 1, None, 70);
-        assert!(rerank(&good, &words) > rerank(&deep, &words));
+        assert!(rerank(&good, &words, &[]) > rerank(&deep, &words, &[]));
     }
 
     #[test]
     fn words_that_spell_a_whole_name_rank_it_as_an_exact_match() {
         let score = |path: &str, words: &[&str]| {
             let words: Vec<String> = words.iter().map(|word| word.to_string()).collect();
-            rerank(&RawHit::file(path.into(), 1, 1, None, 70), &words)
+            rerank(&RawHit::file(path.into(), 1, 1, None, 70), &words, &[])
         };
         let words = ["tax", "return"];
         let whole = score("/a/Tax Return.pdf", &words);
@@ -4021,6 +4279,53 @@ mod tests {
             score("/a/invoice-9.pdf", &series),
             score("/a/invoice-100.pdf", &series)
         );
+    }
+
+    #[test]
+    fn a_near_miss_ranks_by_where_it_is_and_how_long_its_word_is() {
+        // What a word that may be misspelled adds to a hit's rank.
+        let adds = |rel: &str, word: &str| {
+            let words = vec![word.to_string()];
+            let hit = found(rel, 70);
+            rerank(&hit, &words, &[&words[0]]) - rerank(&hit, &words, &[])
+        };
+        // A near miss in the name counts for a hit, less than the word as
+        // typed would.
+        assert_eq!(adds("finance/budget.xlsx", "bduget"), NEAR_NAME);
+        assert_eq!(adds("finance/Budget.xlsx", "bduget"), NEAR_NAME);
+        assert_eq!(
+            adds("benchmark.rs", "benchmrk"),
+            NEAR_NAME,
+            "in order as well"
+        );
+        let typed = |rel: &str| rerank(&found(rel, 70), &["bduget".to_string()], &[]);
+        assert!(typed("a/my-bduget.txt") - typed("a/notes.txt") > NEAR_NAME);
+        // Unless the word is too short to tell by.
+        assert_eq!(adds("src/main.rs", "mian"), 0);
+        assert_eq!(adds("budget.txt", "budgt"), NEAR_NAME, "five letters");
+        assert_eq!(adds("nino.txt", "niño"), 0, "four letters, in five bytes");
+        // Or the near miss doesn't begin a word of the name.
+        assert_eq!(adds("my-budget.xlsx", "bduget"), NEAR_NAME);
+        assert_eq!(adds("MyBudget.xlsx", "bduget"), NEAR_NAME);
+        assert_eq!(adds("mybudget.xlsx", "bduget"), 0);
+        // One that is only in a folder's name counts against it.
+        assert_eq!(adds("Many/a.bin", "mian"), -NEAR_FOLDER);
+        assert_eq!(adds("budget/a.bin", "bduget"), -NEAR_FOLDER);
+        assert_eq!(adds("senor/a.txt", "señor"), -NEAR_FOLDER);
+        // Letters in order along the path count neither way.
+        assert_eq!(adds("build/debug/target.txt", "bduget"), 0);
+        assert_eq!(adds("media/plan.txt", "mian"), 0);
+        // A word typed without accents has its near misses where it is
+        // looked for, in a name that has them, however the name stores
+        // them.
+        assert_eq!(adds("Björk.mp3", "bjrok"), NEAR_NAME);
+        assert_eq!(adds("Live/Bjo\u{308}rkGudmunds.mp3", "bjrok"), NEAR_NAME);
+        assert_eq!(adds("Björk/a.mp3", "bjrok"), -NEAR_FOLDER);
+        // One typed with an accent has them where the name has the accent
+        // too.
+        assert_eq!(adds("Live/Bjo\u{308}rkGudmunds.mp3", "bjökr"), NEAR_NAME);
+        // A word that is in the name as typed has that to rank by.
+        assert_eq!(adds("a/my-bduget.txt", "bduget"), 0);
     }
 
     #[test]
@@ -4611,8 +4916,8 @@ mod tests {
             }
         }
 
-        // The exception: a near miss with a typo, which a search lists when
-        // no name has its words.
+        // The exception: a near miss with a typo, which a search lists for a
+        // word that no result has as typed.
         let near = search("atlsa", any, None);
         let hits = engine.search(&near).hits;
         assert!(!hits.is_empty(), "typos are allowed");
@@ -5065,6 +5370,149 @@ mod tests {
         for query in ["bduget", "budjet", "budgget", "sttaemnet", "rpt bduget"] {
             assert_eq!(names(query), none, "{query}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_typo_finds_what_was_meant_beside_letters_that_are_only_in_order() {
+        let dir = std::env::temp_dir().join(format!("fff-beside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for file in [
+            "finance/budget.xlsx",
+            // Between their folders and their names, these have the letters
+            // of a misspelled word in order by accident: b, d, u, g, e, t
+            // and b, u, d, g, e, t, t in the first, b, u, d, j, e, t in the
+            // second, and m, i, a, n in the third.
+            "build/debug/target.txt",
+            "build/jobs/secrets.txt",
+            "media/plan.txt",
+            "src/main.rs",
+            "Many/a.bin",
+            "Many/b.bin",
+            "notes.txt",
+            "drafts/ntoes.md",
+        ] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let find = |query: &str, files_only: bool| {
+            let request = SearchRequest {
+                query: query.into(),
+                files_only,
+                limit: 50,
+                ..Default::default()
+            };
+            let hits = engine.search(&request).hits;
+            hits.into_iter().map(|h| h.entry.name).collect::<Vec<_>>()
+        };
+        let names = |query: &str| find(query, true);
+
+        // The name that was meant is listed, ahead of the accident.
+        let meant = ["budget.xlsx", "target.txt"];
+        assert_eq!(names("bduget"), meant, "two letters changed places");
+        assert_eq!(names("budgett"), meant, "a letter too many");
+        assert_eq!(
+            names("budjet"),
+            ["budget.xlsx", "secrets.txt"],
+            "a wrong one"
+        );
+        // A word that lacks a letter is in the name with its letters in
+        // order, which takes no typo to find.
+        assert_eq!(names("budgt"), meant, "a letter missing");
+        // One typo in four letters is too little to rank a name ahead of
+        // the accident by. A near miss in a name still comes before the
+        // ones in a folder's name.
+        let mut mian = names("mian");
+        assert_eq!(mian.len(), 4, "{mian:?}");
+        mian[2..].sort();
+        assert_eq!(mian, ["plan.txt", "main.rs", "a.bin", "b.bin"]);
+        // The window's search, which lists folders too. The folder has the
+        // near miss in its own name, and what is in it still comes last.
+        assert_eq!(find("bduget", false), meant);
+        let mut mian = find("mian", false);
+        assert_eq!(mian.len(), 5, "{mian:?}");
+        mian[..3].sort();
+        mian[3..].sort();
+        assert_eq!(mian, ["Many", "main.rs", "plan.txt", "a.bin", "b.bin"]);
+        // A word of three letters has no near misses: only the first file
+        // in Many has an m, an n and an a in order.
+        assert_eq!(names("mna"), ["a.bin"]);
+
+        // A word that a result has as typed is taken as spelled right, and
+        // brings no near misses, whichever of two names it is.
+        assert_eq!(names("budget"), meant);
+        assert_eq!(names("notes"), ["notes.txt"]);
+        assert_eq!(names("ntoes"), ["ntoes.md"]);
+
+        let mut settings = engine.search_settings();
+        settings.typos = false;
+        engine.set_search_settings(settings);
+        assert_eq!(names("bduget"), ["target.txt"]);
+        assert_eq!(names("budjet"), ["secrets.txt"]);
+        assert_eq!(names("mian"), ["plan.txt"]);
+        assert_eq!(names("notes"), ["notes.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_word_that_no_result_has_as_typed_brings_near_misses() {
+        let dir = std::env::temp_dir().join(format!("fff-one-word-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for file in [
+            // "reports" as typed, and by accident the letters of "bduget"
+            // in order.
+            "reports/build/debug/target.txt",
+            // "reports" as typed, and a near miss of "bduget".
+            "reports/budget.xlsx",
+            // A near miss of each.
+            "reprots/budget.csv",
+        ] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let names = |query: &str| {
+            let request = SearchRequest {
+                query: query.into(),
+                files_only: true,
+                limit: 50,
+                ..Default::default()
+            };
+            let hits = engine.search(&request).hits;
+            let mut names: Vec<String> = hits.into_iter().map(|h| h.entry.name).collect();
+            names.sort();
+            names
+        };
+
+        // The first file shows that "reports" is spelled right, so only
+        // "bduget" may be a near miss.
+        assert_eq!(names("reports bduget"), ["budget.xlsx", "target.txt"]);
+        // Nothing has both of these with their letters in order, so either
+        // may be one.
+        let all = ["budget.csv", "budget.xlsx", "target.txt"];
+        assert_eq!(names("reprots bduget"), all);
+
+        let mut settings = engine.search_settings();
+        settings.typos = false;
+        engine.set_search_settings(settings);
+        assert_eq!(names("reports bduget"), ["target.txt"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6373,7 +6821,7 @@ mod tests {
             hits.push(RawHit::file(file.into(), 1, 0, None, 0));
         }
         for hit in &mut hits {
-            hit.score = rerank(hit, &words);
+            hit.score = rerank(hit, &words, &[]);
         }
         hits.sort_by(by_rank);
         let names: Vec<String> = hits.iter().map(|h| display_name(&h.path)).collect();
