@@ -1796,6 +1796,226 @@ fn a_new_folder_is_selected_in_the_column_view_too(cx: &mut TestAppContext) {
     assert_eq!(ui.selected(), ["Archive"]);
 }
 
+/// The ID of the header of the group named `label`.
+fn group_header(label: &str) -> gpui_kit::SharedString {
+    gpui_kit::SharedString::from(format!("group-{label}"))
+}
+
+/// Collapse every group the view shows, and say which they were.
+fn collapse_every_group(ui: &mut Ui) -> Vec<String> {
+    let labels = ui.read(|f| f.group_headers());
+    for label in &labels {
+        ui.click(group_header(label));
+    }
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    labels
+}
+
+#[gpui_kit::test]
+fn a_new_folder_opens_its_collapsed_group_to_be_named(cx: &mut TestAppContext) {
+    use fffinder_core::GroupKey;
+    let fx = Fixture::new("rename-new-collapsed");
+    std::fs::create_dir(fx.path("Empty")).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::Kind), cx));
+    let labels = collapse_every_group(&mut ui);
+
+    // The name is typed in the new folder's row, so the group it falls in
+    // opens for it. The other groups stay as they were.
+    ui.press(&cmd("shift-n"));
+    assert_eq!(ui.names(), ["Empty", "Projects", "untitled folder"]);
+    assert_eq!(ui.read(|f| f.group_headers()), labels);
+    assert!(ui.exists("rename-input"), "the name's field is in its row");
+    assert_eq!(ui.selected(), ["untitled folder"]);
+    ui.type_text("Archive");
+    ui.press("enter");
+    assert!(fx.path("Archive").is_dir(), "the field had the keyboard");
+    assert_eq!(ui.selected(), ["Archive"]);
+    assert!(ui.files_focused(), "and the files have it afterward");
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Empty"], "the arrow keys work");
+
+    // The group stays open, as after a click on its header, and a tab's
+    // groups are the same from folder to folder.
+    ui.go_to(&fx.path("Projects"));
+    assert_eq!(ui.names(), ["atlas"]);
+
+    // Collapsed again, it leaves an empty folder with its message, whose
+    // menu makes a folder too.
+    ui.click(group_header("Folder"));
+    ui.go_to(&fx.path("Empty"));
+    ui.right_click("message-title");
+    ui.click_menu_item("New Folder");
+    assert_eq!(ui.names(), ["untitled folder"]);
+    assert!(ui.exists("rename-input"));
+    ui.type_text("Inner");
+    ui.press("enter");
+    assert!(fx.path("Empty/Inner").is_dir());
+    assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn a_new_folder_from_a_menu_opens_its_collapsed_group_in_the_icon_view(cx: &mut TestAppContext) {
+    use fffinder_core::GroupKey;
+    let fx = Fixture::new("rename-new-collapsed-icons");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    ui.click("view-icons");
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::Kind), cx));
+    ui.click(group_header("Folder"));
+    assert_eq!(ui.names(), ["Budget.csv", "Roadmap.md", "notes.txt"]);
+
+    // From the empty-space menu, under the tiles.
+    let area = ui.snapshot("content").bounds();
+    ui.right_click_point(area.origin + point(px(300.), area.size.height - px(20.)));
+    ui.click_menu_item("New Folder");
+    assert!(ui.exists("rename-input"), "the name's field is in its tile");
+    assert_eq!(ui.selected(), ["untitled folder"]);
+    ui.type_text("Icons");
+    ui.press("enter");
+    assert!(fx.path("Icons").is_dir());
+    assert_eq!(ui.selected(), ["Icons"]);
+    assert!(ui.files_focused());
+
+    // And from the Actions menu. Escape leaves the folder the name it has.
+    ui.click(group_header("Folder"));
+    ui.click("actions");
+    ui.click_menu_item("New Folder");
+    assert!(ui.exists("rename-input"));
+    ui.press("escape");
+    assert!(!ui.exists("rename-input"));
+    assert!(fx.path("untitled folder").is_dir());
+    assert_eq!(ui.selected(), ["untitled folder"]);
+    assert!(ui.files_focused());
+    ui.press("left");
+    assert_eq!(ui.selected(), ["Projects"], "the arrow keys work");
+}
+
+#[gpui_kit::test]
+fn a_new_folder_keeps_its_field_when_the_folder_is_read_again(cx: &mut TestAppContext) {
+    use fffinder_core::GroupKey;
+    let fx = Fixture::new("rename-new-last-opened");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    ui.click("view-list");
+    // When an item was last opened is read along with a folder's listing,
+    // and New Folder shows its folder before the listing is read again.
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::LastOpened), cx));
+    let labels = collapse_every_group(&mut ui);
+
+    // The folder is in the same group before and after, so the group that
+    // opened for it is the one it stays in.
+    ui.press_without_settling(&cmd("shift-n"));
+    assert_eq!(ui.read(|f| f.group_headers()), labels);
+    assert!(ui.exists("rename-input"));
+    ui.settle();
+    assert_eq!(ui.read(|f| f.group_headers()), labels);
+    assert!(ui.exists("rename-input"), "also once the folder is read");
+    ui.type_text("Archive");
+    ui.press("enter");
+    assert!(fx.path("Archive").is_dir());
+}
+
+#[gpui_kit::test]
+fn a_new_folder_opens_the_group_its_row_falls_in(cx: &mut TestAppContext) {
+    use fffinder_core::GroupKey;
+    let fx = Fixture::new("rename-new-sized");
+    std::fs::create_dir(fx.path("untitled folder")).unwrap();
+    std::fs::write(fx.path("untitled folder/old.txt"), "old").unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::Size), cx));
+
+    // A folder's size comes from the index, which here still counts the
+    // file of a folder that has gone. A new folder that takes its name is
+    // listed with that size, among the items of that size and not among
+    // the folders without one.
+    std::fs::remove_dir_all(fx.path("untitled folder")).unwrap();
+    ui.update(|f, _, cx| f.reload_quietly(cx));
+    assert_eq!(
+        ui.names(),
+        ["Budget.csv", "notes.txt", "Projects", "Roadmap.md"]
+    );
+    let labels = collapse_every_group(&mut ui);
+    assert_eq!(labels, ["Tiny (under 100 KB)"]);
+
+    ui.press(&cmd("shift-n"));
+    assert_eq!(ui.read(|f| f.group_headers()), labels);
+    assert!(ui.exists("rename-input"), "its group opened for it");
+    assert_eq!(ui.selected(), ["untitled folder"]);
+}
+
+#[gpui_kit::test]
+fn a_new_folder_in_a_view_without_groups_leaves_them_collapsed(cx: &mut TestAppContext) {
+    use fffinder_core::GroupKey;
+    let fx = Fixture::new("rename-new-no-groups");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::Kind), cx));
+    ui.click(group_header("Folder"));
+
+    // The column view has no groups, so nothing hides the new folder's row
+    // there, and the list's groups are left as they were.
+    ui.click("view-columns");
+    ui.press(&cmd("shift-n"));
+    assert!(ui.exists("rename-input"));
+    ui.type_text("Archive");
+    ui.press("enter");
+    assert!(fx.path("Archive").is_dir());
+    ui.click("view-list");
+    assert_eq!(ui.names(), ["Budget.csv", "Roadmap.md", "notes.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_new_folder_is_named_where_a_long_folder_lists_it(cx: &mut TestAppContext) {
+    let fx = long_folder("rename-new-long");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    ui.click("view-list");
+
+    // "untitled folder" sorts after the 200 items, far below the rows on
+    // screen, and its name's field only exists once its row is drawn.
+    ui.press(&cmd("shift-n"));
+    assert!(ui.exists("rename-input"), "the list scrolled to its row");
+    ui.type_text("zz list");
+    ui.press("enter");
+    assert!(fx.path("zz list").is_dir());
+
+    ui.click("view-columns");
+    ui.press(&cmd("shift-n"));
+    assert!(ui.exists("rename-input"), "and so did the column");
+    ui.type_text("zz columns");
+    ui.press("enter");
+    assert!(fx.path("zz columns").is_dir());
+}
+
+#[gpui_kit::test]
+fn the_keys_work_after_a_new_file_that_a_collapsed_group_hides(cx: &mut TestAppContext) {
+    use fffinder_core::GroupKey;
+    let fx = Fixture::new("new-file-collapsed");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::Kind), cx));
+    ui.click(group_header("Plain Text"));
+
+    // A new file is named in a dialog before it is made, so no field waits
+    // for a row to show in.
+    ui.press(&cmd("alt-n"));
+    assert!(ui.dialog_open());
+    ui.type_text("fresh");
+    ui.press("enter");
+    assert!(fx.path("fresh.txt").exists());
+    assert!(!ui.dialog_open());
+    assert!(ui.files_focused());
+    ui.press("down");
+    assert_eq!(ui.selected(), ["Budget.csv"], "the arrow keys work");
+}
+
 // ----- the preview pane -----------------------------------------------------------------
 
 #[gpui_kit::test]

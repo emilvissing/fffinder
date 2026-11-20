@@ -6,8 +6,8 @@
 use super::{Finder, Row};
 use crate::actions::ToggleGroups;
 use crate::theme::ui;
-use fffinder_core::ViewMode;
 use fffinder_core::grouping::{self, GroupKey};
+use fffinder_core::{FileEntry, ViewMode};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
 use gpui_kit::*;
@@ -197,6 +197,21 @@ impl Finder {
             self.collapsed_groups.insert(label.to_string());
         }
         self.rebuild_rows(cx);
+    }
+
+    /// Open the group `entry` falls in, as a click on its header does, so
+    /// that the rows made next have the item. A view without groups hides
+    /// none.
+    pub(super) fn open_group_of(&mut self, entry: &FileEntry) {
+        if !self.grouping_active() {
+            return;
+        }
+        // As a row has it: a folder's size from the index can be what
+        // decides its group.
+        let mut entry = entry.clone();
+        self.decorate(&mut entry);
+        let group = grouping::group_of(&entry, self.config.group_by, grouping::today());
+        self.collapsed_groups.remove(&group.label);
     }
 
     /// The items' ranges the icon view lays out: one per group, or all.

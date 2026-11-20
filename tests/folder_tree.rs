@@ -357,6 +357,50 @@ fn a_rename_in_the_tree_leaves_a_columns_selection_alone(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn a_folder_named_in_the_tree_is_held_to_the_filter_in_the_files(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("tree-name-filtered");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    ui.cx.update(|cx| cx.set_global(Checked(Access::Granted)));
+    let dir = fx.dir.clone();
+    ui.update(|f, _, cx| {
+        f.add_favorite(dir, cx);
+        f.set_sidebar_mode(SidebarMode::Tree, cx);
+        f.set_filter("name =~ 'notes'".into(), cx);
+    });
+    ui.activate();
+    ui.click("view-list");
+    assert_eq!(ui.names(), ["notes.txt"]);
+
+    // The folder is made in the folder the window shows, and named in the
+    // tree. The files have no field of their own to keep a row for, so they
+    // list what the filter keeps and no more.
+    ui.right_click(("fav", favorite_ix(&ui, &fx)));
+    ui.click_menu_item("New Folder");
+    assert!(fx.path("untitled folder").is_dir());
+    assert!(
+        ui.exists("rename-input"),
+        "it's named in its row of the tree"
+    );
+    assert_eq!(ui.names(), ["notes.txt"]);
+    ui.type_text("Gamma");
+    ui.press("enter");
+    assert!(fx.path("Gamma").is_dir());
+    assert_eq!(ui.names(), ["notes.txt"]);
+    assert!(tree_focused(&mut ui), "the keyboard is back in the tree");
+}
+
+#[gpui_kit::test]
 fn moving_the_folder_shown_takes_the_window_along(cx: &mut TestAppContext) {
     let fx = Fixture::new("tree-move-shown");
     std::fs::create_dir_all(fx.path("Archive/inner")).unwrap();

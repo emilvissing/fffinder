@@ -348,7 +348,9 @@ impl Finder {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let bar = theme.status_bar;
-        let count = self.rows.len();
+        // The items of collapsed groups count: they are hidden, not gone,
+        // and each header goes on saying how many it holds.
+        let count = self.listed_len;
         let selected = self.selection.len();
         let filtered = !self.filter_text().is_empty() && self.filter_error().is_none();
         // Searches stop at the result limit; say so rather than imply a total.

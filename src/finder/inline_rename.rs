@@ -49,7 +49,13 @@ impl Finder {
             self.open_rename_dialog(path, window, cx);
             return;
         }
-        // The field only exists once its row is on screen.
+        self.scroll_to_item(&path);
+        self.start_rename_field(path, false, window, cx);
+    }
+
+    /// Scroll the views to the item at `path`: the field for its name only
+    /// exists once its row is on screen.
+    fn scroll_to_item(&self, path: &Path) {
         if let Some(ix) = self.rows.iter().position(|row| row.entry.path == path) {
             self.scroll_to(ix);
         }
@@ -58,7 +64,6 @@ impl Finder {
                 pane.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
             }
         }
-        self.start_rename_field(path, false, window, cx);
     }
 
     /// Start renaming the folder at `path` in its row of the sidebar's tree.
@@ -114,7 +119,7 @@ impl Finder {
         // Dropping it first means the field losing focus doesn't finish it.
         if let Some(renaming) = self.renaming.take() {
             self.keyboard_back(renaming.in_sidebar, window, cx);
-            cx.notify();
+            self.rename_ended(&renaming, cx);
         }
     }
 
@@ -195,6 +200,23 @@ impl Finder {
     ) {
         if renaming.input.read(cx).focus_handle(cx).is_focused(window) {
             self.keyboard_back(renaming.in_sidebar, window, cx);
+        }
+        self.rename_ended(renaming, cx);
+    }
+
+    /// The edit is over, however it ended. A filter left the item's row
+    /// alone while its name was edited in the views (see `apply_filter_to`),
+    /// and from here on the row shows only if the item passes.
+    fn rename_ended(&mut self, renaming: &InlineRename, cx: &mut Context<Self>) {
+        if !renaming.in_sidebar && !self.filter.is_empty() {
+            // Not before the press or key that ended the edit has been
+            // dealt with. A press on another row ends the edit on its way
+            // to that row, which acts on the item at its place among the
+            // rows as they were drawn. With this row gone from above it,
+            // the press would select the item after the one it landed on,
+            // and a double-click would open it.
+            let finder = cx.entity();
+            cx.defer(move |cx| finder.update(cx, |this, cx| this.rebuild_rows(cx)));
         }
         cx.notify();
     }
@@ -282,16 +304,36 @@ impl Finder {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(entry) = FileEntry::from_path(&path) {
+        if let Some(mut entry) = FileEntry::from_path(&path) {
+            // As the folder's listing will have it, so that the item is in
+            // its group and its place from the start.
+            if self.wants_last_opened() {
+                entry.read_last_opened();
+            }
+            // The name is typed in the item's row, and a collapsed group
+            // would leave that row out.
+            self.open_group_of(&entry);
             self.listing.push(entry);
-            self.rebuild_rows(cx);
-            if let Some(ix) = self.rows.iter().position(|row| row.entry.path == path) {
+        }
+        // The field first, then the rows: a filter leaves alone the row of
+        // a name being edited, and would hold a new item against an answer
+        // that was made without it.
+        self.begin_rename(path.clone(), window, cx);
+        self.rebuild_rows(cx);
+        match self.rows.iter().position(|row| row.entry.path == path) {
+            Some(ix) => {
                 self.selection.select_only(ix);
                 self.select_row_in_columns(ix, cx);
                 self.selection_changed(cx);
+                // The row wasn't there to scroll to when the field was made.
+                if self.renaming.is_some() {
+                    self.scroll_to_item(&path);
+                }
             }
+            // No row would draw the field, and keys typed into a field that
+            // isn't drawn go nowhere.
+            None => self.cancel_rename(window, cx),
         }
-        self.begin_rename(path, window, cx);
         self.load_listing(Vec::new(), true, cx);
     }
 }

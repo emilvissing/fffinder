@@ -116,7 +116,9 @@ impl Finder {
     }
 
     /// Keep only the rows the filter selected, starting a new run when the
-    /// rows changed. Rows stay as they are until the first run finishes.
+    /// rows changed. Rows stay as they are until the first run finishes. The
+    /// row of a name being edited in the views stays whatever the filter
+    /// selected.
     pub(super) fn apply_filter_to(&mut self, rows: &mut Vec<Row>, cx: &mut Context<Self>) {
         if self.filter.is_empty() {
             return;
@@ -134,7 +136,16 @@ impl Finder {
             self.start_filter(entries, cx);
         }
         if let Some(keep) = &self.filter_keep {
-            rows.retain(|r| keep.contains(&r.entry.path));
+            // A new item is named in its row before the filter can have
+            // answered for it, and the answer may be that it doesn't pass.
+            // Taking the row away would take the name's field with it, so
+            // the item is held to the filter once its name is given.
+            let named = self
+                .renaming
+                .as_ref()
+                .filter(|renaming| !renaming.in_sidebar)
+                .map(|renaming| renaming.path.as_path());
+            rows.retain(|r| keep.contains(&r.entry.path) || named == Some(r.entry.path.as_path()));
         }
     }
 

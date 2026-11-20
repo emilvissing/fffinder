@@ -152,8 +152,8 @@ Folder crumbs also work like folders in a view. Drop items on one to move them t
 
 The status bar shows:
 
-- How many items are shown, or "N of M selected" with what they add up to, and in a folder how much space is left on its volume: "12 items, 214 GB available", or "2 of 12 selected (1.4 MB), 214 GB available". Folders count when their sizes are known.
-- With a filter on, "N of M items pass the filter".
+- How many items are listed, or "N of M selected" with what they add up to, and in a folder how much space is left on its volume: "12 items, 214 GB available", or "2 of 12 selected (1.4 MB), 214 GB available". Folders count when their sizes are known. The number of items includes those in collapsed [groups](#groups), which are hidden, not gone.
+- With a filter on, "N of M items pass the filter". N includes the items that pass in collapsed groups.
 - A `+` after the count, as in "500+ items", when a search stopped at the result limit and more items match than it lists. A search that found exactly as many as the limit has no `+`. Rest the mouse on the count to read what to do about it.
 - The time the search took, in milliseconds.
 - A spinner while a search or filter runs.
@@ -326,7 +326,7 @@ The list and icon views can show items in groups, as Finder's Use Groups does. C
 
 Items keep the current sort within their group. In the list view, an open folder's items stay under it, in its group.
 
-Each group has a header with its name and how many items it holds. Click the header to collapse the group, and click it again to expand it. A collapsed group's items are hidden: the arrow keys, Shift+click ranges, and Select All skip them. Each tab remembers which groups are collapsed until you choose another key, so a group collapsed in one folder is collapsed in the next. When every group is collapsed, only the headers show. In the icon view, each group starts a new row, and Up and Down move to the same column in the next group.
+Each group has a header with its name and how many items it holds. Click the header to collapse the group, and click it again to expand it. A collapsed group's items are hidden: the arrow keys, Shift+click ranges, and Select All skip them. The status bar goes on counting them. Each tab remembers which groups are collapsed until you choose another key, so a group collapsed in one folder is collapsed in the next. When every group is collapsed, only the headers show. New Folder opens the group that its folder falls in, so that the folder can be named there, and the group stays open afterward. In the icon view, each group starts a new row, and Up and Down move to the same column in the next group.
 
 ## Searching
 
@@ -499,7 +499,7 @@ The apps come from Launch Services on macOS, and on Linux from the `.desktop` en
 
 | Command | What it does |
 | --- | --- |
-| New Folder (Cmd+Shift+N) | Creates "untitled folder" (or "untitled folder 2", …) in the current folder and starts naming it in place. |
+| New Folder (Cmd+Shift+N) | Creates "untitled folder" (or "untitled folder 2", …) in the current folder and starts naming it in place. A collapsed [group](#groups) that the folder falls in opens for it. With a [filter](#filters-and-smart-folders) on, the folder shows while you name it whether it passes or not. When the edit ends, it is filtered like any other item. |
 | New File… (Cmd+Alt+N) | Asks for a name ("untitled.txt", with the part before the extension selected) and makes an empty file with it in the current folder. A taken or invalid name is refused. |
 | Duplicate (Cmd+D) | Copies each selected item beside itself as "name copy.ext", then "name copy 2.ext", and so on. |
 | Make Alias (macOS), Create Shortcut (Windows) | Makes a Finder alias to each selected item beside it, named "name alias", which Finder and other apps follow to the original even after the original moves. On Windows it makes an Explorer shortcut, "name - Shortcut.lnk". Linux has no aliases; use Make Symbolic Link. |
@@ -658,7 +658,7 @@ Or start with `|` to use a whole pipeline, which must keep the `path` column:
 | sort-by size --reverse | first 20
 ```
 
-The filter runs 400 ms after you stop typing, or right away when you press Return. The status bar counts how many items pass. When none does, the file area says so and offers **Remove Filter**. Errors show in red below the bar. The close button removes the filter, and so does Cmd+Alt+F. Escape empties the field, which turns the filter off, and Escape in an empty field gives the keyboard to the files. The bar stays open either way.
+The filter runs 400 ms after you stop typing, or right away when you press Return. The status bar counts how many items pass. When none does, the file area says so and offers **Remove Filter**. An item whose name is being edited in place stays listed until the edit ends, so a new folder can be named even when it won't pass. Errors show in red below the bar. The close button removes the filter, and so does Cmd+Alt+F. Escape empties the field, which turns the filter off, and Escape in an empty field gives the keyboard to the files. The bar stays open either way.
 
 A Smart Folder is a saved search. While searching, **Save** in the scope bar opens "Save Smart Folder", and so do Cmd+S, "Save Search…" in the Actions menu, and "Save Search…" in the Edit menu. With no search showing, Cmd+S says there is nothing to save yet, and the Actions menu's item is off. The dialog says what it saves: the words, Name or Contents, the scope folder or This Computer, a Name search's kind unless it's Any Kind, and the filter when one is on. Name it, and it's saved in the sidebar under Smart Folders. A name that a Smart Folder already has replaces that one, in the same place in the sidebar. The dialog says so before you save, and its button reads Replace. With no name, the button is off.
 

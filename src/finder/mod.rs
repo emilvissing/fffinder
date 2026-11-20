@@ -605,6 +605,9 @@ pub struct Finder {
     filtering: bool,
     /// Rows before the filter, for the status bar.
     unfiltered_len: usize,
+    /// Rows after the filter, those of collapsed groups among them: the
+    /// items listed, shown or not, for the status bar.
+    listed_len: usize,
     /// What the Smart Folder that's open searches with, and what the window
     /// searched with before it (see filter.rs).
     smart_folder_setup: Option<filter::SmartFolderSetup>,
@@ -863,6 +866,7 @@ impl Finder {
             filter_error: None,
             filtering: false,
             unfiltered_len: 0,
+            listed_len: 0,
             smart_folder_setup: None,
             terminals: None,
             terminals_task: Task::ready(()),
@@ -1834,6 +1838,7 @@ impl Finder {
         }
         self.unfiltered_len = rows.len();
         self.apply_filter_to(&mut rows, cx);
+        self.listed_len = rows.len();
         if let Some(colors) = &self.ls_colors {
             for row in &mut rows {
                 row.name_style = crate::nu_env::name_style(colors, &row.entry);

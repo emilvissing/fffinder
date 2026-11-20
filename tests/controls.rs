@@ -4520,6 +4520,216 @@ fn an_item_in_a_collapsed_group_isnt_hidden_by_the_filter(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+fn a_new_folder_is_named_in_its_row_whatever_the_filter_keeps(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-new-folder");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    ui.activate();
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_filter("name =~ 'notes'".into(), cx));
+    assert_eq!(ui.names(), ["notes.txt"]);
+
+    // The filter has yet to answer for a folder made this instant, and the
+    // answer will be that this one doesn't pass. Its row shows all the same
+    // for as long as its name is typed there.
+    ui.press_without_settling(&cmd("shift-n"));
+    assert!(ui.read(|f| f.is_filtering()), "the filter's run is out");
+    assert_eq!(ui.names(), ["notes.txt", "untitled folder"]);
+    assert!(ui.exists("rename-input"), "the name's field is in its row");
+    ui.settle();
+    assert!(!ui.read(|f| f.is_filtering()), "and has answered");
+    assert_eq!(ui.names(), ["notes.txt", "untitled folder"]);
+    assert_eq!(ui.selected(), ["untitled folder"]);
+    assert!(ui.exists("rename-input"));
+
+    // With its name given, the folder is held to the filter like any item.
+    ui.type_text("Archive");
+    ui.press("enter");
+    assert!(fx.path("Archive").is_dir(), "the field had the keyboard");
+    assert_eq!(ui.names(), ["notes.txt"]);
+    assert!(ui.files_focused(), "and the files have it afterward");
+    ui.press("down");
+    assert_eq!(ui.selected(), ["notes.txt"], "the arrow keys work");
+
+    // So is one that Escape leaves with the name it was made with.
+    ui.press(&cmd("shift-n"));
+    assert!(ui.exists("rename-input"));
+    ui.press("escape");
+    assert!(fx.path("untitled folder").is_dir());
+    assert_eq!(ui.names(), ["notes.txt"]);
+    assert!(ui.files_focused());
+
+    // A name that passes keeps its folder in the list.
+    ui.press(&cmd("shift-n"));
+    ui.type_text("more notes");
+    ui.press("enter");
+    assert_eq!(ui.names(), ["more notes", "notes.txt"]);
+}
+
+#[gpui_kit::test]
+fn a_new_folder_is_named_under_a_filter_in_the_column_view_and_the_gallery(
+    cx: &mut TestAppContext,
+) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-new-folder-views");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    ui.activate();
+    ui.click("view-columns");
+    ui.update(|f, _, cx| f.set_filter("name =~ 'notes'".into(), cx));
+    assert_eq!(ui.read(|f| f.column_names_for_test()), [["notes.txt"]]);
+
+    // The first column lists what the filter keeps, and the new folder
+    // while it is being named. The folder is selected there, so its own
+    // column is open beside it.
+    ui.press(&cmd("shift-n"));
+    assert_eq!(
+        ui.read(|f| f.column_names_for_test()),
+        [vec!["notes.txt", "untitled folder"], vec![]]
+    );
+    assert!(ui.exists("rename-input"));
+    ui.type_text("Columns");
+    ui.press("enter");
+    assert!(fx.path("Columns").is_dir());
+    // Held to the filter, the folder leaves the first column, and its own
+    // column goes with it.
+    assert_eq!(ui.read(|f| f.column_names_for_test()), [["notes.txt"]]);
+    assert!(ui.files_focused());
+
+    // The gallery asks for the name in a dialog, which needs no row.
+    ui.click("view-gallery");
+    ui.press(&cmd("shift-n"));
+    assert!(ui.dialog_open());
+    assert_eq!(ui.names(), ["notes.txt"]);
+    ui.type_text("Gallery");
+    ui.press("enter");
+    assert!(fx.path("Gallery").is_dir());
+    assert!(!ui.dialog_open());
+    assert!(ui.files_focused());
+}
+
+#[gpui_kit::test]
+fn a_name_being_edited_keeps_its_row_when_the_filter_answers_again(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-rename-answered");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    ui.activate();
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_filter("size > 7b".into(), cx));
+    assert_eq!(ui.names(), ["Budget.csv", "notes.txt", "Roadmap.md"]);
+    ui.select("notes.txt");
+    ui.press("f2");
+    ui.type_text("repo");
+
+    // Another program empties the file and adds one beside it. Once the
+    // folder is read again, the filter's answer for it leaves the file
+    // out. Its row stays for the rest of its name.
+    std::fs::write(fx.path("notes.txt"), "").unwrap();
+    std::fs::write(fx.path("added.txt"), "more than seven bytes").unwrap();
+    ui.update(|f, _, cx| f.reload_quietly(cx));
+    assert_eq!(
+        ui.names(),
+        ["added.txt", "Budget.csv", "notes.txt", "Roadmap.md"]
+    );
+    assert!(ui.exists("rename-input"), "the name is still being edited");
+    ui.type_text("rt");
+    ui.press("enter");
+    assert!(fx.path("report.txt").exists(), "all of what was typed");
+    assert_eq!(ui.names(), ["added.txt", "Budget.csv", "Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn a_click_that_ends_a_name_under_a_filter_selects_the_item_clicked(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-rename-click");
+    for name in ["zeta note.txt", "zulu note.txt", "zzz note.txt"] {
+        std::fs::write(fx.path(name), "z").unwrap();
+    }
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    ui.activate();
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_filter("name =~ 'note'".into(), cx));
+    let kept = [
+        "notes.txt",
+        "zeta note.txt",
+        "zulu note.txt",
+        "zzz note.txt",
+    ];
+    assert_eq!(ui.names(), kept);
+
+    // The new folder doesn't pass, and it is named in a row above the one
+    // that is clicked to end the edit. Its row goes then, and the items
+    // under it move up. The click selects the item it landed on, not the
+    // one that takes its place.
+    ui.press(&cmd("shift-n"));
+    assert_eq!(ui.names()[1], "untitled folder");
+    ui.type_text("Archive");
+    ui.click_without_settling(item_id("row", &fx.path("zeta note.txt")));
+    assert_eq!(ui.selected(), ["zeta note.txt"]);
+    assert_eq!(ui.names(), kept, "the folder's row has gone");
+    ui.settle();
+    assert!(fx.path("Archive").is_dir(), "the click kept the name");
+    assert_eq!(ui.selected(), ["zeta note.txt"]);
+    assert!(ui.files_focused());
+
+    // A search's results are held to the filter too, and the row of an
+    // item renamed among them goes until the filter has answered for its
+    // new name. A click that ends the edit there selects the item it
+    // landed on as well.
+    ui.press(&cmd("f"));
+    ui.type_text("note");
+    let found = ui.names();
+    assert_eq!(found.len(), 4, "{found:?}");
+    ui.select(&found[0]);
+    ui.press("f2");
+    ui.type_text("first note");
+    ui.click_without_settling(item_id("row", &fx.path(&found[1])));
+    assert_eq!(ui.selected(), [found[1].as_str()]);
+    assert_eq!(ui.names(), found[1..]);
+    ui.settle();
+    assert!(fx.path("first note.txt").exists());
+}
+
+#[gpui_kit::test]
 fn a_filter_that_is_still_running_doesnt_say_nothing_passes(cx: &mut TestAppContext) {
     let Some(nu) = fffinder::nushell::find_nu(None) else {
         eprintln!("nu not installed; skipping");
@@ -4922,6 +5132,86 @@ fn a_place_whose_groups_are_all_collapsed_isnt_empty(cx: &mut TestAppContext) {
     assert!(!ui.exists("message-title"), "the search found two items");
     ui.click(header("Plain Text"));
     assert_eq!(ui.names(), ["Project Atlas.txt"]);
+}
+
+#[gpui_kit::test]
+fn the_status_bar_counts_the_items_of_collapsed_groups(cx: &mut TestAppContext) {
+    let fx = Fixture::new("groups-status");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let header = |label: &str| gpui_kit::SharedString::from(format!("group-{label}"));
+    let status = |ui: &mut Ui| ui.snapshot("status-text").label().unwrap().to_string();
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::Kind), cx));
+
+    // A folder open in place has its items listed with the folder's own.
+    ui.select("Projects");
+    ui.press("right");
+    assert_eq!(
+        ui.names(),
+        ["Budget.csv", "Projects", "atlas", "Roadmap.md", "notes.txt"]
+    );
+    ui.update(|f, _, cx| f.clear_selection(cx));
+    assert!(
+        status(&mut ui).starts_with("5 items"),
+        "{}",
+        status(&mut ui)
+    );
+
+    // A collapsed group hides its items, and the folder lists them still.
+    ui.click(header("Folder"));
+    assert_eq!(ui.names(), ["Budget.csv", "Roadmap.md", "notes.txt"]);
+    assert!(
+        status(&mut ui).starts_with("5 items"),
+        "{}",
+        status(&mut ui)
+    );
+    ui.select("Roadmap.md");
+    assert!(
+        status(&mut ui).starts_with("1 of 5 selected"),
+        "{}",
+        status(&mut ui)
+    );
+    ui.update(|f, _, cx| f.clear_selection(cx));
+
+    // With every group collapsed the bar counts what it did with them open.
+    for label in ["Comma-Separated Values", "Markdown", "Plain Text"] {
+        ui.click(header(label));
+    }
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(
+        status(&mut ui).starts_with("5 items"),
+        "{}",
+        status(&mut ui)
+    );
+}
+
+#[gpui_kit::test]
+fn the_status_bar_counts_what_passes_the_filter_in_collapsed_groups(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("groups-status-filter");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    let status = |ui: &mut Ui| ui.snapshot("status-text").label().unwrap().to_string();
+    ui.click("view-list");
+    ui.update(|f, _, cx| f.set_group_by(Some(GroupKey::Kind), cx));
+    ui.update(|f, _, cx| f.set_filter("name =~ 'o'".into(), cx));
+    assert_eq!(ui.names(), ["Projects", "Roadmap.md", "notes.txt"]);
+    let passing = "3 of 4 items pass the filter";
+    assert!(status(&mut ui).starts_with(passing), "{}", status(&mut ui));
+
+    // Projects passes the filter whether its group shows it or not.
+    ui.click(gpui_kit::SharedString::from("group-Folder"));
+    assert_eq!(ui.names(), ["Roadmap.md", "notes.txt"]);
+    assert!(status(&mut ui).starts_with(passing), "{}", status(&mut ui));
 }
 
 #[gpui_kit::test]
