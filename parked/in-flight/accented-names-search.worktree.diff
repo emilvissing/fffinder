@@ -1,0 +1,68 @@
+diff --git a/crates/fffinder-core/src/engine.rs b/crates/fffinder-core/src/engine.rs
+index c8cb5e0..7b47a49 100644
+--- a/crates/fffinder-core/src/engine.rs
++++ b/crates/fffinder-core/src/engine.rs
+@@ -4841,6 +4841,9 @@ mod tests {
+             // In a folder's name, and with folders among the results.
+             assert_eq!(names("m\u{fc}nchen"), ["karte.png"], "typos: {typos}");
+             assert_eq!(find("m\u{fc}nchen", false), ["M\u{fc}nchen", "karte.png"]);
++            // The folder is found without its accent too, as the next test
++            // finds files.
++            assert_eq!(find("munchen", false), ["M\u{fc}nchen", "karte.png"]);
+             assert_eq!(names("\u{d55c}\u{ae00}"), ["\u{d55c}\u{ae00}.txt"]);
+             // One letter is looked for in the names, and not in the folders
+             // they are in, as any one letter is.
+@@ -4864,6 +4867,11 @@ mod tests {
+                 ],
+                 "typos: {typos}"
+             );
++            // A glob and a folder filter have a letter in either spelling.
++            // The globs have a capital, so they are matched case for case.
++            assert_eq!(names("*R\u{e9}sum\u{e9}*"), ["R\u{e9}sum\u{e9}.pdf"]);
++            assert_eq!(names("*Sen\u{303}or*"), ["Se\u{f1}or Lopez.txt"]);
++            assert_eq!(names("/m\u{fc}nchen/ karte"), ["karte.png"]);
+             // A name in ASCII has one spelling, and is held to it.
+             assert_eq!(names("senior"), ["senior.txt"]);
+             assert_eq!(names("xqz"), Vec::<String>::new());
+@@ -4883,6 +4891,7 @@ mod tests {
+     fn a_word_typed_without_accents_finds_the_names_that_have_them() {
+         let dir = std::env::temp_dir().join(format!("fff-plain-{}", std::process::id()));
+         let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(&dir).unwrap();
+         // Accents stored apart from their letters, as macOS stores them, and
+         // as one character with them.
+         for file in [
+@@ -4902,7 +4911,6 @@ mod tests {
+             "\u{6771}\u{4eac}.txt",
+             "notes.txt",
+         ] {
+-            std::fs::create_dir_all(&dir).unwrap();
+             std::fs::write(dir.join(file), "").unwrap();
+         }
+         let engine = Engine::new(EngineOptions {
+@@ -5724,6 +5732,12 @@ mod tests {
+         let listed = engine.list(true, Some("safari"), 0);
+         let app = listed.iter().find(|i| i.path == apps.join("Safari.app"));
+         assert_eq!(app.map(|i| i.root.as_path()), Some(apps.as_path()));
++        // An app is listed whichever way its name stores an accent too.
++        for query in ["caf\u{e9}", "CAFE\u{301}", "cafe"] {
++            let listed = engine.list(true, Some(query), 0);
++            let cafe = apps.join("Cafe\u{301}.app");
++            assert!(listed.iter().any(|i| i.path == cafe), "{query}");
++        }
+ 
+         // A new app is found on the next search; folder times can be coarse.
+         std::thread::sleep(Duration::from_millis(20));
+diff --git a/docs/manual.md b/docs/manual.md
+index 74d45c8..4b5b898 100644
+--- a/docs/manual.md
++++ b/docs/manual.md
+@@ -373,7 +373,7 @@ Unquoted words match fzf-style: their letters must appear in order somewhere in
+ 
+ Unquoted words ignore letter case, so `README` also finds `readme.md`. Quoted words and globs follow **Letter case in searches** in [Settings › Search engine](#search-engine). Set to Smart, as it is at first, `"README"` finds only names that have `README` in capitals.
+ 
+-A letter with an accent matches however a name stores it. A name can keep `é` as one character, or as an `e` with the accent after it, which is how macOS stores the names made in Finder and in most apps. Typed either way, `résumé` finds `Résumé.pdf` stored either way, in a quoted word and with **Allow typos** off as well. Korean names stored as the parts of their syllables are found the same way. A word typed without accents also finds the names that have them: `resume` finds `Résumé.pdf`, and `munchen` finds a folder named `München`. Such names rank after the names that have the word as typed, among the names that have its letters with gaps. A name that stores each accent in one character with its letter, as names that come from other systems often do, is found this way only while no more than two of the word's letters have an accent in it, and in a large folder it can be left out when many other names match the word loosely. A word typed with an accent is taken as it is typed, so `résumé` doesn't find `resume.pdf`, and to **Allow typos** a letter with another accent, or without one, is a wrong letter. A quoted word is compared letter for letter, so `"resume"` doesn't find `Résumé.pdf`.
++A letter with an accent matches however a name stores it. A name can keep `é` as one character, or as an `e` with the accent after it, which is how macOS stores the names made in Finder and in most apps. Typed either way, `résumé` finds `Résumé.pdf` stored either way, in a quoted word and with **Allow typos** off as well. Korean names stored as the parts of their syllables are found the same way. A word typed without accents also finds the names that have them: `resume` finds `Résumé.pdf`, and `munchen` finds a folder named `München`. Such names rank after the names that have the word as typed, among the names that have its letters with gaps. A name that stores each accent in one character with its letter, as names that come from other systems often do, is found this way while no more than two of the word's letters have an accent in it, or three when the search's first word has twelve letters or more, and in a large folder it can be left out when many other names match the word loosely. A word typed with an accent is taken as it is typed, so `résumé` doesn't find `resume.pdf`, and to **Allow typos** a letter with another accent, or without one, is a wrong letter. A quoted word is compared letter for letter, so `"resume"` doesn't find `Résumé.pdf`.
+ 
+ A folder filter isn't fuzzy. `/notes/` and `notes/` mean a folder named `notes`, at any depth inside the search location, so `/notes/ todo` doesn't find `meeting-notes/todo.txt`, and `!notes/` leaves out only a folder with that name and what is inside it. Letter case is ignored from A to Z; other letters, such as `Ü`, must be typed in the letter case the folder has them in. A filter can name folders in a row, as in `/src/finder/ list`. It can't have a space in it, so for a folder such as `Brand guidelines` use a glob, with `?` where the space is: `**/Brand?guidelines/** colors`. With Any Kind or Folder, a folder filter that is the whole search is a word instead: `src/` finds the folders that match it.
+ 

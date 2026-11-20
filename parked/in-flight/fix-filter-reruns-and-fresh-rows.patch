@@ -1,0 +1,598 @@
+From 220a9ef1d71b2f553d8f647faba9adea248889d1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 06:10:02 +0000
+Subject: [PATCH] run a filter again when an item's size or date changes, and
+ on refresh
+
+A Nushell filter's answer was kept for as long as the rows it was made
+for had the same paths in the same order. A file that another program
+saved comes back under the path it had, so it stayed hidden when it had
+grown past `size > 10kb`, and stayed listed, and counted in the status
+bar, when it had shrunk under it. A folder's size comes from the index
+a moment after the folder it is in has been listed, which is when the
+filter is first given the items. In a folder opened with a filter
+already on, the folders were therefore judged without a size and not
+again: `size > 100mb` listed none of them, and a comparison joined to
+another condition, as in `kind == Folder and size > 1mb`, ended in
+nu's error for an operator given nothing, which stayed up over an
+unfiltered list. Refresh read the folder again and left the answer as
+it was. Short of other items being listed, or the same in another
+order, only editing the filter's text ran it again.
+
+The rows a filter was run over are now remembered with the size and
+date it was given for each, and a run starts when any of that differs:
+other items, another order, or an item that came back with another
+size or date. Items that come back as they were start none, however
+often their folder is looked at or read, as each run starts a `nu`.
+Opening a folder with a filter on does cost a second run now when the
+folder holds folders the index has sizes for: one over the items as
+they are listed, and one more when the sizes are in. Refresh forgets
+what the filter was run over, so it runs again for the rows as they
+come back. That is also how a filter that goes by more than its rows,
+the time of day or what a file says, catches up. The answer before
+stays in force until the next one is in, as it does when an item comes
+or goes.
+
+Recents and the results of a search by name were held against their
+lists on screen by path alone as well, in what is not released yet.
+Recents, read again for what the index reported, was shown only if its
+paths or their order differed. A file saved where it was, still the
+newest, kept the size and date its row had, and its preview with them.
+A search run again quietly showed its answer only where the reported
+files showed in it, so an answer that came out as the same list left a
+saved file's old row too. Both now also show an answer that lists the
+same items in the same order when one of them has another size or
+date, and that counts as a change for how closely the list is followed
+afterwards: a file saved again and again shows each time as soon as
+the first. Nothing reshuffles by it: an answer in another order is
+still held to what the reports account for. What makes either list be
+made again is as it was. Recents is not read for its newest file being
+written to again, and saving a file that a search lists does not by
+itself run the search.
+
+One test went by the old answer: with `size > 10kb` on and the window
+gone up to a folder, it expected the file of 20 KB there and not the
+folder beside it that holds one. It expects both now.
+
+Changelog (Fixed): A Nushell filter kept its answer for an item after
+the item had changed. A file that another program saved stayed hidden
+when it had grown past `size > 10kb`, and stayed listed, and counted in
+the status bar, when it had shrunk under it. In a folder opened with a
+filter already on, the folders were judged before their sizes were
+known, so `size > 100mb` listed none of them, and a comparison joined
+to another condition, such as `kind == Folder and size > 1mb`, left a
+Nushell error over an unfiltered list. Refresh (Cmd+R) changed none of
+it. A filter now runs again when an item comes back with another size
+or date, and Refresh runs it again in any case, as a filter that goes
+by the time of day needs.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CT7TqKfmTYMKX3NEP3oJ5f
+---
+ docs/manual.md       |   6 +-
+ src/finder/filter.rs |  27 +++++--
+ src/finder/mod.rs    |  44 ++++++++---
+ tests/controls.rs    | 174 +++++++++++++++++++++++++++++++++++++++++++
+ tests/finder.rs      | 103 ++++++++++++++++++++++++-
+ 5 files changed, 332 insertions(+), 22 deletions(-)
+
+diff --git a/docs/manual.md b/docs/manual.md
+index 84df480..988f171 100644
+--- a/docs/manual.md
++++ b/docs/manual.md
+@@ -138,7 +138,7 @@ The file area shows a message when there is nothing to list:
+ 
+ When the window goes to another place, the items of the place it left stay on screen for a moment, while the new place is read. A folder on a local disk is read at once, and its items take their place without the file area going empty in between. The items that stayed only show: a click in the file area does nothing, none of them can be picked up and dragged away, the arrow keys, type to select, and Select All select none of them, and a folder among them takes no drop. A place that takes longer than about a sixth of a second to read, as Recents does while the index is being built, or a folder on a slow network volume, shows placeholders from then until it has been read. The column view closes its columns at once instead.
+ 
+-Open folders refresh on their own. Every two seconds fffinder checks each folder on screen: the one the window shows, folders opened in place in the list, and the column view's panes. It quietly reads again any that gained, lost, or renamed an item. The check happens off the window's thread, so a slow network volume can't freeze it. A file whose contents change in place keeps its old size and date, and with them its old [preview](#previews-and-quick-look), until something in its folder changes or you refresh. Search results and Recents keep up through the index instead, which watches the search locations. When it sees a file added, removed, or renamed, a search by name that lists the file, or could list it, runs again a few seconds later, once files have stopped coming, and shows its results if the file made a difference to them. While files keep coming, it runs again every half minute or so. Nothing says that it's running, and what's selected stays selected. Files that come and go without changing the results make it run again less and less often, down to once in about four minutes, so a busy disk doesn't keep a search going. After a minute without such files, it keeps up closely again. Recents is read again the same way: a few seconds after the files it would show have stopped being added, removed, renamed, or written to, and every half minute or so while they haven't. A single file that is written to on and on, as a download is, isn't waited for: it goes first, and stays there however often it's written to, with the size and date it showed. Changes that keep leaving Recents as it was make it read less often too, until they have stopped for a while. A search by contents can take seconds, so it waits for Refresh (Cmd+R), and so does a new near miss with a typo.
++Open folders refresh on their own. Every two seconds fffinder checks each folder on screen: the one the window shows, folders opened in place in the list, and the column view's panes. It quietly reads again any that gained, lost, or renamed an item. The check happens off the window's thread, so a slow network volume can't freeze it. A file whose contents change in place keeps its old size and date, and with them its old [preview](#previews-and-quick-look), until something in its folder changes or you refresh. Search results and Recents keep up through the index instead, which watches the search locations. When it sees a file added, removed, or renamed, a search by name that lists the file, or could list it, runs again a few seconds later, once files have stopped coming, and shows its results if the file made a difference to them. If the results come out as the same list, a file in it that was saved since shows with its new size and date, though a save alone doesn't make the search run again. While files keep coming, it runs again every half minute or so. Nothing says that it's running, and what's selected stays selected. Files that come and go without changing the results make it run again less and less often, down to once in about four minutes, so a busy disk doesn't keep a search going. After a minute without such files, it keeps up closely again. Recents is read again the same way: a few seconds after the files it would show have stopped being added, removed, renamed, or written to, and every half minute or so while they haven't. A single file that is written to on and on, as a download is, isn't waited for: it goes first, and stays there however often it's written to, with the size and date it showed until Recents is next read again. Changes that keep leaving Recents as it was make it read less often too, until they have stopped for a while. A search by contents can take seconds, so it waits for Refresh (Cmd+R), and so does a new near miss with a typo.
+ 
+ ### Preview pane
+ 
+@@ -522,7 +522,7 @@ The apps come from Launch Services on macOS, and on Linux from the `.desktop` en
+ | Go to Folder… (Cmd+Shift+G; also Ctrl+L on Linux and Windows) | Type a path. `~` is your home folder, and relative paths start from the current folder, or from your home folder in places like Recents and the Trash. The items that match are listed below the field, folders first, from the moment it opens and as you type. Tab finishes the path as far as they all agree, and clicking one fills it in. A folder opens; a file opens its folder with the file selected. |
+ | Add to Sidebar | Adds a selected folder to Favorites. |
+ | Add Folder to Sidebar | Adds the current folder to Favorites. |
+-| Refresh (Cmd+R; F5 outside split view) | Reloads the folder, columns, and previews, and re-runs the search. |
++| Refresh (Cmd+R; F5 outside split view) | Reloads the folder, columns, and previews, and re-runs the search and the [filter](#filters-and-smart-folders). |
+ | Rescan Index | Rebuilds the search index from scratch. |
+ 
+ ## Copying and moving
+@@ -660,7 +660,7 @@ Or start with `|` to use a whole pipeline, which must keep the `path` column:
+ | sort-by size --reverse | first 20
+ ```
+ 
+-The filter runs 400 ms after you stop typing, or right away when you press Return. The status bar counts how many items pass. When none does, the file area says so and offers **Remove Filter**. An item whose name is being edited in place stays listed until the edit ends, so a new folder can be named even when it won't pass. Errors show in red below the bar. The close button removes the filter, and so does Cmd+Alt+F. Escape empties the field, which turns the filter off, and Escape in an empty field gives the keyboard to the files. The bar stays open either way.
++The filter runs 400 ms after you stop typing, or right away when you press Return. It runs again when the items it was given change: when one is added, removed, or renamed, and when one comes back with another size or date, as a file does once another program has saved it. Refresh (Cmd+R) runs it again whatever the items say, which is for a filter that goes by something else, such as the time of day. The status bar counts how many items pass. When none does, the file area says so and offers **Remove Filter**. An item whose name is being edited in place stays listed until the edit ends, so a new folder can be named even when it won't pass. Errors show in red below the bar. The close button removes the filter, and so does Cmd+Alt+F. Escape empties the field, which turns the filter off, and Escape in an empty field gives the keyboard to the files. The bar stays open either way.
+ 
+ A Smart Folder is a saved search. While searching, **Save** in the scope bar opens "Save Smart Folder", and so do Cmd+S, "Save Search…" in the Actions menu, and "Save Search…" in the Edit menu. With no search showing, Cmd+S says there is nothing to save yet, and the Actions menu's item is off. The dialog says what it saves: the words, Name or Contents, the scope folder or This Computer, a Name search's kind unless it's Any Kind, and the filter when one is on. Name it, and it's saved in the sidebar under Smart Folders. A name that a Smart Folder already has replaces that one, in the same place in the sidebar. The dialog says so before you save, and its button reads Replace. With no name, the button is off.
+ 
+diff --git a/src/finder/filter.rs b/src/finder/filter.rs
+index 1bb76c3..0fcefb5 100644
+--- a/src/finder/filter.rs
++++ b/src/finder/filter.rs
+@@ -5,7 +5,7 @@
+ use crate::theme::ui;
+ use std::collections::HashSet;
+ use std::path::{Path, PathBuf};
+-use std::time::Duration;
++use std::time::{Duration, SystemTime};
+ 
+ use fffinder_core::{FileEntry, KindFilter, SmartFolder};
+ use gpui_kit::TestSupportExt as _;
+@@ -28,6 +28,11 @@ use crate::nushell;
+ /// Search results fetched while a filter is on, so it has enough to work with.
+ pub const FILTER_SEARCH_LIMIT: usize = 5000;
+ 
++/// An item a filter was run over: its path, and the size and date the
++/// filter was given for it, which can change while the item stays where it
++/// is.
++pub(super) type FilterInput = (PathBuf, Option<u64>, Option<SystemTime>);
++
+ /// What a window searches with besides the words: the kind, the scope, Name
+ /// or Contents, and the filter with its bar.
+ struct SearchSetup {
+@@ -116,9 +121,10 @@ impl Finder {
+     }
+ 
+     /// Keep only the rows the filter selected, starting a new run when the
+-    /// rows changed. Rows stay as they are until the first run finishes. The
+-    /// row of a name being edited in the views stays whatever the filter
+-    /// selected.
++    /// rows changed: when they are other items, or in another order, or one
++    /// has another size or date. Rows stay as they are until the first run
++    /// finishes. The row of a name being edited in the views stays whatever
++    /// the filter selected.
+     pub(super) fn apply_filter_to(&mut self, rows: &mut Vec<Row>, cx: &mut Context<Self>) {
+         if self.filter.is_empty() {
+             return;
+@@ -129,9 +135,16 @@ impl Finder {
+         if rows.is_empty() && self.is_searching() && self.search_stats.is_none() {
+             return;
+         }
+-        let paths: Vec<PathBuf> = rows.iter().map(|r| r.entry.path.clone()).collect();
+-        if self.filter_source.as_ref() != Some(&paths) {
+-            self.filter_source = Some(paths);
++        // An item can come back where it was with another size or date: a
++        // file that another program saved, or a folder once the index has
++        // told its size. The filter may go by those, so what it answered
++        // for the item as it was says nothing of the item as it is.
++        let given: Vec<FilterInput> = rows
++            .iter()
++            .map(|r| (r.entry.path.clone(), r.entry.size, r.entry.modified))
++            .collect();
++        if self.filter_source.as_ref() != Some(&given) {
++            self.filter_source = Some(given);
+             let entries: Vec<FileEntry> = rows.iter().map(|r| r.entry.clone()).collect();
+             self.start_filter(entries, cx);
+         }
+diff --git a/src/finder/mod.rs b/src/finder/mod.rs
+index ac5f1d7..a5c74ad 100644
+--- a/src/finder/mod.rs
++++ b/src/finder/mod.rs
+@@ -334,6 +334,12 @@ fn paths_of(rows: &[Row]) -> impl Iterator<Item = &Path> {
+     rows.iter().map(|row| row.entry.path.as_path())
+ }
+ 
++/// Where `entry` is, with what its row shows of the file there that changes
++/// when the file is saved: its size, and when it was last modified.
++fn as_listed(entry: &FileEntry) -> (&Path, Option<u64>, Option<SystemTime>) {
++    (&entry.path, entry.size, entry.modified)
++}
++
+ /// What the index has reported, since a list on screen was made, that the
+ /// list may not show yet.
+ enum Stale {
+@@ -348,15 +354,23 @@ impl Stale {
+     /// the changes account for. Apart from them, two answers to one search
+     /// can differ by which of many equal matches made the list, and results
+     /// that reshuffled whenever a file came or went somewhere would be worse
+-    /// than results that stayed.
++    /// than results that stayed. An answer that lists the same items in the
++    /// same order reshuffles nothing, so it differs whenever one of them has
++    /// another size or date, as a file has that was saved where it is.
+     ///
+     /// # Arguments
+     ///
+     /// * `shown` - The results on screen
+     /// * `found` - The answer of the same search made again
+     fn shows_in(&self, shown: &[Row], found: &[Row]) -> bool {
++        if paths_of(shown).eq(paths_of(found)) {
++            return shown
++                .iter()
++                .zip(found)
++                .any(|(shown, found)| as_listed(&shown.entry) != as_listed(&found.entry));
++        }
+         match self {
+-            Stale::Everything => !paths_of(shown).eq(paths_of(found)),
++            Stale::Everything => true,
+             Stale::Files(files) => {
+                 let shown: HashSet<&Path> = paths_of(shown).collect();
+                 let found: HashSet<&Path> = paths_of(found).collect();
+@@ -609,7 +623,7 @@ pub struct Finder {
+     filter_debounce: Task<()>,
+     /// Paths the filter kept, for the rows in `filter_source`.
+     filter_keep: Option<HashSet<PathBuf>>,
+-    filter_source: Option<Vec<PathBuf>>,
++    filter_source: Option<Vec<filter::FilterInput>>,
+     filter_error: Option<String>,
+     filtering: bool,
+     /// Rows before the filter, for the status bar.
+@@ -1707,9 +1721,10 @@ impl Finder {
+             if seen != recent {
+                 // A file that is written to goes first and leaves the rest
+                 // as it is. So one that Recents has first already changes
+-                // nothing, however often it's written to. One it doesn't
+-                // have first is a single change, which isn't waited for to
+-                // end: a download can take long.
++                // nothing but its own size and date, however often it's
++                // written to, and those wait for the next read. One it
++                // doesn't have first is a single change, which isn't waited
++                // for to end: a download can take long.
+                 let written = self.engine.only_written_since(seen);
+                 let first = self.listing.first().map(|entry| entry.path.as_path());
+                 news = written.is_none();
+@@ -1725,7 +1740,8 @@ impl Finder {
+     }
+ 
+     /// Read Recents again for what the index reported, without a sign that
+-    /// it's being read, and show the list if it came out another one.
++    /// it's being read, and show the list if it came out another one, or
++    /// the same one with a file in it that has another size or date.
+     fn reload_recents(&mut self, cx: &mut Context<Self>) {
+         let engine = self.engine.clone();
+         self.recents_behind.stale = None;
+@@ -1735,12 +1751,13 @@ impl Finder {
+                 .background_spawn(async move { read_recents(&engine) })
+                 .await;
+             this.update(cx, |this, cx| {
+-                // A file written to again is where it was: first.
++                // A file written to again is where it was, first, with
++                // another size and date for its row to show.
+                 let fresh = !this
+                     .listing
+                     .iter()
+-                    .map(|entry| &entry.path)
+-                    .eq(entries.iter().map(|entry| &entry.path));
++                    .map(as_listed)
++                    .eq(entries.iter().map(as_listed));
+                 this.recents_behind.caught_up(fresh);
+                 if fresh {
+                     this.listing = entries;
+@@ -1810,6 +1827,10 @@ impl Finder {
+ 
+     fn refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
+         self.previews.clear();
++        // A filter can go by more than it is given of each item, the time
++        // of day for one, so it runs again even for items that come back as
++        // they were.
++        self.filter_source = None;
+         self.load_listing(Vec::new(), true, cx);
+         if self.is_searching() {
+             self.run_search(false, cx);
+@@ -2229,7 +2250,8 @@ impl Finder {
+     /// [`Self::run_search`], or with `stale` the same search made again
+     /// quietly, to catch up with what the index reported. Nothing on screen
+     /// says that one is running, and its answer takes the place of the
+-    /// results only where those changes show in it.
++    /// results only where those changes show in it, or where it is the same
++    /// list with a file in it changed (see [`Stale::shows_in`]).
+     fn start_search(&mut self, debounce: bool, stale: Option<Stale>, cx: &mut Context<Self>) {
+         if self.query.is_empty() {
+             return;
+diff --git a/tests/controls.rs b/tests/controls.rs
+index 4d77222..31d839c 100644
+--- a/tests/controls.rs
++++ b/tests/controls.rs
+@@ -4629,6 +4629,180 @@ fn a_filter_waits_for_the_rows_a_search_has_yet_to_find(cx: &mut TestAppContext)
+     assert_eq!(ui.names(), ["big.log"]);
+ }
+ 
++#[gpui_kit::test]
++fn a_filter_runs_again_for_a_file_that_was_saved(cx: &mut TestAppContext) {
++    let Some(nu) = fffinder::nushell::find_nu(None) else {
++        eprintln!("nu not installed; skipping");
++        return;
++    };
++    let fx = Fixture::new("filter-file-saved");
++    let mut ui = Ui::open_with(
++        cx,
++        &fx.dir,
++        Open {
++            nu: Some(nu),
++            ..Default::default()
++        },
++    );
++    let status = |ui: &mut Ui| ui.snapshot("status-text").label().unwrap().to_string();
++    ui.press(&cmd("alt-f"));
++    ui.type_text("size > 10b");
++    ui.press("enter");
++    assert_eq!(ui.names(), ["notes.txt"]);
++
++    // Another program saves a file the way most do: under another name,
++    // which then takes the file's. The folder is read again and lists the
++    // same items in the same order, and the one that grew passes now.
++    let save = |name: &str, text: &str| {
++        let draft = fx.path("draft.tmp");
++        std::fs::write(&draft, text).unwrap();
++        std::fs::rename(draft, fx.path(name)).unwrap();
++    };
++    save("Budget.csv", "a,b\n1,2\n3,4\n");
++    ui.look_for_changes(1);
++    assert_eq!(ui.names(), ["Budget.csv", "notes.txt"]);
++    let passing = "2 of 4 items pass the filter";
++    assert!(status(&mut ui).starts_with(passing), "{}", status(&mut ui));
++
++    // One that shrank doesn't pass any more.
++    save("notes.txt", "n\n");
++    ui.look_for_changes(1);
++    assert_eq!(ui.names(), ["Budget.csv"]);
++    let passing = "1 of 4 items pass the filter";
++    assert!(status(&mut ui).starts_with(passing), "{}", status(&mut ui));
++
++    // The message that none passes goes when one does.
++    save("Budget.csv", "a\n");
++    ui.look_for_changes(1);
++    assert!(ui.names().is_empty(), "{:?}", ui.names());
++    assert_eq!(
++        ui.snapshot("message-title").label(),
++        Some("No Items Pass the Filter")
++    );
++    save("Roadmap.md", "# Roadmap\n\nShip it.\n");
++    ui.look_for_changes(1);
++    assert_eq!(ui.names(), ["Roadmap.md"]);
++    assert!(!ui.exists("message-title"));
++
++    // A file written over where it is changes nothing about its folder,
++    // which isn't read again for it. Refresh reads it, and the filter goes
++    // by the file as it came back.
++    std::fs::write(fx.path("notes.txt"), "plain notes\n").unwrap();
++    ui.look_for_changes(1);
++    assert_eq!(ui.names(), ["Roadmap.md"]);
++    ui.press(&cmd("r"));
++    assert_eq!(ui.names(), ["notes.txt", "Roadmap.md"]);
++}
++
++#[gpui_kit::test]
++fn a_filter_runs_again_for_a_file_saved_as_long_as_it_was(cx: &mut TestAppContext) {
++    let Some(nu) = fffinder::nushell::find_nu(None) else {
++        eprintln!("nu not installed; skipping");
++        return;
++    };
++    let fx = Fixture::new("filter-file-date");
++    // The notes were last saved years ago.
++    let notes = fx.path("notes.txt");
++    let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
++    std::fs::File::options()
++        .write(true)
++        .open(&notes)
++        .unwrap()
++        .set_modified(long_ago)
++        .unwrap();
++    let mut ui = Ui::open_with(
++        cx,
++        &fx.dir,
++        Open {
++            nu: Some(nu),
++            ..Default::default()
++        },
++    );
++    ui.update(|f, _, cx| f.set_filter("modified < 2020-01-01".into(), cx));
++    assert_eq!(ui.names(), ["notes.txt"]);
++
++    // Saved with the text they had, they are as long as they were, and
++    // have another date for a filter to go by.
++    let draft = fx.path("draft.tmp");
++    std::fs::write(&draft, "plain notes\n").unwrap();
++    std::fs::rename(draft, notes).unwrap();
++    ui.look_for_changes(1);
++    assert!(ui.names().is_empty(), "{:?}", ui.names());
++}
++
++#[gpui_kit::test]
++fn a_filter_judges_folders_by_the_sizes_that_come_after_them(cx: &mut TestAppContext) {
++    let Some(nu) = fffinder::nushell::find_nu(None) else {
++        eprintln!("nu not installed; skipping");
++        return;
++    };
++    let fx = Fixture::new("filter-folder-sizes");
++    let mut ui = Ui::open_with(
++        cx,
++        &fx.dir,
++        Open {
++            nu: Some(nu),
++            ..Default::default()
++        },
++    );
++    // Projects holds five bytes, all of them in atlas.
++    ui.update(|f, _, cx| f.set_filter("size == 5b".into(), cx));
++    assert_eq!(ui.names(), ["Projects"]);
++
++    // A folder's size comes from the index a moment after the folder it is
++    // in was listed, which is when the filter was first given its items.
++    ui.go_to(&fx.path("Projects"));
++    assert_eq!(ui.names(), ["atlas"]);
++    ui.press(&cmd("["));
++    assert_eq!(ui.names(), ["Projects"]);
++
++    // A folder without a size has nothing to compare, which `nu` takes for
++    // an error where the comparison is joined to another condition. No such
++    // error is left standing once the size has come.
++    ui.update(|f, _, cx| f.set_filter("kind == Folder and size > 4b".into(), cx));
++    assert_eq!(ui.names(), ["Projects"]);
++    ui.go_to(&fx.path("Projects"));
++    assert_eq!(ui.read(|f| f.filter_error().map(str::to_string)), None);
++    assert!(!ui.exists("filter-error"));
++    assert_eq!(ui.names(), ["atlas"]);
++}
++
++#[gpui_kit::test]
++fn refresh_runs_the_filter_again(cx: &mut TestAppContext) {
++    let Some(nu) = fffinder::nushell::find_nu(None) else {
++        eprintln!("nu not installed; skipping");
++        return;
++    };
++    let fx = Fixture::new("filter-refresh");
++    // A filter can go by more than it is given of each item: the time of
++    // day, or as here what a file says.
++    let wanted = fx.path("Projects/wanted.txt");
++    std::fs::write(&wanted, "Roadmap.md\n").unwrap();
++    let mut ui = Ui::open_with(
++        cx,
++        &fx.dir,
++        Open {
++            nu: Some(nu),
++            ..Default::default()
++        },
++    );
++    ui.update(|f, _, cx| {
++        let filter = "| where name in (open --raw Projects/wanted.txt | lines)";
++        f.set_filter(filter.into(), cx)
++    });
++    assert_eq!(ui.names(), ["Roadmap.md"]);
++
++    // While the items come back as they were the filter isn't run again,
++    // however often the folder is looked at or read: each run starts a `nu`.
++    std::fs::write(&wanted, "Budget.csv\n").unwrap();
++    ui.look_for_changes(2);
++    ui.update(|f, _, cx| f.reload_quietly(cx));
++    assert_eq!(ui.names(), ["Roadmap.md"]);
++
++    ui.press(&cmd("r"));
++    assert_eq!(ui.names(), ["Budget.csv"]);
++}
++
+ #[gpui_kit::test]
+ fn a_filter_that_keeps_nothing_says_so_and_offers_to_remove_it(cx: &mut TestAppContext) {
+     let Some(nu) = fffinder::nushell::find_nu(None) else {
+diff --git a/tests/finder.rs b/tests/finder.rs
+index 02ea10c..afda7cd 100644
+--- a/tests/finder.rs
++++ b/tests/finder.rs
+@@ -1073,6 +1073,59 @@ fn results_stay_when_what_changed_isnt_among_them(cx: &mut TestAppContext) {
+     assert!(lists(&ui, "atlas-three.txt"), "{:?}", ui.names());
+ }
+ 
++#[gpui_kit::test]
++fn results_show_a_file_as_it_was_last_saved_once_the_search_has_run_again(cx: &mut TestAppContext) {
++    let fx = Fixture::new("search-follows-save");
++    written_ago(&fx, "Roadmap.md", 20);
++    let mut ui = Ui::open(cx, &fx.dir);
++    ui.click("view-list");
++    ui.press(&cmd("shift-p"));
++    ui.press(&cmd("f"));
++    ui.type_text("roadmap");
++    assert_eq!(ui.names(), ["Roadmap.md"]);
++    ui.select("Roadmap.md");
++    let roadmap = fx.path("Roadmap.md");
++    let text = |ui: &Ui| ui.read(|f| f.preview_text_for_test(&roadmap));
++    let size = |ui: &Ui| ui.read(|f| f.rows_for_test()[0].size.to_string());
++    assert_eq!(size(&ui), "10 bytes");
++    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n"));
++
++    // Another program saves the file under another name, one with the
++    // search's words in it, which then takes the file's. The index reports
++    // the draft, so the search runs again, and finds the one file it found
++    // before. The row and the preview show the file as it is now.
++    let draft = fx.path("Roadmap.md.draft");
++    let save = |ui: &mut Ui, text: &str| {
++        std::fs::write(&draft, text).unwrap();
++        std::fs::rename(&draft, &roadmap).unwrap();
++        ui.reindex();
++        ui.report_change(None, Some(&draft));
++        ui.report_change(Some(&draft), Some(&roadmap));
++        ui.look_for_changes(2);
++    };
++    save(&mut ui, "# Roadmap\n\nShip it.\n");
++    assert_eq!(ui.names(), ["Roadmap.md"]);
++    assert_eq!(size(&ui), "20 bytes");
++    assert_eq!(ui.selected(), ["Roadmap.md"]);
++    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n\nShip it.\n"));
++
++    // Results that show a file as it is now have changed, so the search is
++    // followed as closely as before. Had they counted as coming out as they
++    // were, it would be held back for three looks by the third save.
++    for saved in ["# Roadmap\n\nShip it soon.\n", "# Roadmap\n\nShipped.\n"] {
++        save(&mut ui, saved);
++        assert_eq!(text(&ui).as_deref(), Some(saved));
++    }
++
++    // So they do after a rescan, when any file may have changed.
++    std::fs::write(&roadmap, "# Roadmap\n").unwrap();
++    ui.rescan();
++    ui.look_for_changes(2);
++    assert_eq!(size(&ui), "10 bytes");
++    assert_eq!(ui.selected(), ["Roadmap.md"]);
++    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n"));
++}
++
+ #[gpui_kit::test]
+ fn a_search_held_back_is_followed_closely_again_after_a_quiet_minute(cx: &mut TestAppContext) {
+     let fx = Fixture::new("search-follows-after-quiet");
+@@ -1424,6 +1477,53 @@ fn recents_previews_a_file_as_it_was_last_written(cx: &mut TestAppContext) {
+     assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n\nShip it.\n"));
+ }
+ 
++#[gpui_kit::test]
++fn recents_shows_a_file_saved_where_it_was_as_it_is_now(cx: &mut TestAppContext) {
++    let fx = Fixture::new("recents-saved-in-place");
++    let written = |name: &str, minutes: u64| written_ago(&fx, name, minutes);
++    written("Roadmap.md", 10);
++    written("notes.txt", 20);
++    written("Budget.csv", 30);
++    written("Projects/atlas/Project Atlas.txt", 40);
++    let mut ui = Ui::open(cx, &fx.dir);
++    ui.press(&cmd("shift-f"));
++    ui.press(&cmd("shift-p"));
++    let newest_first = ["Roadmap.md", "notes.txt", "Budget.csv", "Project Atlas.txt"];
++    assert_eq!(ui.names(), newest_first);
++    let roadmap = fx.path("Roadmap.md");
++    let text = |ui: &Ui| ui.read(|f| f.preview_text_for_test(&roadmap));
++    let size = |ui: &Ui| ui.read(|f| f.rows_for_test()[0].size.to_string());
++    ui.select("Roadmap.md");
++    assert_eq!(size(&ui), "10 bytes");
++    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n"));
++
++    // Saved under another name that then takes the file's, which the index
++    // reports as a file renamed. It was the newest and still is, so Recents
++    // is read again and comes out in the order it was in.
++    let draft = fx.path("Roadmap.md.draft");
++    let save = |ui: &mut Ui, text: &str| {
++        std::fs::write(&draft, text).unwrap();
++        std::fs::rename(&draft, &roadmap).unwrap();
++        ui.reindex();
++        ui.report_change(Some(&draft), Some(&roadmap));
++        ui.look_for_changes(2);
++    };
++    save(&mut ui, "# Roadmap\n\nShip it.\n");
++    assert_eq!(ui.names(), newest_first);
++    assert_eq!(size(&ui), "20 bytes");
++    assert_eq!(ui.selected(), ["Roadmap.md"]);
++    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n\nShip it.\n"));
++
++    // A list that shows a file as it is now has changed, as one in another
++    // order has, so Recents is followed as closely as before. Had it counted
++    // as coming out as it was, it would be held back by the third save.
++    for saved in ["# Roadmap\n\nShip it soon.\n", "# Roadmap\n\nShipped.\n"] {
++        save(&mut ui, saved);
++        assert_eq!(ui.names(), newest_first);
++        assert_eq!(text(&ui).as_deref(), Some(saved));
++    }
++}
++
+ #[gpui_kit::test]
+ fn recents_waits_half_a_minute_at_most_for_writing_to_stop(cx: &mut TestAppContext) {
+     let fx = Fixture::new("recents-follows-two");
+@@ -2006,7 +2106,8 @@ fn going_to_another_folder_calls_off_a_key_that_waits_for_the_filter(cx: &mut Te
+     ui.press_without_settling("alt-up");
+     ui.settle();
+     assert_eq!(ui.folder(), Some(fx.path("Projects")));
+-    assert_eq!(ui.names(), ["big.log"]);
++    // atlas holds huge.log, so it passes by its size like big.log.
++    assert_eq!(ui.names(), ["atlas", "big.log"]);
+     assert!(
+         !ui.files_focused(),
+         "Down Arrow was pressed for the folder the window left"
+-- 
+2.43.0
+

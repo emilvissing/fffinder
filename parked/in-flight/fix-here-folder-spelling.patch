@@ -1,0 +1,593 @@
+From b81ddb074e31f605b342c37a445a1553498cd118 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 07:04:48 +0000
+Subject: [PATCH] search a folder where it is, however its path is spelled
+
+A search of one folder looked the folder up in the index under the
+names it was given by. An index has a folder under the names the disk
+gives it on the way down from its search location, so a folder given
+any other way was searched and had nothing in it. That is a folder
+with `..` in its path, as `fffinder ../lib --query parser --here`
+gives it on macOS and Linux, and Go to Folder with `..` on every
+system. It is a folder given or opened through a symbolic link inside
+a search location, which the index doesn't follow unless Follow
+symbolic links is on. And on a disk that takes a name in either
+letter case, as most on macOS and Windows do, it is a folder typed in
+another case than the disk's, such as `~/documents`. The window
+listed the folder and Search Only in "lib" was on, and every search
+said No Results, by name and by contents. `fff find --here` and
+`fff search --here` found nothing in a folder the shell was in
+through a link, and `scope` in `/v1/find` and `/v1/search` nothing
+for any of the three. Only a folder that didn't look as if it were in
+a search location had its path resolved, to see whether it led into
+one.
+
+The engine now asks the disk where the folder is before each search
+of one folder, and searches it by the names the index has. A folder
+that is really in a search location is spelled the way the location
+is, and from there on by its real names. One that only looks as if
+it were in one, because a link or a `..` leads out of it, is searched
+by its real path through a temporary index, like any other folder
+outside the search locations. A folder spelled the way the index has
+it is searched as before, and so is one that neither looks as if it
+were in a search location nor is in one. An index that follows links
+has a linked folder under the link's name as well, so with Follow
+symbolic links on, such a folder is still searched by that name; a
+`..`, or a path that is the folder's own but for its letter case, is
+resolved there too.
+
+A search respells its folder once and goes on. It used to call itself
+with the new spelling, which ended because that spelling began with a
+search location. Whether a second call would respell again now
+depends on what the disk answers, so there is none. `Engine::prepare`
+waits for the index that the search will use.
+
+Only Linux was run, where a name in another letter case is another
+folder. That half is tested as far as Linux allows: the rule by
+itself, told where the disk says each folder is, and a search of
+`docs` for a folder `Docs` that runs only where the disk has the two
+as one, which no disk here does.
+
+Changelog (Fixed): **Search Only in "Folder name"** found nothing in
+a folder that the window had reached by anything but its plain path:
+with `..` in the path, as after `fffinder ../lib` on macOS and Linux
+or Go to Folder with `..`; through a symbolic link inside a search
+location, while **Follow symbolic links** is off, as it is at first;
+or, on macOS and Windows, by a path typed in another letter case than
+the folder's, such as `~/documents`. The window showed the folder's
+items, and every search of it said No Results. Such a folder is now
+searched where it really is, and the results show that place. A
+linked folder that leads outside the search locations gets a
+temporary index, like any folder there. `--here`, `fff find` and
+`fff search` with `--scope` or `--here`, and `scope` in `/v1/find`
+and `/v1/search` follow the same rule.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CT7TqKfmTYMKX3NEP3oJ5f
+---
+ crates/fffinder-core/src/engine.rs | 384 +++++++++++++++++++++++++++--
+ docs/protocol.md                   |   2 +-
+ tests/controls.rs                  |  26 ++
+ tests/finder.rs                    |  17 ++
+ 4 files changed, 401 insertions(+), 28 deletions(-)
+
+diff --git a/crates/fffinder-core/src/engine.rs b/crates/fffinder-core/src/engine.rs
+index 2d28992..76e5135 100644
+--- a/crates/fffinder-core/src/engine.rs
++++ b/crates/fffinder-core/src/engine.rs
+@@ -632,6 +632,10 @@ impl Engine {
+     /// for its scan. Returns whether it is ready.
+     pub fn prepare(&self, scope: Option<&Path>, timeout: Duration) -> bool {
+         let deadline = Instant::now() + timeout;
++        // The index a search of the folder goes to, which is the one that
++        // covers the folder as the search spells it.
++        let respelled = scope.and_then(|s| self.root_spelling(s));
++        let scope = respelled.as_deref().or(scope);
+         self.indexes_for(scope).iter().all(|r| {
+             let left = deadline.saturating_duration_since(Instant::now());
+             r.picker.wait_for_scan(left)
+@@ -813,22 +817,13 @@ impl Engine {
+         self.changes.note(&base, &[event]);
+     }
+ 
+-    /// `scope` spelled the way a root is, when it is inside one only after
+-    /// resolving symlinks; `None` when it needs no change.
++    /// `scope` as the indexes have the folder, when that isn't how it is
++    /// spelled (see [`index_spelling`]); `None` when it needs no change.
+     fn root_spelling(&self, scope: &Path) -> Option<PathBuf> {
+-        let indexes = self.read_indexes();
+-        if indexes.roots.iter().any(|r| scope.starts_with(&r.path)) {
+-            return None;
+-        }
++        // Asked before the indexes are locked: a disk can be slow to answer.
+         let real = std::fs::canonicalize(scope).ok()?;
+-        indexes.roots.iter().find_map(|r| {
+-            let rest = real.strip_prefix(&r.canonical).ok()?;
+-            Some(if rest.as_os_str().is_empty() {
+-                r.path.clone()
+-            } else {
+-                r.path.join(rest)
+-            })
+-        })
++        let follows_links = self.search_settings().follow_symlinks;
++        index_spelling(scope, real, &self.read_indexes().roots, follows_links)
+     }
+ 
+     /// Indexes covering `scope`: the roots containing it, or a temporary
+@@ -868,12 +863,12 @@ impl Engine {
+     }
+ 
+     pub fn search(&self, req: &SearchRequest) -> SearchResponse {
+-        if let Some(scope) = req.scope.as_deref().and_then(|s| self.root_spelling(s)) {
+-            return self.search(&SearchRequest {
+-                scope: Some(scope),
+-                ..req.clone()
+-            });
+-        }
++        let respelled = req.scope.as_deref().and_then(|s| self.root_spelling(s));
++        let respelled = respelled.map(|scope| SearchRequest {
++            scope: Some(scope),
++            ..req.clone()
++        });
++        let req = respelled.as_ref().unwrap_or(req);
+         let started = Instant::now();
+         let limit = if req.limit == 0 { 500 } else { req.limit };
+         // A sort starts from the list the search makes without it. That is
+@@ -1339,13 +1334,12 @@ impl Engine {
+         req: &GrepRequest,
+         abort: Option<&Arc<AtomicBool>>,
+     ) -> GrepResponse {
+-        if let Some(scope) = req.scope.as_deref().and_then(|s| self.root_spelling(s)) {
+-            let req = GrepRequest {
+-                scope: Some(scope),
+-                ..req.clone()
+-            };
+-            return self.grep_cancellable(&req, abort);
+-        }
++        let respelled = req.scope.as_deref().and_then(|s| self.root_spelling(s));
++        let respelled = respelled.map(|scope| GrepRequest {
++            scope: Some(scope),
++            ..req.clone()
++        });
++        let req = respelled.as_ref().unwrap_or(req);
+         let settings = self.search_settings();
+         let started = Instant::now();
+         let limit = if req.limit == 0 { 200 } else { req.limit };
+@@ -3171,6 +3165,74 @@ fn strip_trailing_separator(path: &Path) -> PathBuf {
+     }
+ }
+ 
++/// `scope`, a folder that is really at `real`, spelled the way it has to be
++/// searched by, when that isn't the way it was given. An index has a folder
++/// under the names the disk gives it on the way down from the root. So a
++/// folder given through a link, with `..` in its path, or in another letter
++/// case is in no index under the names it was given by, though by them it
++/// may look as if it were in a root. One that is really in a root is spelled
++/// the way that root is, and from there on by its real names. One that only
++/// looks as if it were in a root is spelled by its real path, and is then
++/// searched like any other folder outside the roots.
++///
++/// # Arguments
++///
++/// * `scope` - The folder as it was given
++/// * `real` - Where it is: its path with no link or `..` in it, and each name
++///   in the letter case the disk has it in
++/// * `roots` - The search roots
++/// * `follows_links` - Whether the roots' indexes follow links
++///
++/// # Returns
++///
++/// The folder as it is to be searched, or `None` to search it as it was given
++fn index_spelling(
++    scope: &Path,
++    real: PathBuf,
++    roots: &[RootIndex],
++    follows_links: bool,
++) -> Option<PathBuf> {
++    // The folder as each root that it is really in has it.
++    let spellings: Vec<PathBuf> = roots
++        .iter()
++        .filter_map(|r| {
++            let rest = real.strip_prefix(&r.canonical).ok()?;
++            Some(if rest.as_os_str().is_empty() {
++                r.path.clone()
++            } else {
++                r.path.join(rest)
++            })
++        })
++        .collect();
++    if spellings.iter().any(|spelled| spelled == scope) {
++        return None;
++    }
++    let looks_inside = roots.iter().find_map(|r| scope.strip_prefix(&r.path).ok());
++    if follows_links && let Some(rest) = looks_inside {
++        // An index that follows links has a linked folder under the link's
++        // name as well, and that is then the name to search it by. Under a
++        // `..` it has nothing, and a path that is the folder's own but for
++        // its letter case doesn't lead through a link.
++        let climbs = rest
++            .components()
++            .any(|part| part == std::path::Component::ParentDir);
++        let lower = |path: &Path| -> Vec<String> {
++            let names = path.components();
++            names
++                .map(|name| name.as_os_str().to_string_lossy().to_lowercase())
++                .collect()
++        };
++        let recased = spellings
++            .iter()
++            .any(|spelled| lower(spelled) == lower(scope));
++        if !climbs && !recased {
++            return None;
++        }
++    }
++    let inside = spellings.into_iter().next();
++    inside.or_else(|| looks_inside.is_some().then_some(real))
++}
++
+ fn open_dbs(dir: Option<&Path>) -> (SharedFrecency, SharedQueryTracker) {
+     let frecency = SharedFrecency::default();
+     let queries = SharedQueryTracker::default();
+@@ -3219,6 +3281,94 @@ mod tests {
+         assert_eq!(scope("/elsewhere"), Path::new("/elsewhere"));
+     }
+ 
++    #[test]
++    fn a_folder_is_searched_by_the_names_its_index_has() {
++        let root = |path: &str, canonical: &str| RootIndex {
++            path: path.into(),
++            canonical: canonical.into(),
++            picker: SharedFilePicker::default(),
++            followed: Arc::default(),
++        };
++        // The second is given through a link, as `/var` is one on macOS.
++        let roots = [
++            root("/home/me", "/home/me"),
++            root("/var/work", "/private/var/work"),
++        ];
++        let spelling = |scope: &str, real: &str, follows_links: bool| {
++            index_spelling(Path::new(scope), real.into(), &roots, follows_links)
++        };
++        let as_given = None;
++        let by = |path: &str| Some(PathBuf::from(path));
++
++        // Each is given with where the disk says it is.
++        let searched = |scope: &str, real: &str| spelling(scope, real, false);
++        assert_eq!(searched("/home/me/src/lib", "/home/me/src/lib"), as_given);
++        assert_eq!(searched("/home/me", "/home/me"), as_given);
++        assert_eq!(
++            searched("/var/work/docs", "/private/var/work/docs"),
++            as_given
++        );
++        // With `..`, in another letter case on a disk that takes either,
++        // and through a link.
++        assert_eq!(
++            searched("/home/me/src/app/../lib", "/home/me/src/lib"),
++            by("/home/me/src/lib")
++        );
++        assert_eq!(searched("/home/me/src/..", "/home/me"), by("/home/me"));
++        assert_eq!(
++            searched("/home/me/documents", "/home/me/Documents"),
++            by("/home/me/Documents")
++        );
++        assert_eq!(
++            searched("/var/work/Docs", "/private/var/work/docs"),
++            by("/var/work/docs")
++        );
++        assert_eq!(
++            searched("/home/me/link", "/home/me/src/lib"),
++            by("/home/me/src/lib")
++        );
++        assert_eq!(
++            searched("/private/var/work/docs", "/private/var/work/docs"),
++            by("/var/work/docs")
++        );
++        assert_eq!(
++            searched("/private/var/work", "/private/var/work"),
++            by("/var/work")
++        );
++        // A link or a `..` that leads out of the root it starts in.
++        assert_eq!(searched("/home/me/data", "/mnt/data"), by("/mnt/data"));
++        assert_eq!(
++            searched("/home/me/../shared", "/home/shared"),
++            by("/home/shared")
++        );
++        // A folder that doesn't look as if it were in a root, and isn't in
++        // one, has an index of its own under the name it is given by.
++        assert_eq!(searched("/tmp/link", "/mnt/elsewhere"), as_given);
++        assert_eq!(searched("/tmp/a/../b", "/tmp/b"), as_given);
++
++        // An index that follows links has a folder under a link's name. It
++        // has none under a `..`, or in another letter case than the disk's.
++        let followed = |scope: &str, real: &str| spelling(scope, real, true);
++        assert_eq!(followed("/home/me/link", "/home/me/src/lib"), as_given);
++        assert_eq!(followed("/home/me/data", "/mnt/data"), as_given);
++        assert_eq!(
++            followed("/home/me/link/../lib", "/home/me/src/lib"),
++            by("/home/me/src/lib")
++        );
++        assert_eq!(
++            followed("/home/me/../shared", "/home/shared"),
++            by("/home/shared")
++        );
++        assert_eq!(
++            followed("/home/me/documents", "/home/me/Documents"),
++            by("/home/me/Documents")
++        );
++        assert_eq!(
++            followed("/private/var/work/docs", "/private/var/work/docs"),
++            by("/var/work/docs")
++        );
++    }
++
+     #[test]
+     fn highlights() {
+         assert_eq!(highlight("Project Atlas.txt", "proj"), vec![(0, 4)]);
+@@ -4855,6 +5005,186 @@ mod tests {
+         std::fs::remove_dir_all(&dir).unwrap();
+     }
+ 
++    #[test]
++    fn a_folder_given_with_dot_dot_in_its_path_is_searched_where_it_is() {
++        let dir = std::env::temp_dir().join(format!("fff-dot-dot-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        for file in ["src/app/main.rs", "src/lib/parser.rs", "notes/parser.md"] {
++            let path = dir.join(file);
++            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
++            std::fs::write(path, "needle\n").unwrap();
++        }
++        let engine = Engine::new(EngineOptions {
++            roots: vec![dir.clone()],
++            app_dirs: Vec::new(),
++            db_dir: None,
++            watch: false,
++            search: Default::default(),
++        });
++        assert!(engine.wait_ready(Duration::from_secs(10)));
++        let by_name = |scope: &str, query: &str| {
++            let found = engine.search(&SearchRequest {
++                query: query.into(),
++                scope: Some(dir.join(scope)),
++                limit: 10,
++                files_only: true,
++                ..Default::default()
++            });
++            let hits = found.hits.into_iter();
++            hits.map(|h| h.entry.name).collect::<Vec<_>>()
++        };
++        // The files with the word in them, each once.
++        let by_contents = |scope: &str| {
++            let found = engine.grep(&GrepRequest {
++                patterns: vec!["needle".into()],
++                scope: Some(dir.join(scope)),
++                limit: 10,
++                ..Default::default()
++            });
++            let mut names: Vec<String> = found.hits.iter().map(|h| display_name(&h.path)).collect();
++            names.sort();
++            names
++        };
++
++        // As `fffinder ../lib --here` asks when it is run in `src/app`.
++        assert_eq!(by_name("src/app/../lib", "parser"), ["parser.rs"]);
++        assert_eq!(by_contents("src/app/../lib"), ["parser.rs"]);
++        // And `fffinder .. --here`: all of `src`, and nothing beside it.
++        assert_eq!(by_name("src/app/..", "main"), ["main.rs"]);
++        assert_eq!(by_name("src/app/..", "parser"), ["parser.rs"]);
++        assert_eq!(by_contents("src/app/.."), ["main.rs", "parser.rs"]);
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn a_folder_given_through_a_link_is_searched_where_it_is() {
++        let dir = std::env::temp_dir().join(format!("fff-links-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        let root = dir.join("root");
++        for file in ["root/src/lib/parser.rs", "elsewhere/far/parser-far.rs"] {
++            let path = dir.join(file);
++            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
++            std::fs::write(path, "needle\n").unwrap();
++        }
++        let link = |to: &str, at: &str| {
++            std::os::unix::fs::symlink(dir.join(to), dir.join(at)).unwrap();
++        };
++        link("root/src/lib", "root/inside");
++        link("elsewhere/far", "root/outside");
++        link("root/src/lib", "into");
++        let index = |follow_symlinks: bool| {
++            let engine = Engine::new(EngineOptions {
++                roots: vec![root.clone()],
++                app_dirs: Vec::new(),
++                db_dir: None,
++                watch: false,
++                search: SearchSettings {
++                    follow_symlinks,
++                    ..Default::default()
++                },
++            });
++            assert!(engine.wait_ready(Duration::from_secs(10)));
++            engine
++        };
++        // The one file a search of `scope` finds, by name and by contents.
++        let found = |engine: &Engine, scope: &str| {
++            let scope = dir.join(scope);
++            // A folder outside the root gets an index of its own first.
++            assert!(engine.prepare(Some(&scope), Duration::from_secs(10)));
++            let by_name = engine.search(&SearchRequest {
++                query: "parser".into(),
++                scope: Some(scope.clone()),
++                limit: 10,
++                ..Default::default()
++            });
++            let by_contents = engine.grep(&GrepRequest {
++                patterns: vec!["needle".into()],
++                scope: Some(scope),
++                limit: 10,
++                ..Default::default()
++            });
++            let names: Vec<PathBuf> = by_name.hits.into_iter().map(|h| h.entry.path).collect();
++            let lines: Vec<PathBuf> = by_contents.hits.into_iter().map(|h| h.path).collect();
++            assert_eq!(names, lines);
++            assert_eq!(names.len(), 1, "{names:?}");
++            names[0].clone()
++        };
++
++        // An index that doesn't follow links has nothing under a link's
++        // name. The folder a link leads to is in the root under its own
++        // name, or outside the root, where a `..` can lead as well.
++        let engine = index(false);
++        let inside = found(&engine, "root/inside");
++        assert!(inside.ends_with("root/src/lib/parser.rs"), "{inside:?}");
++        let outside = found(&engine, "root/outside");
++        assert!(
++            outside.ends_with("elsewhere/far/parser-far.rs"),
++            "{outside:?}"
++        );
++        assert_eq!(found(&engine, "root/../elsewhere/far"), outside);
++        // A link into the root from outside it leads to a folder in the root.
++        assert_eq!(found(&engine, "into"), inside);
++
++        // An index that follows links has the folder under the link's name
++        // as well, which is then the name it is found by. A `..` is in no
++        // index.
++        let engine = index(true);
++        let inside = found(&engine, "root/inside");
++        assert!(inside.ends_with("root/inside/parser.rs"), "{inside:?}");
++        let outside = found(&engine, "root/outside");
++        assert!(
++            outside.ends_with("root/outside/parser-far.rs"),
++            "{outside:?}"
++        );
++        let real = found(&engine, "root/inside/../lib");
++        assert!(real.ends_with("root/src/lib/parser.rs"), "{real:?}");
++        assert_eq!(found(&engine, "into"), real);
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    #[test]
++    fn a_folder_given_in_another_letter_case_is_searched_where_it_is() {
++        let dir = std::env::temp_dir().join(format!("fff-letter-case-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(dir.join("Docs")).unwrap();
++        std::fs::write(dir.join("Docs/readme.md"), "needle\n").unwrap();
++        // Only a disk that takes a name in either letter case, as most of
++        // those of macOS and Windows do, has the folder by this name too.
++        let scope = dir.join("docs");
++        if scope.is_dir() {
++            let engine = Engine::new(EngineOptions {
++                roots: vec![dir.clone()],
++                app_dirs: Vec::new(),
++                db_dir: None,
++                watch: false,
++                search: Default::default(),
++            });
++            assert!(engine.wait_ready(Duration::from_secs(10)));
++            let by_name = engine.search(&SearchRequest {
++                query: "readme".into(),
++                scope: Some(scope.clone()),
++                limit: 10,
++                ..Default::default()
++            });
++            let names: Vec<String> = by_name.hits.into_iter().map(|h| h.entry.name).collect();
++            assert_eq!(names, ["readme.md"]);
++            let by_contents = engine.grep(&GrepRequest {
++                patterns: vec!["needle".into()],
++                scope: Some(scope),
++                limit: 10,
++                ..Default::default()
++            });
++            let lines: Vec<String> = by_contents
++                .hits
++                .iter()
++                .map(|h| display_name(&h.path))
++                .collect();
++            assert_eq!(lines, ["readme.md"]);
++        }
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
+     #[test]
+     fn a_kind_goes_by_extension_and_a_typed_extension_narrows_it() {
+         let dir = std::env::temp_dir().join(format!("fff-kinds-{}", std::process::id()));
+diff --git a/docs/protocol.md b/docs/protocol.md
+index de175f9..df30274 100644
+--- a/docs/protocol.md
++++ b/docs/protocol.md
+@@ -88,7 +88,7 @@ Search file contents.
+ 
+ Rows: `{"path": "…", "line_number": 12, "column": 4, "byte_offset": 310, "line": "…", "matches": [{"start": 314, "end": 318}], "context_before": [], "context_after": []}`.
+ 
+-A `scope` written through a symlink (`/private/var/…` for `/var/…` on macOS) is matched to the search location it resolves into, here and in `/v1/find`. `matches` are byte offsets from the start of the file, like `idx search`.
++A `scope` written through a symlink (`/private/var/…` for `/var/…` on macOS), with `..` in it, or in another letter case on a disk that ignores case is matched to the folder it resolves to, here and in `/v1/find`. `matches` are byte offsets from the start of the file, like `idx search`.
+ 
+ ### `GET /v1/watch`
+ 
+diff --git a/tests/controls.rs b/tests/controls.rs
+index 4d77222..8fbe4bb 100644
+--- a/tests/controls.rs
++++ b/tests/controls.rs
+@@ -847,6 +847,32 @@ fn a_contents_search_of_one_folder_finds_its_files_whatever_its_name(cx: &mut Te
+     assert_eq!(status(&mut ui), "2 items");
+ }
+ 
++#[gpui_kit::test]
++fn search_only_in_finds_the_items_of_a_folder_gone_to_with_dot_dot(cx: &mut TestAppContext) {
++    let fx = Fixture::new("scope-dot-dot");
++    let mut ui = Ui::open(cx, &fx.dir);
++    // Go to Folder takes a path as it is typed: from `Projects/atlas` this
++    // one leads back up to `Projects`.
++    ui.go_to(&fx.path("Projects/atlas"));
++    ui.press(&cmd("shift-g"));
++    ui.type_text("..");
++    ui.press("enter");
++    assert_eq!(ui.folder(), Some(fx.path("Projects/atlas/..")));
++
++    ui.click("search-scope");
++    ui.click("search");
++    ui.type_text("atlas");
++    let names = ui.names();
++    assert!(names.iter().any(|n| n == "Project Atlas.txt"), "{names:?}");
++    ui.click("by-contents");
++    assert_eq!(ui.names(), ["Project Atlas.txt"], "the file with the word");
++
++    ui.press(&cmd("f"));
++    ui.type_text("budget");
++    ui.click("by-name");
++    assert!(ui.names().is_empty(), "Budget.csv is outside Projects");
++}
++
+ #[gpui_kit::test]
+ fn typing_on_stops_the_contents_search_for_what_was_typed_before(cx: &mut TestAppContext) {
+     let fx = Fixture::new("search-stop");
+diff --git a/tests/finder.rs b/tests/finder.rs
+index 02ea10c..5a6d278 100644
+--- a/tests/finder.rs
++++ b/tests/finder.rs
+@@ -2099,6 +2099,23 @@ fn a_search_sent_with_here_stays_in_the_folder(cx: &mut TestAppContext) {
+     assert_eq!(ui.names(), ["Budget.csv"]);
+ }
+ 
++#[gpui_kit::test]
++fn here_finds_what_is_in_a_folder_given_with_dot_dot_in_its_path(cx: &mut TestAppContext) {
++    let fx = Fixture::new("open-here-dot-dot");
++    let mut ui = Ui::open(cx, &fx.dir);
++    // What `fffinder .. --query atlas --here` hands over when it is run in
++    // `Projects/atlas`: the folder is `Projects`.
++    let projects = fx.path("Projects/atlas/..");
++
++    ui.update(|f, window, cx| f.open_request(Some(&projects), Some("atlas"), true, window, cx));
++    assert_eq!(ui.read(|f| f.search_scope()), SearchScope::Folder);
++    let names = ui.names();
++    assert!(names.iter().any(|n| n == "Project Atlas.txt"), "{names:?}");
++
++    ui.update(|f, window, cx| f.open_request(Some(&projects), Some("budget"), true, window, cx));
++    assert!(ui.names().is_empty(), "Budget.csv is outside Projects");
++}
++
+ #[gpui_kit::test]
+ fn here_narrows_a_search_that_is_sent_again_with_the_same_words(cx: &mut TestAppContext) {
+     let fx = Fixture::new("open-here-same-words");
+-- 
+2.43.0
+

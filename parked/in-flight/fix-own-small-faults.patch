@@ -1,0 +1,389 @@
+From 4ff4f82cf29eda6e70d718619825b3c88bff994a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 06:04:33 +0000
+Subject: [PATCH] mend dead keys, swallowed clicks, and a search run again for
+ nothing
+
+Three small faults in changes this branch made itself, two found by
+the review of the whole branch and one by the review of the
+double-click change.
+
+Go to Folder, called with the keyboard in the filter field of an open
+Smart Folder and confirmed with Return, left the keys dead until
+something was clicked: the arrow keys and typing did nothing, nor did
+Cmd+F and the other shortcuts the window itself handles. Going to the
+folder ends the Smart Folder's search, and its filter bar goes with
+it. The dialog then closed and gave the keyboard back to what had it
+when the dialog opened, the bar's field, which was no longer drawn.
+The net for a keyboard that is lost didn't act: what stopped being
+drawn with the keyboard was the dialog, which is no part of the
+browser, and GPUI reports nothing lost when the keyboard then lands on
+a field that isn't drawn. The same happened when `fff gui` or a second
+launch sent the window somewhere else with a dialog open over that
+field. As a frame is drawn, a browser now looks whether its filter
+field has the keyboard with its bar away, and gives the keyboard to
+its files. A dialog that leaves the bar where it is still gives the
+field the keyboard back.
+
+Choosing Relevance again in a search's Sort menu, where it is the
+checked item, turned around a direction that Relevance doesn't have.
+The menu then showed Descending checked, with both directions off, and
+a list whose items a sort may choose was searched again. It now does
+nothing, as choosing the direction a list already has does.
+
+After a double-click on a button under the file area's message, such
+as Search This Computer, every further click made without a pause or a
+move of the mouse was ignored: a double-click on the result that had
+come under the pointer opened nothing, for as long as the clicking
+went on. The guard for the second click of that double-click stopped
+every press the system counted second or later, until one it counted
+first. It now stops that one press only, and has the views count it as
+a press they left alone, so the click after it selects the result and
+the one after that opens it, as after a double-click on a dialog's
+button. When it is the next button that came under the pointer, the
+click after the double-click presses it. The guard stays, although the
+views by now leave such a second click alone on an item themselves:
+they don't on the next button or on a group's header.
+
+docs/manual.md: the Sort By line says that Relevance, chosen again,
+has no order to reverse.
+
+Changelog: none (fixes a fault in an unreleased change).
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CT7TqKfmTYMKX3NEP3oJ5f
+---
+ docs/manual.md       |   2 +-
+ src/finder/filter.rs |  19 ++++++
+ src/finder/mod.rs    |  28 ++++++--
+ src/finder/views.rs  |  22 +++++++
+ tests/controls.rs    | 150 +++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 213 insertions(+), 8 deletions(-)
+
+diff --git a/docs/manual.md b/docs/manual.md
+index 84df480..07fd85d 100644
+--- a/docs/manual.md
++++ b/docs/manual.md
+@@ -303,7 +303,7 @@ As in Finder, typing letters while the files have focus selects the first item w
+ 
+ The Sort and View Options menu has:
+ 
+-- **Sort By**: Relevance (only while searching), Name, Date Modified, Date Created, Size, and Kind. Choosing the current key again reverses the order. The list view's Date Last Opened header sorts by that date too, and in search results and Recents, the Folder header sorts by folder.
++- **Sort By**: Relevance (only while searching), Name, Date Modified, Date Created, Size, and Kind. Choosing the current key again reverses the order, except for Relevance, which has none to reverse. The list view's Date Last Opened header sorts by that date too, and in search results and Recents, the Folder header sorts by folder.
+ - **Ascending** and **Descending**. Both are disabled for Relevance.
+ - **Keep Folders on Top**. See [The list view](#the-list-view).
+ - **Show Hidden Files**.
+diff --git a/src/finder/filter.rs b/src/finder/filter.rs
+index 1bb76c3..5f8bca4 100644
+--- a/src/finder/filter.rs
++++ b/src/finder/filter.rs
+@@ -312,6 +312,25 @@ impl Finder {
+         }
+     }
+ 
++    /// A frame is about to be drawn. The bar's field may have the keyboard
++    /// though the bar isn't showing: a dialog gives the keyboard back to
++    /// what had it when the dialog opened, and the bar can go in the
++    /// meantime, as when Go to Folder is called from a Smart Folder's filter
++    /// field and ends that search. Keys pressed in a field that isn't drawn
++    /// go nowhere. GPUI reports nothing lost when the keyboard lands on
++    /// such a field, so [`Self::keyboard_lost`] can't be the one to act.
++    /// The files take the keyboard, in time for this frame to draw them
++    /// with it.
++    pub(super) fn check_filter_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        if self.filter_bar_open() {
++            return;
++        }
++        let field = self.filter_input.read(cx).focus_handle(cx);
++        if field.is_focused(window) {
++            self.focus_files(window, cx);
++        }
++    }
++
+     /// Run a saved search: its place, kind, filter, and words.
+     pub fn open_smart_folder(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+         let Some(folder) = self.config.smart_folders.get(ix).cloned() else {
+diff --git a/src/finder/mod.rs b/src/finder/mod.rs
+index ac5f1d7..8c587b9 100644
+--- a/src/finder/mod.rs
++++ b/src/finder/mod.rs
+@@ -589,9 +589,10 @@ pub struct Finder {
+     /// propagation, so the empty-space menu around the item checks this and
+     /// stays closed for the same click.
+     item_menu_at: Option<Point<Pixels>>,
+-    /// A button under the file area's message was clicked, and no click has
+-    /// begun in the file area since. The second press of a double-click on
+-    /// the button finds what the first one put in its place.
++    /// A button under the file area's message was clicked, and the left
++    /// button hasn't been pressed in the file area since. The second press
++    /// of a double-click on the button finds what the first one put in its
++    /// place.
+     message_button_clicked: bool,
+     /// What the last presses of the mouse landed on, for telling a
+     /// double-click on an item from a second click that only ends up on it.
+@@ -3253,6 +3254,12 @@ impl Finder {
+ 
+     pub fn set_sort(&mut self, key: SortKey, cx: &mut Context<Self>) {
+         let current = self.sort_order();
++        // Relevance has no direction to turn around. Chosen again, it is
++        // the sort the results already have, and no change to search again
++        // for.
++        if key == SortKey::Relevance && current.key == key {
++            return;
++        }
+         let order = if current.key == key {
+             SortOrder {
+                 key,
+@@ -4340,6 +4347,7 @@ fn content_search(
+ impl Render for Finder {
+     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         self.rename_frame_started();
++        self.check_filter_field(window, cx);
+         let (background, foreground, font) = {
+             let theme = cx.theme();
+             (
+@@ -4656,16 +4664,22 @@ impl Finder {
+                 }
+             }))
+             // A double-click on a button under the message presses it once.
+-            // The second press is no click on the item that is now where
+-            // the button was, which it would open, or on the next button.
++            // Its second press is no click on what has come to where the
++            // button was. On an item or in empty space the views would leave
++            // it alone themselves, but not on the next button or on a
++            // group's header, so it is stopped here, whatever it lands on.
++            // Only that press is stopped, and the views count it as one
++            // they left alone: the press after it is a click again, or a
++            // double-click on what has come under the mouse would open
++            // nothing until the mouse rested or moved.
+             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                 if event.button != MouseButton::Left || !this.message_button_clicked {
+                     return;
+                 }
++                this.message_button_clicked = false;
+                 if event.click_count >= 2 {
++                    this.presses.left_alone();
+                     cx.stop_propagation();
+-                } else {
+-                    this.message_button_clicked = false;
+                 }
+             }))
+             .on_action(cx.listener(Self::escape))
+diff --git a/src/finder/views.rs b/src/finder/views.rs
+index ce5bd04..55bf699 100644
+--- a/src/finder/views.rs
++++ b/src/finder/views.rs
+@@ -169,6 +169,13 @@ impl Presses {
+         !stray
+     }
+ 
++    /// The press was stopped before it reached what it landed on, as the rest
++    /// of a double-click on a button under the file area's message. It counts
++    /// as one the views left alone, so the press after it is a click again.
++    pub(super) fn left_alone(&mut self) {
++        self.last = Some(Pressed::LeftAlone);
++    }
++
+     /// Presses were made that the browser didn't hear of, in a window over
+     /// its own or while its tab was hidden. What it remembers is out of date.
+     fn forget(&mut self) {
+@@ -1614,6 +1621,21 @@ mod tests {
+         assert_eq!(press(&mut presses, "/a", 3), Some(1));
+     }
+ 
++    #[test]
++    fn the_click_after_a_press_that_was_stopped_on_its_way_is_a_first_click() {
++        let mut presses = Presses::default();
++
++        // A double-click on a button under the file area's message, where
++        // an item is listed once the button has gone. The file area stops
++        // the second press before the item hears of it.
++        presses.began();
++        presses.began();
++        presses.left_alone();
++
++        assert_eq!(press(&mut presses, "/a", 3), Some(1));
++        assert_eq!(press(&mut presses, "/a", 4), Some(4));
++    }
++
+     #[test]
+     fn a_second_click_after_presses_that_went_unheard_is_no_click_on_an_item() {
+         let mut presses = Presses::default();
+diff --git a/tests/controls.rs b/tests/controls.rs
+index 4d77222..0a2125f 100644
+--- a/tests/controls.rs
++++ b/tests/controls.rs
+@@ -1059,6 +1059,46 @@ fn a_sort_chooses_among_every_match_not_among_the_ones_listed(cx: &mut TestAppCo
+     assert_eq!(ui.names(), ["b.log", "c.log"]);
+ }
+ 
++#[gpui_kit::test]
++fn relevance_chosen_again_is_no_other_sort(cx: &mut TestAppContext) {
++    let fx = Fixture::new("search-sort-relevance");
++    for name in ["a.log", "b.log", "c.log", "d.log"] {
++        std::fs::write(fx.path(name), "x").unwrap();
++    }
++    let mut ui = Ui::open(cx, &fx.dir);
++    ui.click("view-list");
++    ui.update(|f, _, cx| {
++        f.set_result_limit(3, cx);
++        f.set_query("*.log".into(), true, cx);
++    });
++    assert_eq!(ui.names().len(), 3, "three of the four fit");
++    let relevance = ui.read(|f| f.current_sort());
++    assert_eq!(relevance.key, SortKey::Relevance);
++
++    // A sort would choose which three are listed, so another sort searches
++    // again. Relevance has no direction to turn around: chosen again, it
++    // is the sort the list already has.
++    let view = ui.view.clone();
++    ui.window(|_, cx| {
++        view.update(cx, |f, cx| {
++            f.set_sort(SortKey::Relevance, cx);
++            assert!(!f.search_in_flight_for_test());
++        })
++    });
++    assert_eq!(ui.read(|f| f.current_sort()), relevance);
++
++    // The Sort menu's checked item can be clicked all the same.
++    ui.click("sort");
++    ui.click_menu_item("Relevance");
++    assert_eq!(ui.read(|f| f.current_sort()), relevance);
++
++    // Another sort is one this list is searched again for.
++    ui.click_without_settling("Size");
++    assert!(ui.read(|f| f.search_in_flight_for_test()));
++    ui.settle();
++    assert_eq!(ui.read(|f| f.current_sort().key), SortKey::Size);
++}
++
+ #[gpui_kit::test]
+ fn a_sort_by_a_word_stays_with_the_names_that_have_it(cx: &mut TestAppContext) {
+     let fx = Fixture::new("search-sort-word");
+@@ -1989,6 +2029,66 @@ fn a_double_click_on_a_button_under_no_results_opens_nothing(cx: &mut TestAppCon
+     );
+ }
+ 
++#[gpui_kit::test]
++fn a_double_click_on_a_button_under_no_results_holds_up_no_click_after_it(cx: &mut TestAppContext) {
++    let fx = Fixture::new("search-nothing-then");
++    // Enough files that one of them is listed where the button was.
++    for n in 0..60 {
++        std::fs::write(fx.path(&format!("quokka {n:02}.txt")), "").unwrap();
++    }
++    let mut ui = Ui::open(cx, &fx.dir);
++    ui.click("view-list");
++    ui.go_to(&fx.path("Projects"));
++    ui.click("search-scope");
++    ui.click("search");
++    ui.type_text("quokka");
++    assert!(ui.names().is_empty(), "{:?}", ui.names());
++
++    let button = ui.snapshot("empty-widen-scope").bounds().center();
++    ui.click("empty-widen-scope");
++    let found: Vec<PathBuf> = ui.read(|f| {
++        f.rows_for_test()
++            .iter()
++            .map(|r| r.entry.path.clone())
++            .collect()
++    });
++    let under = found
++        .into_iter()
++        .find(|path| {
++            let row = item_id("row", path);
++            ui.exists(row.clone()) && ui.snapshot(row).bounds().contains(&button)
++        })
++        .expect("a result is listed where the button was");
++    let name = under.file_name().unwrap().to_string_lossy().into_owned();
++    ui.nth_click_point(button, 2);
++    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
++
++    // Clicked on without a pause or a move, that result is clicked for the
++    // third and fourth time at that spot, as the system counts. They are
++    // its first click and its second: no pause is needed before a
++    // double-click opens it.
++    ui.nth_click_point(button, 3);
++    assert_eq!(ui.selected(), [name]);
++    assert_eq!(ui.system_calls(), []);
++    ui.nth_click_point(button, 4);
++    assert_eq!(ui.system_calls(), [SystemCall::Open(under)]);
++
++    // The same when it is the next button that has come under the pointer:
++    // no folder is named quokka, on This Computer either. The click after
++    // the double-click presses that button.
++    ui.click("search-scope");
++    ui.click("kind");
++    ui.click_menu_item("Folder");
++    assert!(ui.names().is_empty(), "{:?}", ui.names());
++    ui.click("empty-widen-scope");
++    let next = ui.snapshot("empty-any-kind").bounds().center();
++    ui.nth_click_point(next, 2);
++    assert_eq!(ui.read(|f| f.config().kind_filter), KindFilter::Folder);
++    ui.nth_click_point(next, 3);
++    assert_eq!(ui.read(|f| f.config().kind_filter), KindFilter::Any);
++    assert_eq!(ui.names().len(), 60);
++}
++
+ #[gpui_kit::test]
+ fn a_double_click_on_a_button_under_no_results_doesnt_press_the_next_one(cx: &mut TestAppContext) {
+     let fx = Fixture::new("search-nothing-next");
+@@ -4365,6 +4465,56 @@ fn the_keyboard_stays_in_the_window_when_a_smart_folder_takes_the_filter_bar_awa
+     assert!(ui.exists("filter-input"), "the window's own bar is back");
+ }
+ 
++#[gpui_kit::test]
++fn the_files_get_the_keyboard_when_a_dialog_gives_it_back_to_a_filter_bar_that_went(
++    cx: &mut TestAppContext,
++) {
++    let fx = Fixture::new("smart-filter-dialog");
++    let mut ui = Ui::open(cx, &fx.dir);
++    let filtered = atlas_folders(&fx);
++    ui.update(|f, _, cx| f.add_smart_folder(filtered, cx));
++
++    // A dialog gives the keyboard back to what had it when it opened: here
++    // the Smart Folder's filter field. Return goes to the folder first, which
++    // ends the search, and the bar goes with it.
++    ui.click(("smart", 0usize));
++    ui.click("filter-input");
++    ui.press(&cmd("shift-g"));
++    ui.type_text(&fx.dir.display().to_string());
++    ui.press("enter");
++    assert!(!ui.dialog_open());
++    assert_eq!(ui.folder(), Some(fx.dir.clone()));
++    assert!(!ui.exists("filter-input"));
++    assert!(ui.files_focused());
++    ui.press("down");
++    assert_eq!(ui.selected(), ["Budget.csv"]);
++
++    // The same when the window is sent somewhere else, as by `fff gui`,
++    // with any other dialog open over that field.
++    ui.click(("smart", 0usize));
++    ui.click("filter-input");
++    ui.press(&cmd("/"));
++    assert!(ui.dialog_open());
++    let dir = fx.dir.clone();
++    ui.update(|f, window, cx| f.open_request(Some(&dir), None, false, window, cx));
++    assert!(!ui.exists("filter-input"));
++    ui.press("escape");
++    assert!(!ui.dialog_open());
++    assert!(ui.files_focused());
++    ui.press("down");
++    assert_eq!(ui.selected(), ["Budget.csv"]);
++
++    // With the bar still there when the dialog closes, typing goes on in
++    // its field.
++    ui.click(("smart", 0usize));
++    ui.click("filter-input");
++    ui.press(&cmd("shift-g"));
++    ui.press("escape");
++    assert!(!ui.dialog_open());
++    ui.type_text("0");
++    assert_eq!(ui.read(|f| f.filter_text().to_string()), "size > 1kb0");
++}
++
+ #[gpui_kit::test]
+ fn save_search_is_on_a_key_and_in_the_actions_menu(cx: &mut TestAppContext) {
+     let fx = Fixture::new("smart-save-key");
+-- 
+2.43.0
+
