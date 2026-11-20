@@ -8,3 +8,7 @@ stale-rows-on-place-change
 stray-double-click-opens-file
 thumbnail-memory
 tab-drop-and-close
+fix-rename-press-selection
+fix-filter-reruns-and-fresh-rows
+fix-own-small-faults
+fix-here-folder-spelling

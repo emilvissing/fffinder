@@ -74,5 +74,9 @@
   "multi-word-highlights": [
     "near-miss-beside-scattered",
     "accented-names-search"
+  ],
+  "fix-folder-search-own-name-pool": [
+    "near-miss-beside-scattered",
+    "accented-names-search"
   ]
 }

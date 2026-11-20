@@ -80,6 +80,21 @@
   "text": "Double-click Done in Settings while a file is under the pointer: the file does not open. Then double-click a file: it opens as before. Close Quick Look's window with a click and click a file right away: it is selected."
  },
  {
+  "cat": "mac",
+  "id": "thumbnail-memory",
+  "text": "Open a folder of photos, HEIC included, in the icon view and the gallery: tiles show the kind icon and then a thumbnail, and memory stays flat while you scroll."
+ },
+ {
+  "cat": "mac",
+  "id": "tab-drop-and-close",
+  "text": "Drag files from Finder onto another tab: they are copied into its folder. Option-drag an item from fffinder onto a tab: it is copied, not moved. A mouse's middle button closes a tab."
+ },
+ {
+  "cat": "mac",
+  "id": "stale-rows-on-place-change",
+  "text": "Right after launch, go to Recents while the index is still being built: placeholders show, not the last folder's files. Step between folders on the local disk: no flash in between."
+ },
+ {
   "cat": "changed",
   "id": "smart-folder-save-and-leaks",
   "text": "A Smart Folder's filter, kind and scope now end with its search, so the next folder you open is no longer filtered. If you used a Smart Folder to load a filter and then browse, type the filter in the filter bar instead."
@@ -190,6 +205,26 @@
   "text": "In the column view an item stays selected when its column is read again, sorted or refreshed; it used to jump to a neighbour. Sort By now sorts every column, and Escape clears the selection there as in the other views."
  },
  {
+  "cat": "changed",
+  "id": "new-item-in-hidden-row",
+  "text": "New Folder opens its group when the group is collapsed, and under a Nushell filter the new folder stays listed while you name it. The status bar now counts the items of collapsed groups."
+ },
+ {
+  "cat": "changed",
+  "id": "thumbnail-memory",
+  "text": "Image tiles show a thumbnail fffinder makes itself instead of loading every photo whole, so a folder of photos no longer fills memory. An image saved again shows its new picture once its folder is read again."
+ },
+ {
+  "cat": "changed",
+  "id": "tab-drop-and-close",
+  "text": "Tabs take more from the mouse: drop items on another tab to move or copy them into its folder, middle-click a tab to close it, and a tab's right-click menu has Close Other Tabs."
+ },
+ {
+  "cat": "changed",
+  "id": "stale-rows-on-place-change",
+  "text": "After you go to another place, the previous place's items can no longer be selected, opened or dragged. They show for a sixth of a second at most, then placeholders take their place until the new place has been read."
+ },
+ {
   "cat": "call",
   "id": "fuzzy-word-case",
   "text": "A search word with a capital runs two searches, so that capitals can count as a preference instead of a requirement. A simpler one-search version was written and set aside."
@@ -258,6 +293,36 @@
   "cat": "call",
   "id": "stray-double-click-opens-file",
   "text": "A stray second click does nothing at all; it does not select the file under it. A sloppy double-click that starts just beside an item no longer opens it, and the column view is the least forgiving about that."
+ },
+ {
+  "cat": "call",
+  "id": "new-item-in-hidden-row",
+  "text": "A folder named under a filter it doesn't pass leaves the list when you press Return, with nothing saying it was made; the filter bar and the status bar's count are what explain it. The group that opened for a new folder stays open."
+ },
+ {
+  "cat": "call",
+  "id": "thumbnail-memory",
+  "text": "Small copies of the photos you browse are now kept on disk, in thumbnails/ in fffinder's data folder (capped at 256 MB), also for photos on volumes since removed. PDF and video thumbnails were already kept there."
+ },
+ {
+  "cat": "call",
+  "id": "thumbnail-memory",
+  "text": "Large image previews keep only the last three per tab or pane. Going back to an older one decodes it again, with its place empty meanwhile."
+ },
+ {
+  "cat": "call",
+  "id": "thumbnail-memory",
+  "text": "Cargo.toml turns on seven image formats of the `image` crate the project already uses (no new crate; GPUI builds them anyway)."
+ },
+ {
+  "cat": "call",
+  "id": "tab-drop-and-close",
+  "text": "A middle click closes a tab without asking, and a closed tab can't be reopened. Quick middle clicks at one spot close one tab after another. `close_tab_at_press` is the one place to change that."
+ },
+ {
+  "cat": "call",
+  "id": "stale-rows-on-place-change",
+  "text": "The old items stay on screen for 150 ms (`LEFT_BEHIND_STAY` in src/finder/mod.rs). A folder that takes a little longer than that to read, as on a network volume, flashes placeholders on every step."
  },
  {
   "cat": "limit",
@@ -341,13 +406,8 @@
  },
  {
   "cat": "limit",
-  "id": "collapsed-groups-empty-view",
-  "text": "The status bar counts only the rows that show, so it reads “0 items” under collapsed groups whose headers count more. New Folder while its group is collapsed leaves the keyboard in a name field that isn't drawn. A follow-up for both is queued."
- },
- {
-  "cat": "limit",
   "id": "stale-previews-and-cancel",
-  "text": "A picture's preview and thumbnail still show the first version that was read, until fffinder restarts. A file written over in place, which changes nothing about its folder, shows as it was until Refresh."
+  "text": "A file written over in place, which changes nothing about its folder, shows as it was until Refresh; an image written over with its date kept is not read again even then."
  },
  {
   "cat": "limit",
@@ -358,6 +418,16 @@
   "cat": "limit",
   "id": "column-pane-selection-by-path",
   "text": "In the column view, Paste, New Folder and New File always go to the window's folder, even when a later column is the one in use. The status bar's selection count does not follow the column in use."
+ },
+ {
+  "cat": "limit",
+  "id": "thumbnail-memory",
+  "text": "HEIC and RAW photos are shown large from the system's own thumbnail, which is still kept for the session, so the gallery over iPhone originals still grows by about 3 MB per photo shown. Tile thumbnails are not freed during a session either."
+ },
+ {
+  "cat": "limit",
+  "id": "tab-drop-and-close",
+  "text": "Holding a drag over a tab does not switch to that tab, as Finder does. Close Other Tabs has no key and is not in the menu bar."
  },
  {
   "cat": "upstream",

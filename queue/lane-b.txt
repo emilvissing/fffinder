@@ -4,3 +4,7 @@ accented-names-search
 near-miss-beside-scattered
 tab-drop-and-close
 stale-rows-on-place-change
+fix-rename-press-selection
+fix-filter-reruns-and-fresh-rows
+fix-own-small-faults
+fix-here-folder-spelling

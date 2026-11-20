@@ -1,4 +1,6 @@
 # Beyond the cut-off of 20 Nov: saved for later, highest value first. The first two were parked last, at the owner's request.
+fix-wording-after-later-changes  # 3 S  parked at 06:25 UTC, 20 Nov, at the owner's request (a fix-up from the whole-branch review)
+fix-folder-search-own-name-pool  # 3 M  parked at 06:25 UTC, 20 Nov, at the owner's request (a fix-up from the whole-branch review)
 column-row-menu-wrong-item  # 5 S  parked at 04:10 UTC, 20 Nov, at the owner's request
 split-active-pane  # 4 M  parked at 04:10 UTC, 20 Nov, at the owner's request
 collapsible-sidebar-sections  # 3 M
