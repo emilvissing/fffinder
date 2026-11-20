@@ -1313,6 +1313,33 @@ fn a_search_of_one_folder_follows_that_folder(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_search_of_a_folder_given_with_dot_dot_follows_that_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-dot-dot");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // `Projects`, by a path the index doesn't have it under. The index
+    // reports a new file by the folder's own name.
+    ui.go_to(&fx.path("Projects/atlas/.."));
+    ui.update(|f, _, cx| f.set_scope(SearchScope::Folder, cx));
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+    assert!(lists(&ui, "Project Atlas.txt"), "{:?}", ui.names());
+
+    std::fs::write(fx.path("Projects/atlas-inside.txt"), "x").unwrap();
+    std::fs::write(fx.path("atlas-outside.txt"), "x").unwrap();
+    ui.reindex();
+    ui.report_change(None, Some(&fx.path("atlas-outside.txt")));
+    ui.look_for_changes(3);
+    assert!(
+        !lists(&ui, "atlas-inside.txt"),
+        "a file outside the folder is none of the search's business"
+    );
+    ui.report_change(None, Some(&fx.path("Projects/atlas-inside.txt")));
+    ui.look_for_changes(2);
+    assert!(lists(&ui, "atlas-inside.txt"), "{:?}", ui.names());
+    assert!(!lists(&ui, "atlas-outside.txt"));
+}
+
+#[gpui_kit::test]
 fn a_search_run_again_for_the_index_shows_no_sign_of_running(cx: &mut TestAppContext) {
     let fx = Fixture::new("search-follows-quietly");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -2263,6 +2290,23 @@ fn a_search_sent_with_here_stays_in_the_folder(cx: &mut TestAppContext) {
     assert!(ui.names().is_empty());
     ui.click("search-scope");
     assert_eq!(ui.names(), ["Budget.csv"]);
+}
+
+#[gpui_kit::test]
+fn here_finds_what_is_in_a_folder_given_with_dot_dot_in_its_path(cx: &mut TestAppContext) {
+    let fx = Fixture::new("open-here-dot-dot");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // What `fffinder .. --query atlas --here` hands over when it is run in
+    // `Projects/atlas`: the folder is `Projects`.
+    let projects = fx.path("Projects/atlas/..");
+
+    ui.update(|f, window, cx| f.open_request(Some(&projects), Some("atlas"), true, window, cx));
+    assert_eq!(ui.read(|f| f.search_scope()), SearchScope::Folder);
+    let names = ui.names();
+    assert!(names.iter().any(|n| n == "Project Atlas.txt"), "{names:?}");
+
+    ui.update(|f, window, cx| f.open_request(Some(&projects), Some("budget"), true, window, cx));
+    assert!(ui.names().is_empty(), "Budget.csv is outside Projects");
 }
 
 #[gpui_kit::test]

@@ -345,7 +345,7 @@ While a search is active, the scope bar shows the controls below. A click on Thi
 | Control | What it does |
 | --- | --- |
 | This Computer | Search every search location (set in Settings). |
-| "Folder name" | Search only the folder you were in. Folders outside the search locations get a temporary index the first time. |
+| "Folder name" | Search only the folder you were in. Folders outside the search locations get a temporary index the first time. A folder you opened through a symbolic link is searched where the link points, and its results show that place, unless **Follow symbolic links** is on in [Settings › Search engine](#search-engine). |
 | Name | Match file and folder names. |
 | Contents | Search inside files. Results show the first matching line, and a result's [text preview](#previews-and-quick-look) opens at that line. Letter case, the largest file searched, and the time limit are set in [Settings › Search engine](#search-engine). |
 | Save | Save the search as a [Smart Folder](#filters-and-smart-folders) (Cmd+S). |

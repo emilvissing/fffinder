@@ -848,6 +848,32 @@ fn a_contents_search_of_one_folder_finds_its_files_whatever_its_name(cx: &mut Te
 }
 
 #[gpui_kit::test]
+fn search_only_in_finds_the_items_of_a_folder_gone_to_with_dot_dot(cx: &mut TestAppContext) {
+    let fx = Fixture::new("scope-dot-dot");
+    let mut ui = Ui::open(cx, &fx.dir);
+    // Go to Folder takes a path as it is typed: from `Projects/atlas` this
+    // one leads back up to `Projects`.
+    ui.go_to(&fx.path("Projects/atlas"));
+    ui.press(&cmd("shift-g"));
+    ui.type_text("..");
+    ui.press("enter");
+    assert_eq!(ui.folder(), Some(fx.path("Projects/atlas/..")));
+
+    ui.click("search-scope");
+    ui.click("search");
+    ui.type_text("atlas");
+    let names = ui.names();
+    assert!(names.iter().any(|n| n == "Project Atlas.txt"), "{names:?}");
+    ui.click("by-contents");
+    assert_eq!(ui.names(), ["Project Atlas.txt"], "the file with the word");
+
+    ui.press(&cmd("f"));
+    ui.type_text("budget");
+    ui.click("by-name");
+    assert!(ui.names().is_empty(), "Budget.csv is outside Projects");
+}
+
+#[gpui_kit::test]
 fn typing_on_stops_the_contents_search_for_what_was_typed_before(cx: &mut TestAppContext) {
     let fx = Fixture::new("search-stop");
     let mut ui = Ui::open(cx, &fx.dir);

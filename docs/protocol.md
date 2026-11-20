@@ -88,7 +88,7 @@ Search file contents.
 
 Rows: `{"path": "…", "line_number": 12, "column": 4, "byte_offset": 310, "line": "…", "matches": [{"start": 314, "end": 318}], "context_before": [], "context_after": []}`.
 
-A `scope` written through a symlink (`/private/var/…` for `/var/…` on macOS) is matched to the search location it resolves into, here and in `/v1/find`. `matches` are byte offsets from the start of the file, like `idx search`.
+A `scope` written through a symlink (`/private/var/…` for `/var/…` on macOS), with `..` in it, or in another letter case on a disk that ignores case is matched to the folder it resolves to, here and in `/v1/find`. `matches` are byte offsets from the start of the file, like `idx search`.
 
 ### `GET /v1/watch`
 

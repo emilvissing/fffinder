@@ -31,6 +31,11 @@ const MAX_ADHOC: usize = 3;
 /// that many between two looks, a search is told only that things changed.
 const CHANGES_KEPT: usize = 512;
 
+/// The most folders that [`Changes`] keeps the index's name for, of those
+/// searched by another name than they were given by. Only a search that a
+/// window still shows is asked after, so a few are plenty.
+const RESPELLED_KEPT: usize = 16;
+
 #[derive(Debug, Clone)]
 pub struct EngineOptions {
     pub roots: Vec<PathBuf>,
@@ -372,6 +377,11 @@ struct ChangeLog {
     /// The folders of the indexes that report, as fff-search spells them,
     /// which is how the paths of their files begin.
     bases: Vec<PathBuf>,
+    /// The folders that the last searches found in an index under other
+    /// names than they were given by, each as given and then as searched,
+    /// the last one first. The paths of the files in such a folder begin
+    /// with the name it was searched by.
+    respelled: VecDeque<(PathBuf, PathBuf)>,
 }
 
 /// A file an index took in, let go of, or both, when it was renamed.
@@ -458,6 +468,18 @@ impl Changes {
         let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
         if !log.bases.contains(&base) {
             log.bases.push(base);
+        }
+    }
+
+    /// Keep the name that a search of the folder `given` searched it by, or
+    /// with `None` that it searched it as given.
+    fn searched_as(&self, given: &Path, searched: Option<&Path>) {
+        let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+        log.respelled.retain(|(folder, _)| folder != given);
+        if let Some(searched) = searched {
+            log.respelled
+                .push_front((given.to_path_buf(), searched.to_path_buf()));
+            log.respelled.truncate(RESPELLED_KEPT);
         }
     }
 }
@@ -632,6 +654,10 @@ impl Engine {
     /// for its scan. Returns whether it is ready.
     pub fn prepare(&self, scope: Option<&Path>, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
+        // The index a search of the folder goes to, which is the one that
+        // covers the folder as the search spells it.
+        let as_indexed = scope.and_then(|s| self.root_spelling(s));
+        let scope = as_indexed.as_deref().or(scope);
         self.indexes_for(scope).iter().all(|r| {
             let left = deadline.saturating_duration_since(Instant::now());
             r.picker.wait_for_scan(left)
@@ -742,6 +768,16 @@ impl Engine {
         if numbers.start < log.rescanned || dropped {
             return None;
         }
+        // The search's folder by the name it was searched by, which is the
+        // one the files in it are reported under.
+        let searched = req.scope.as_deref().and_then(|given| {
+            let (_, searched) = log.respelled.iter().find(|(folder, _)| folder == given)?;
+            Some(SearchRequest {
+                scope: Some(searched.clone()),
+                ..req.clone()
+            })
+        });
+        let req = searched.as_ref().unwrap_or(req);
         // A folder spelled another way than the paths here begin could hold
         // any of them, so only one spelled the same narrows them down.
         let scope = req
@@ -813,22 +849,19 @@ impl Engine {
         self.changes.note(&base, &[event]);
     }
 
-    /// `scope` spelled the way a root is, when it is inside one only after
-    /// resolving symlinks; `None` when it needs no change.
+    /// `scope` as the indexes have the folder, when that isn't how it is
+    /// spelled (see [`index_spelling`]); `None` when it needs no change.
+    /// The answer is kept for [`Self::changes_for`], which is asked about
+    /// the search afterwards, by a window that can't wait for a disk.
     fn root_spelling(&self, scope: &Path) -> Option<PathBuf> {
-        let indexes = self.read_indexes();
-        if indexes.roots.iter().any(|r| scope.starts_with(&r.path)) {
-            return None;
-        }
-        let real = std::fs::canonicalize(scope).ok()?;
-        indexes.roots.iter().find_map(|r| {
-            let rest = real.strip_prefix(&r.canonical).ok()?;
-            Some(if rest.as_os_str().is_empty() {
-                r.path.clone()
-            } else {
-                r.path.join(rest)
-            })
-        })
+        // Asked before the indexes are locked: a disk can be slow to answer.
+        let real = std::fs::canonicalize(scope).ok();
+        let follows_links = self.search_settings().follow_symlinks;
+        let spelled = real.and_then(|real| {
+            index_spelling(scope, real, &self.read_indexes().roots, follows_links)
+        });
+        self.changes.searched_as(scope, spelled.as_deref());
+        spelled
     }
 
     /// Indexes covering `scope`: the roots containing it, or a temporary
@@ -868,12 +901,12 @@ impl Engine {
     }
 
     pub fn search(&self, req: &SearchRequest) -> SearchResponse {
-        if let Some(scope) = req.scope.as_deref().and_then(|s| self.root_spelling(s)) {
-            return self.search(&SearchRequest {
-                scope: Some(scope),
-                ..req.clone()
-            });
-        }
+        let as_indexed = req.scope.as_deref().and_then(|s| self.root_spelling(s));
+        let as_indexed = as_indexed.map(|scope| SearchRequest {
+            scope: Some(scope),
+            ..req.clone()
+        });
+        let req = as_indexed.as_ref().unwrap_or(req);
         let started = Instant::now();
         let limit = if req.limit == 0 { 500 } else { req.limit };
         // A sort starts from the list the search makes without it. That is
@@ -1339,13 +1372,12 @@ impl Engine {
         req: &GrepRequest,
         abort: Option<&Arc<AtomicBool>>,
     ) -> GrepResponse {
-        if let Some(scope) = req.scope.as_deref().and_then(|s| self.root_spelling(s)) {
-            let req = GrepRequest {
-                scope: Some(scope),
-                ..req.clone()
-            };
-            return self.grep_cancellable(&req, abort);
-        }
+        let as_indexed = req.scope.as_deref().and_then(|s| self.root_spelling(s));
+        let as_indexed = as_indexed.map(|scope| GrepRequest {
+            scope: Some(scope),
+            ..req.clone()
+        });
+        let req = as_indexed.as_ref().unwrap_or(req);
         let settings = self.search_settings();
         let started = Instant::now();
         let limit = if req.limit == 0 { 200 } else { req.limit };
@@ -3171,6 +3203,74 @@ fn strip_trailing_separator(path: &Path) -> PathBuf {
     }
 }
 
+/// `scope`, a folder that is really at `real`, spelled the way it has to be
+/// searched by, when that isn't the way it was given. An index has a folder
+/// under the names the disk gives it on the way down from the root. So a
+/// folder given through a link, with `..` in its path, or in another letter
+/// case is in no index under the names it was given by, though by them it
+/// may look as if it were in a root. One that is really in a root is spelled
+/// the way that root is, and from there on by its real names. One that only
+/// looks as if it were in a root is spelled by its real path, and is then
+/// searched like any other folder outside the roots.
+///
+/// # Arguments
+///
+/// * `scope` - The folder as it was given
+/// * `real` - Where it is: its path with no link or `..` in it, and each name
+///   in the letter case the disk has it in
+/// * `roots` - The search roots
+/// * `follows_links` - Whether the roots' indexes follow links
+///
+/// # Returns
+///
+/// The folder as it is to be searched, or `None` to search it as it was given
+fn index_spelling(
+    scope: &Path,
+    real: PathBuf,
+    roots: &[RootIndex],
+    follows_links: bool,
+) -> Option<PathBuf> {
+    // The folder as each root that it is really in has it.
+    let spellings: Vec<PathBuf> = roots
+        .iter()
+        .filter_map(|r| {
+            let rest = real.strip_prefix(&r.canonical).ok()?;
+            Some(if rest.as_os_str().is_empty() {
+                r.path.clone()
+            } else {
+                r.path.join(rest)
+            })
+        })
+        .collect();
+    if spellings.iter().any(|spelled| spelled == scope) {
+        return None;
+    }
+    let looks_inside = roots.iter().find_map(|r| scope.strip_prefix(&r.path).ok());
+    if follows_links && let Some(rest) = looks_inside {
+        // An index that follows links has a linked folder under the link's
+        // name as well, and that is then the name to search it by. Under a
+        // `..` it has nothing, and a path that is the folder's own but for
+        // its letter case doesn't lead through a link.
+        let climbs = rest
+            .components()
+            .any(|part| part == std::path::Component::ParentDir);
+        let lower = |path: &Path| -> Vec<String> {
+            let names = path.components();
+            names
+                .map(|name| name.as_os_str().to_string_lossy().to_lowercase())
+                .collect()
+        };
+        let recased = spellings
+            .iter()
+            .any(|spelled| lower(spelled) == lower(scope));
+        if !climbs && !recased {
+            return None;
+        }
+    }
+    let inside = spellings.into_iter().next();
+    inside.or_else(|| looks_inside.is_some().then_some(real))
+}
+
 fn open_dbs(dir: Option<&Path>) -> (SharedFrecency, SharedQueryTracker) {
     let frecency = SharedFrecency::default();
     let queries = SharedQueryTracker::default();
@@ -3217,6 +3317,94 @@ mod tests {
             base.join("Projects/atlas")
         );
         assert_eq!(scope("/elsewhere"), Path::new("/elsewhere"));
+    }
+
+    #[test]
+    fn a_folder_is_searched_by_the_names_its_index_has() {
+        let root = |path: &str, canonical: &str| RootIndex {
+            path: path.into(),
+            canonical: canonical.into(),
+            picker: SharedFilePicker::default(),
+            followed: Arc::default(),
+        };
+        // The second is given through a link, as `/var` is one on macOS.
+        let roots = [
+            root("/home/me", "/home/me"),
+            root("/var/work", "/private/var/work"),
+        ];
+        let spelling = |scope: &str, real: &str, follows_links: bool| {
+            index_spelling(Path::new(scope), real.into(), &roots, follows_links)
+        };
+        let as_given = None;
+        let by = |path: &str| Some(PathBuf::from(path));
+
+        // Each is given with where the disk says it is.
+        let searched = |scope: &str, real: &str| spelling(scope, real, false);
+        assert_eq!(searched("/home/me/src/lib", "/home/me/src/lib"), as_given);
+        assert_eq!(searched("/home/me", "/home/me"), as_given);
+        assert_eq!(
+            searched("/var/work/docs", "/private/var/work/docs"),
+            as_given
+        );
+        // With `..`, in another letter case on a disk that takes either,
+        // and through a link.
+        assert_eq!(
+            searched("/home/me/src/app/../lib", "/home/me/src/lib"),
+            by("/home/me/src/lib")
+        );
+        assert_eq!(searched("/home/me/src/..", "/home/me"), by("/home/me"));
+        assert_eq!(
+            searched("/home/me/documents", "/home/me/Documents"),
+            by("/home/me/Documents")
+        );
+        assert_eq!(
+            searched("/var/work/Docs", "/private/var/work/docs"),
+            by("/var/work/docs")
+        );
+        assert_eq!(
+            searched("/home/me/link", "/home/me/src/lib"),
+            by("/home/me/src/lib")
+        );
+        assert_eq!(
+            searched("/private/var/work/docs", "/private/var/work/docs"),
+            by("/var/work/docs")
+        );
+        assert_eq!(
+            searched("/private/var/work", "/private/var/work"),
+            by("/var/work")
+        );
+        // A link or a `..` that leads out of the root it starts in.
+        assert_eq!(searched("/home/me/data", "/mnt/data"), by("/mnt/data"));
+        assert_eq!(
+            searched("/home/me/../shared", "/home/shared"),
+            by("/home/shared")
+        );
+        // A folder that doesn't look as if it were in a root, and isn't in
+        // one, has an index of its own under the name it is given by.
+        assert_eq!(searched("/tmp/link", "/mnt/elsewhere"), as_given);
+        assert_eq!(searched("/tmp/a/../b", "/tmp/b"), as_given);
+
+        // An index that follows links has a folder under a link's name. It
+        // has none under a `..`, or in another letter case than the disk's.
+        let followed = |scope: &str, real: &str| spelling(scope, real, true);
+        assert_eq!(followed("/home/me/link", "/home/me/src/lib"), as_given);
+        assert_eq!(followed("/home/me/data", "/mnt/data"), as_given);
+        assert_eq!(
+            followed("/home/me/link/../lib", "/home/me/src/lib"),
+            by("/home/me/src/lib")
+        );
+        assert_eq!(
+            followed("/home/me/../shared", "/home/shared"),
+            by("/home/shared")
+        );
+        assert_eq!(
+            followed("/home/me/documents", "/home/me/Documents"),
+            by("/home/me/Documents")
+        );
+        assert_eq!(
+            followed("/private/var/work/docs", "/private/var/work/docs"),
+            by("/var/work/docs")
+        );
     }
 
     #[test]
@@ -3656,6 +3844,31 @@ mod tests {
             paths(&[new]),
             "a folder spelled another way than the index's paths may hold it"
         );
+        // A folder that a search found in the index under another name than
+        // it was given by holds what is under that name.
+        let searched_as = |given: &str, searched: Option<&str>| {
+            let searched = searched.map(Path::new);
+            engine.changes.searched_as(Path::new(given), searched);
+        };
+        let link = "/home/me/Pictures/Scans";
+        assert_eq!(told(&within(link)), paths(&[]));
+        searched_as(link, Some("/home/me/Documents"));
+        assert_eq!(told(&within(link)), paths(&[new]));
+        searched_as("/home/me/Documents", Some("/home/me/Pictures"));
+        assert_eq!(told(&within("/home/me/Documents")), paths(&[]));
+        // Until a search finds it under the name it is given by.
+        searched_as("/home/me/Documents", None);
+        assert_eq!(told(&within("/home/me/Documents")), paths(&[new]));
+        // Only the folders of the last few searches are kept.
+        for n in 0..RESPELLED_KEPT {
+            searched_as(&format!("/home/me/link {n}"), Some("/home/me/Documents"));
+        }
+        assert_eq!(told(&within("/home/me/link 0")), paths(&[new]));
+        assert_eq!(
+            told(&within(link)),
+            paths(&[]),
+            "one that isn't kept is taken as it was given"
+        );
         assert_eq!(
             engine.changes_for(&search("tax"), 0..1, |path| path == Path::new(new)),
             paths(&[]),
@@ -3875,6 +4088,9 @@ mod tests {
             search("atlas *.png", KindFilter::Image, None),
             search("readme", any, Some("Docs")),
             search("atlas", KindFilter::Document, Some("Docs/Notes")),
+            // Folders that are in the index under other names than these.
+            search("readme", any, Some("Docs/Notes/..")),
+            search("atlas", KindFilter::Document, Some("Docs/../Docs/Notes")),
         ];
         for req in &searches {
             let hits = engine.search(req).hits;
@@ -4853,6 +5069,186 @@ mod tests {
         assert_eq!(res.hits[0].line, 1);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_folder_given_with_dot_dot_in_its_path_is_searched_where_it_is() {
+        let dir = std::env::temp_dir().join(format!("fff-dot-dot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for file in ["src/app/main.rs", "src/lib/parser.rs", "notes/parser.md"] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "needle\n").unwrap();
+        }
+        let engine = Engine::new(EngineOptions {
+            roots: vec![dir.clone()],
+            app_dirs: Vec::new(),
+            db_dir: None,
+            watch: false,
+            search: Default::default(),
+        });
+        assert!(engine.wait_ready(Duration::from_secs(10)));
+        let by_name = |scope: &str, query: &str| {
+            let found = engine.search(&SearchRequest {
+                query: query.into(),
+                scope: Some(dir.join(scope)),
+                limit: 10,
+                files_only: true,
+                ..Default::default()
+            });
+            let hits = found.hits.into_iter();
+            hits.map(|h| h.entry.name).collect::<Vec<_>>()
+        };
+        // The files with the word in them, each once.
+        let by_contents = |scope: &str| {
+            let found = engine.grep(&GrepRequest {
+                patterns: vec!["needle".into()],
+                scope: Some(dir.join(scope)),
+                limit: 10,
+                ..Default::default()
+            });
+            let mut names: Vec<String> = found.hits.iter().map(|h| display_name(&h.path)).collect();
+            names.sort();
+            names
+        };
+
+        // As `fffinder ../lib --here` asks when it is run in `src/app`.
+        assert_eq!(by_name("src/app/../lib", "parser"), ["parser.rs"]);
+        assert_eq!(by_contents("src/app/../lib"), ["parser.rs"]);
+        // And `fffinder .. --here`: all of `src`, and nothing beside it.
+        assert_eq!(by_name("src/app/..", "main"), ["main.rs"]);
+        assert_eq!(by_name("src/app/..", "parser"), ["parser.rs"]);
+        assert_eq!(by_contents("src/app/.."), ["main.rs", "parser.rs"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_given_through_a_link_is_searched_where_it_is() {
+        let dir = std::env::temp_dir().join(format!("fff-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("root");
+        for file in ["root/src/lib/parser.rs", "elsewhere/far/parser-far.rs"] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "needle\n").unwrap();
+        }
+        let link = |to: &str, at: &str| {
+            std::os::unix::fs::symlink(dir.join(to), dir.join(at)).unwrap();
+        };
+        link("root/src/lib", "root/inside");
+        link("elsewhere/far", "root/outside");
+        link("root/src/lib", "into");
+        let index = |follow_symlinks: bool| {
+            let engine = Engine::new(EngineOptions {
+                roots: vec![root.clone()],
+                app_dirs: Vec::new(),
+                db_dir: None,
+                watch: false,
+                search: SearchSettings {
+                    follow_symlinks,
+                    ..Default::default()
+                },
+            });
+            assert!(engine.wait_ready(Duration::from_secs(10)));
+            engine
+        };
+        // The one file a search of `scope` finds, by name and by contents.
+        let found = |engine: &Engine, scope: &str| {
+            let scope = dir.join(scope);
+            // A folder outside the root gets an index of its own first.
+            assert!(engine.prepare(Some(&scope), Duration::from_secs(10)));
+            let by_name = engine.search(&SearchRequest {
+                query: "parser".into(),
+                scope: Some(scope.clone()),
+                limit: 10,
+                ..Default::default()
+            });
+            let by_contents = engine.grep(&GrepRequest {
+                patterns: vec!["needle".into()],
+                scope: Some(scope),
+                limit: 10,
+                ..Default::default()
+            });
+            let names: Vec<PathBuf> = by_name.hits.into_iter().map(|h| h.entry.path).collect();
+            let lines: Vec<PathBuf> = by_contents.hits.into_iter().map(|h| h.path).collect();
+            assert_eq!(names, lines);
+            assert_eq!(names.len(), 1, "{names:?}");
+            names[0].clone()
+        };
+
+        // An index that doesn't follow links has nothing under a link's
+        // name. The folder a link leads to is in the root under its own
+        // name, or outside the root, where a `..` can lead as well.
+        let engine = index(false);
+        let inside = found(&engine, "root/inside");
+        assert!(inside.ends_with("root/src/lib/parser.rs"), "{inside:?}");
+        let outside = found(&engine, "root/outside");
+        assert!(
+            outside.ends_with("elsewhere/far/parser-far.rs"),
+            "{outside:?}"
+        );
+        assert_eq!(found(&engine, "root/../elsewhere/far"), outside);
+        // A link into the root from outside it leads to a folder in the root.
+        assert_eq!(found(&engine, "into"), inside);
+
+        // An index that follows links has the folder under the link's name
+        // as well, which is then the name it is found by. A `..` is in no
+        // index.
+        let engine = index(true);
+        let inside = found(&engine, "root/inside");
+        assert!(inside.ends_with("root/inside/parser.rs"), "{inside:?}");
+        let outside = found(&engine, "root/outside");
+        assert!(
+            outside.ends_with("root/outside/parser-far.rs"),
+            "{outside:?}"
+        );
+        let real = found(&engine, "root/inside/../lib");
+        assert!(real.ends_with("root/src/lib/parser.rs"), "{real:?}");
+        assert_eq!(found(&engine, "into"), real);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_given_in_another_letter_case_is_searched_where_it_is() {
+        let dir = std::env::temp_dir().join(format!("fff-letter-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Docs")).unwrap();
+        std::fs::write(dir.join("Docs/readme.md"), "needle\n").unwrap();
+        // Only a disk that takes a name in either letter case, as most of
+        // those of macOS and Windows do, has the folder by this name too.
+        let scope = dir.join("docs");
+        if scope.is_dir() {
+            let engine = Engine::new(EngineOptions {
+                roots: vec![dir.clone()],
+                app_dirs: Vec::new(),
+                db_dir: None,
+                watch: false,
+                search: Default::default(),
+            });
+            assert!(engine.wait_ready(Duration::from_secs(10)));
+            let by_name = engine.search(&SearchRequest {
+                query: "readme".into(),
+                scope: Some(scope.clone()),
+                limit: 10,
+                ..Default::default()
+            });
+            let names: Vec<String> = by_name.hits.into_iter().map(|h| h.entry.name).collect();
+            assert_eq!(names, ["readme.md"]);
+            let by_contents = engine.grep(&GrepRequest {
+                patterns: vec!["needle".into()],
+                scope: Some(scope),
+                limit: 10,
+                ..Default::default()
+            });
+            let lines: Vec<String> = by_contents
+                .hits
+                .iter()
+                .map(|h| display_name(&h.path))
+                .collect();
+            assert_eq!(lines, ["readme.md"]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
