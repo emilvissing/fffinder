@@ -23,6 +23,7 @@ mod nu_panel;
 mod open_with;
 mod pdf;
 mod preview;
+mod preview_images;
 mod preview_pane;
 mod quick_look;
 mod sidebar;
@@ -563,6 +564,8 @@ pub struct Finder {
     /// and date of the item it was made for.
     previews: HashMap<PathBuf, (preview::PreviewStamp, Preview)>,
     preview_tasks: HashMap<PathBuf, (preview::PreviewStamp, Task<()>)>,
+    /// The images the large previews show (see preview_images.rs).
+    preview_images: Entity<preview_images::PreviewImages>,
     /// The PDF the large preview shows page by page.
     pdf: Option<pdf::PdfView>,
     quick_look_open: bool,
@@ -843,6 +846,7 @@ impl Finder {
             content_height: ui(400.),
             previews: HashMap::new(),
             preview_tasks: HashMap::new(),
+            preview_images: preview_images::PreviewImages::new(cx),
             pdf: None,
             quick_look_open: false,
             quick_look_mode: QuickLookMode::default(),
@@ -1049,6 +1053,13 @@ impl Finder {
     #[doc(hidden)]
     pub fn has_preview_for_test(&self, path: &Path) -> bool {
         self.previews.contains_key(path)
+    }
+
+    /// The image files the large previews hold, the one shown last at the
+    /// end, each with its image once that has loaded.
+    #[doc(hidden)]
+    pub fn preview_images_for_test(&self, cx: &App) -> Vec<(PathBuf, Option<Arc<RenderImage>>)> {
+        self.preview_images.read(cx).held()
     }
 
     /// Show these sidebar Locations instead of the machine's (tests).

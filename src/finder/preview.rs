@@ -8,6 +8,7 @@
 
 use super::explore::{QuickLookMode, mode_buttons};
 use super::pdf::Surface;
+use super::preview_images::PreviewImages;
 use super::views::file_icon;
 use super::{AppState, ContentHit, Finder};
 use crate::actions::{
@@ -973,7 +974,7 @@ fn preview_body(
             .items_center()
             .justify_center()
             .child(
-                img(entry.path.clone())
+                img(PreviewImages::source(&finder.preview_images, entry))
                     .size_full()
                     .object_fit(ObjectFit::Contain)
                     .with_fallback({

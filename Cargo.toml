@@ -88,8 +88,17 @@ two-face = { version = "0.5.2", default-features = false, features = ["syntect-f
 ttf-parser = "0.25"
 # Colors file names the way Nushell's `ls` does.
 lscolors = { version = "0.21", default-features = false }
-# PDF previews: the pixel buffer GPUI takes drawn pages in.
-image = { version = "0.25", default-features = false }
+# PDF previews: the pixel buffer GPUI takes drawn pages in. Thumbnails: the
+# image formats fffinder scales down itself, all of which GPUI already builds.
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "gif",
+    "ico",
+    "jpeg",
+    "png",
+    "tiff",
+    "webp",
+] }
 # The app icon drawn at run time for the macOS Dock and X11 windows; GPUI
 # already builds it to draw SVGs.
 resvg = { version = "0.46", default-features = false }

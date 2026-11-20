@@ -244,7 +244,7 @@ Switch views with the toolbar, the View menu, or Cmd+1 to Cmd+4. A folder opens 
 - **Columns** (Cmd+3) shows the folder hierarchy as side-by-side columns. Selecting a folder opens it in a new column to the right. Selecting a file shows a preview card with its kind, size, modification date, and location in the last column. The sort applies to every column. An item stays selected when its column is sorted another way or read again, wherever it's listed then, and once it's gone, the columns to its right close. Drag the line at a column's right edge to resize that column, and new columns open at that width. Double-click the line to fit the column to its longest name. Search results and Recents always use the list in this view, as Finder does.
 - **Gallery** (Cmd+4) shows a large preview of the selected item above a strip of everything in the folder. Left and Right arrows move along the strip. The gallery always shows an item, so it selects the first one when nothing is selected.
 
-Thumbnails cover PNG, JPEG, GIF, WebP, BMP, ICO, TIFF, and SVG files up to 40 MB, and on macOS PDFs, videos, and documents (see [Thumbnails](#thumbnails)).
+Thumbnails cover images, PDFs, videos, and documents, on every system (see [Thumbnails](#thumbnails)).
 
 ### The list view
 
@@ -405,7 +405,7 @@ Previews appear in the gallery, in the column view's last column, and in Quick L
 
 | File | Preview |
 | --- | --- |
-| Images | The image. Formats GPUI can't draw, such as HEIC, RAW, and PSD, show the system's thumbnail of them (see [Thumbnails](#thumbnails)). An image that fffinder draws itself isn't read again when its file changes: it keeps the look it first had, even after Refresh, until fffinder is started again. |
+| Images | The image. Formats GPUI can't draw, such as HEIC, RAW, and PSD, show the system's thumbnail of them (see [Thumbnails](#thumbnails)). An image that has changed on disk shows as it is now once its folder is read again, as Refresh does. Each tab and pane keeps the last three images it showed in memory, and reads another again when you go back to it. |
 | PDFs | Read as in a PDF viewer, in the gallery and in Quick Look, drawn by fffinder itself with [hayro](https://github.com/LaurenzV/hayro) so they look the same on every system. The pages scroll by in one column, starting at the first page fitted to the width. The toolbar above them has the previous and next page buttons with "Page 2 of 12", which follows as you scroll; − and + to zoom out and in; and the zoom between them, which opens a menu of Fit Width, Fit Page, Actual Size, and sizes from 25% to 400%. Pinching on a trackpad, scrolling with Cmd held, and Cmd+Plus, Cmd+Minus, and Cmd+0 (Fit Width) zoom too, from 10% to 800%, and Page Up and Page Down go a page back or on. Zooming keeps the place you were reading at the top. Pages larger than the view scroll both ways; each is drawn as it comes into view, and again after zooming, so text stays sharp, and only the pages in view and their neighbors are kept in memory. The caption gives the page count. The column view's card, and the gallery while a PDF opens, show the system's thumbnail of the first page. Password-protected PDFs, and PDFs over 200 MB, show only the thumbnail. |
 | Videos, office and iWork documents, EPUB, 3D models | The system's thumbnail: the first page of a document, a frame of a video. Types the system can't draw show their icon. |
 | Video and audio | The running time, in the caption and in the column view's card, for MP4, MOV, M4A, M4V, WAV, and FLAC files. Audio shows its icon with the time under it. |
@@ -421,11 +421,11 @@ Previews appear in the gallery, in the column view's last column, and in Quick L
 
 Nushell previews give up after 10 seconds and show the icon. They need `nu`; without it, databases, spreadsheets, and the other binary formats show their icon, and Quick Look has no explore mode.
 
-A preview is read again when its item comes back with another size or date: when its folder is [read again](#the-window) after a change in it, when a search runs again, or when Recents is read again. Most programs save a file under another name that then takes the file's, which changes the folder, so the preview follows within a couple of seconds. The preview that was showing stays until the new one is ready, and plain text and code stay where they were being read. A PDF is opened again at its first page, and in [explore mode](#exploring-data) the file is opened again from its top level. Refresh (Cmd+R) reads the shown item's preview again whatever its size and date say, which is the way to see a file that was written over in place.
+A preview is read again when its item comes back with another size or date: when its folder is [read again](#the-window) after a change in it, when a search runs again, or when Recents is read again. Most programs save a file under another name that then takes the file's, which changes the folder, so the preview follows within a couple of seconds. The preview that was showing stays until the new one is ready, and plain text and code stay where they were being read. A PDF is opened again at its first page, and in [explore mode](#exploring-data) the file is opened again from its top level. Refresh (Cmd+R) reads the shown item's preview again whatever its size and date say, which is the way to see a file that was written over in place. An image differs in two ways: nothing shows in its place while it's read again, and it's read again only when its date has changed, after Refresh too.
 
 ### Thumbnails
 
-The icon view, the gallery strip, and the large previews show the thumbnails the system draws for PDFs, videos, documents, fonts, and images:
+The icon view, the gallery strip, and the large previews show thumbnails of PDFs, videos, documents, fonts, and images. fffinder makes the thumbnails of PNG, JPEG, GIF, WebP, BMP, ICO, and TIFF images up to 40 MB itself, by scaling the image down, so they look the same on every system, and it draws SVG files as they are. The system draws the rest, among them the images fffinder doesn't read, such as HEIC, RAW, and PSD:
 
 | System | Drawn by |
 | --- | --- |
@@ -433,7 +433,7 @@ The icon view, the gallery strip, and the large previews show the thumbnails the
 | Windows | The shell's thumbnail handlers, as in Explorer: whatever Explorer shows for the type. |
 | Linux | The freedesktop.org thumbnailers your desktop installed (`.thumbnailer` files in the XDG data folders' `thumbnailers` folders, such as `evince-thumbnailer` for PDFs and `ffmpegthumbnailer` for videos), chosen by the file's type from `xdg-mime`. A type with no thumbnailer keeps its icon. |
 
-Each item shows its icon until its thumbnail is ready. Thumbnails are cached as PNGs in `thumbnails/` in the data folder, keyed by the file's path, modification date, and size, so an edited file gets a new one. The folder can be deleted at any time.
+Each item shows its icon until its thumbnail is ready. Thumbnails, fffinder's own and the system's, are cached as PNGs in `thumbnails/` in the data folder, keyed by the file's path, modification date, and size, so an edited file gets a new one. The folder can be deleted at any time.
 
 ### Nushell highlighting
 
@@ -1212,7 +1212,7 @@ The settings folder holds `settings.json`, `actions.nu`, and `window.json`, whic
 - `icons/v2/`: Finder icons cached as PNGs on macOS, one per extension and one per app or special folder.
 - `trash.json`: on macOS, where each item fffinder moved to the Trash came from, for Put Back.
 - `folder_views.json`: the view and sort last chosen in each folder, up to 2000 folders. Deleting it forgets them and nothing else.
-- `thumbnails/`: thumbnails of PDFs, videos, and documents, as PNGs, up to 256 MB; the least recently used go first.
+- `thumbnails/`: thumbnails of images, PDFs, videos, and documents, as PNGs, up to 256 MB; the least recently used go first.
 - `hang-<time>.txt`: hang reports, when the watchdog is on.
 - `term.log`: stderr from the last `fffinder --term`.
 

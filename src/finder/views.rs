@@ -188,28 +188,23 @@ pub fn path_id(path: &std::path::Path) -> usize {
     hasher.finish() as usize
 }
 
-/// Image formats GPUI decodes, for thumbnails.
-fn thumbnailable(entry: &FileEntry) -> bool {
-    if entry.kind != FileKind::Image || entry.size.unwrap_or(0) > 40_000_000 {
-        return false;
-    }
-    let ext = entry
-        .path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .unwrap_or_default();
-    matches!(
-        ext.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff" | "svg"
-    )
+/// An SVG, which GPUI draws from the file itself. GPUI keeps every image it
+/// loads for good, at its full size: little for a drawing, and far too much
+/// for a folder of photos, which are scaled down first (see `thumbnails.rs`).
+fn draws_itself(entry: &FileEntry) -> bool {
+    entry.kind == FileKind::Image
+        && entry.size.unwrap_or(0) <= crate::thumbnails::IMAGE_LIMIT
+        && entry
+            .path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
 }
 
-/// A file's colored icon, an image thumbnail, or a document icon with its
-/// extension badge. With `thumbnails`, images show themselves, and on macOS
-/// PDFs, videos, and documents show QuickLook's picture once it's ready.
+/// A file's colored icon, its thumbnail, or a document icon with its
+/// extension badge. With `thumbnails`, images, PDFs, videos, and documents
+/// show their thumbnail once it's ready.
 pub fn file_icon(entry: &FileEntry, size: Pixels, thumbnails: bool, pal: &Palette) -> AnyElement {
-    if thumbnails && thumbnailable(entry) {
+    if thumbnails && draws_itself(entry) {
         let fallback = entry.kind.icon_asset();
         return img(entry.path.clone())
             .size(size)
@@ -225,6 +220,9 @@ pub fn file_icon(entry: &FileEntry, size: Pixels, thumbnails: bool, pal: &Palett
         let (shown, pal) = (entry.clone(), *pal);
         let icon = move || kind_icon(&shown, size, &pal);
         return img(crate::thumbnails::image(entry, px))
+            // GPUI shows an image's loading element only when the image has
+            // an ID, under which it keeps how long the image has been loading.
+            .id(("thumbnail", path_id(&entry.path)))
             .size(size)
             .flex_shrink_0()
             .object_fit(ObjectFit::Contain)

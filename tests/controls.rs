@@ -2526,6 +2526,197 @@ fn gallery_previews_an_item_with_nothing_selected(cx: &mut TestAppContext) {
     assert!(ui.read(|f| f.has_preview_for_test(&fx.path("Budget.csv"))));
 }
 
+/// Whether GPUI holds the image file at `path` itself, decoded at its full
+/// size, which it does for as long as the app runs.
+fn kept_whole(ui: &mut Ui, path: &std::path::Path) -> bool {
+    let source = gpui_kit::ImageSource::from(path.to_path_buf());
+    ui.window(|_, cx| source.is_asset_cached(cx))
+}
+
+/// The image files the browser's large previews hold, by name, the one
+/// shown last at the end, each with its image once that has loaded.
+fn held_images(ui: &mut Ui) -> Vec<(String, Option<std::sync::Arc<gpui_kit::RenderImage>>)> {
+    let view = ui.view.clone();
+    ui.window(|_, cx| view.read(cx).preview_images_for_test(cx))
+        .into_iter()
+        .map(|(path, image)| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, image)
+        })
+        .collect()
+}
+
+/// Whether the window `ui` drives has a texture of `image`: it drew the
+/// image, and hasn't let go of it since.
+fn has_texture(ui: &mut Ui, image: &gpui_kit::RenderImage) -> bool {
+    ui.window(|window, _| window.has_image_atlas_entry(image))
+}
+
+#[gpui_kit::test]
+fn the_icon_view_and_the_gallery_strip_dont_load_images_at_full_size(cx: &mut TestAppContext) {
+    let fx = Fixture::new("image-tiles");
+    let photo = fx.path("photo.png");
+    image::RgbaImage::new(8, 8).save(&photo).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    assert!(ui.exists(item_id("tile", &photo)), "the icon view shows it");
+    assert!(!kept_whole(&mut ui, &photo), "the icon view");
+
+    ui.click("view-gallery");
+    assert_eq!(ui.selected(), ["Budget.csv"], "the photo isn't shown large");
+    assert!(ui.exists(item_id("strip", &photo)), "the strip shows it");
+    assert!(!kept_whole(&mut ui, &photo), "the gallery strip");
+    assert!(
+        held_images(&mut ui).is_empty(),
+        "nor is it loaded to be shown large"
+    );
+}
+
+#[gpui_kit::test]
+fn the_gallery_keeps_the_last_three_images_it_showed(cx: &mut TestAppContext) {
+    let fx = Fixture::new("gallery-images");
+    let names = ["a.png", "b.png", "c.png", "d.png", "e.png"];
+    for name in names {
+        image::RgbaImage::new(8, 8).save(fx.path(name)).unwrap();
+    }
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-gallery");
+    let mut shown = Vec::new();
+    for name in names {
+        ui.select(name);
+        let (last, image) = held_images(&mut ui).pop().expect("an image is held");
+        assert_eq!(last, name, "the one shown last");
+        let image = image.unwrap_or_else(|| panic!("{name} has loaded"));
+        assert!(has_texture(&mut ui, &image), "{name} is drawn");
+        shown.push(image);
+    }
+    let held = |ui: &mut Ui| -> Vec<String> {
+        let held = held_images(ui);
+        held.into_iter().map(|(name, _)| name).collect()
+    };
+    assert_eq!(held(&mut ui), ["c.png", "d.png", "e.png"]);
+    for (name, image) in names.iter().zip(&shown) {
+        let kept = !matches!(*name, "a.png" | "b.png");
+        assert_eq!(has_texture(&mut ui, image), kept, "{name}'s texture");
+        assert!(!kept_whole(&mut ui, &fx.path(name)), "{name}");
+    }
+
+    // One that is kept is shown again as it is, not loaded again.
+    ui.select("c.png");
+    assert_eq!(held(&mut ui), ["d.png", "e.png", "c.png"]);
+    let (_, again) = held_images(&mut ui).pop().unwrap();
+    assert!(std::sync::Arc::ptr_eq(&again.expect("loaded"), &shown[2]));
+    // One that was let go of is loaded again.
+    ui.select("a.png");
+    assert_eq!(held(&mut ui), ["e.png", "c.png", "a.png"]);
+    let (_, again) = held_images(&mut ui).pop().unwrap();
+    let again = again.expect("a.png has loaded again");
+    assert!(!std::sync::Arc::ptr_eq(&again, &shown[0]));
+    assert!(has_texture(&mut ui, &again), "and drawn");
+    assert!(!has_texture(&mut ui, &shown[3]), "in d.png's place");
+}
+
+#[gpui_kit::test]
+fn an_image_that_changed_on_disk_is_shown_as_it_is_now(cx: &mut TestAppContext) {
+    let fx = Fixture::new("image-changed");
+    let photo = fx.path("photo.png");
+    image::RgbaImage::new(8, 8).save(&photo).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-gallery");
+    ui.select("photo.png");
+    let pixels = |image: &gpui_kit::RenderImage| {
+        let size = image.size(0);
+        (size.width.0, size.height.0)
+    };
+    let (_, before) = held_images(&mut ui).pop().expect("the photo is held");
+    let before = before.expect("the photo has loaded");
+    assert_eq!(pixels(&before), (8, 8));
+
+    // Saved again, a minute later by its date whatever the clock says.
+    image::RgbaImage::new(16, 4).save(&photo).unwrap();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    let file = std::fs::File::options().write(true).open(&photo).unwrap();
+    file.set_modified(later).unwrap();
+    ui.dispatch(Refresh);
+    assert_eq!(ui.selected(), ["photo.png"]);
+    let mut held = held_images(&mut ui);
+    assert_eq!(held.len(), 1, "the photo as it was isn't kept beside it");
+    let after = held.remove(0).1.expect("the photo has loaded again");
+    assert_eq!(pixels(&after), (16, 4), "the photo as it is now");
+    assert!(has_texture(&mut ui, &after), "is what's drawn");
+    assert!(!has_texture(&mut ui, &before));
+}
+
+#[gpui_kit::test]
+fn quick_look_and_the_gallery_share_the_image_they_show(cx: &mut TestAppContext) {
+    let fx = Fixture::new("image-quick-look");
+    let photo = fx.path("photo.png");
+    image::RgbaImage::new(8, 8).save(&photo).unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.select("photo.png");
+    assert!(
+        held_images(&mut ui).is_empty(),
+        "the icon view shows none large"
+    );
+
+    ui.press("space");
+    let (name, image) = held_images(&mut ui)
+        .pop()
+        .expect("Quick Look's image is held");
+    assert_eq!(name, "photo.png");
+    let image = image.expect("the photo has loaded");
+    assert!(
+        ui.in_quick_look(|ui| has_texture(ui, &image)),
+        "Quick Look's window drew it once it had"
+    );
+    assert!(!kept_whole(&mut ui, &photo));
+
+    // The gallery shows the same image, not one of its own.
+    ui.click("view-gallery");
+    let held = held_images(&mut ui);
+    assert_eq!(held.len(), 1);
+    assert!(std::sync::Arc::ptr_eq(held[0].1.as_ref().unwrap(), &image));
+    assert!(
+        has_texture(&mut ui, &image),
+        "the browser's window drew it too"
+    );
+}
+
+#[gpui_kit::test]
+fn closing_a_tab_lets_go_of_the_images_it_showed(cx: &mut TestAppContext) {
+    let fx = Fixture::new("image-tab");
+    image::RgbaImage::new(8, 8)
+        .save(fx.path("photo.png"))
+        .unwrap();
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            workspace: true,
+            ..Default::default()
+        },
+    );
+    let workspace = ui.workspace.clone().expect("opened with tabs");
+    let first = ui.view.clone();
+    ui.press(&cmd("t"));
+    ui.view = workspace.read_with(ui.cx, |w, _| w.active().clone());
+    ui.click("view-gallery");
+    ui.select("photo.png");
+    let (_, image) = held_images(&mut ui)
+        .pop()
+        .expect("the new tab holds the photo");
+    let image = image.expect("the photo has loaded");
+    assert!(has_texture(&mut ui, &image));
+
+    // Only the image is kept: a handle to the tab would keep the tab alive.
+    ui.view = first;
+    ui.press(&cmd("w"));
+    assert_eq!(workspace.read_with(ui.cx, |w, _| w.tabs().len()), 1);
+    assert!(
+        !has_texture(&mut ui, &image),
+        "its texture went with the tab"
+    );
+}
+
 #[gpui_kit::test]
 fn context_menus_on_items_and_empty_space(cx: &mut TestAppContext) {
     let fx = Fixture::new("context-menus");
