@@ -105,7 +105,7 @@ Lines: `{"kind": "modified", "path": "…"}`, plus `"from"` for `renamed`. Kinds
 
 ### `GET /v1/selection`
 
-What the frontmost window shows. With `all=true`, `items` holds every item shown instead of only the selected ones.
+What the frontmost window shows. With `all=true`, `items` holds every item shown instead of only the selected ones. A place the window has just gone to has no items until it has been read: the items of the place it left, which may still be on screen for a moment, aren't reported as its own.
 
 ```json
 {

@@ -503,6 +503,12 @@ pub struct Finder {
     listing_stamp: Option<SystemTime>,
     loading: bool,
     listing_task: Task<()>,
+    /// Set while the rows are still those of the place the window left.
+    /// They stay on screen until the place it went to has been read, so
+    /// that a folder read at once doesn't flash placeholders first. Until
+    /// then they only show: no key or click selects or opens one. The task
+    /// drops them when the place hasn't been read after a moment.
+    left_behind: Option<Task<()>>,
 
     search_input: Entity<InputState>,
     query: String,
@@ -807,6 +813,7 @@ impl Finder {
             listing_stamp: None,
             loading: false,
             listing_task: Task::ready(()),
+            left_behind: None,
             search_input,
             query: String::new(),
             scope: SearchScope::Computer,
@@ -1026,6 +1033,14 @@ impl Finder {
         self.searching
     }
 
+    /// Stop reading the place the window shows before the read has
+    /// answered, as a folder on a stalled network volume never does. It's
+    /// read again at the next Refresh (tests).
+    #[doc(hidden)]
+    pub fn stall_listing_for_test(&mut self) {
+        self.listing_task = Task::ready(());
+    }
+
     /// The flag that stops the search last started, once it's set.
     #[doc(hidden)]
     pub fn search_abort_for_test(&self) -> Arc<AtomicBool> {
@@ -1145,12 +1160,6 @@ impl Finder {
         if !self.shows_parent_column() || self.in_trash() {
             return None;
         }
-        // Until a place's own items are read, the rows are still those of
-        // the place the window left, which may be the Trash. A search's rows
-        // are what it found, whatever the place.
-        if self.loading && !self.is_searching() {
-            return None;
-        }
         match self.selected_entries().as_slice() {
             [only] => Some(only.path.clone()),
             _ => None,
@@ -1229,7 +1238,7 @@ impl Finder {
             }
         };
         let items: Vec<FileEntry> = if all {
-            self.rows.iter().map(|r| r.entry.clone()).collect()
+            self.listed_entries()
         } else {
             self.selected_entries()
         };
@@ -1325,9 +1334,39 @@ impl Finder {
             self.settings_changed(cx);
         }
         window.set_window_title(&self.history.current().title());
+        self.leave_rows_behind(cx);
         self.load_listing(select.into_iter().collect(), false, cx);
         self.tree_follow_location(cx);
         cx.notify();
+    }
+
+    /// The window has left the place its rows are of. What was read there is
+    /// forgotten at once, so that rows made again before the next place has
+    /// answered, as when a search made meanwhile ends, aren't that place's.
+    /// The rows themselves stay on screen for a moment, where they only show
+    /// (see `left_behind`): a folder on a local disk answers within it, and
+    /// its items take their place with no placeholders in between. A place
+    /// that takes longer shows placeholders until it has answered.
+    fn leave_rows_behind(&mut self, cx: &mut Context<Self>) {
+        self.listing.clear();
+        self.listing_error = None;
+        self.trashed.clear();
+        // Rows that a place before this one left behind have had part of
+        // their moment already.
+        if self.left_behind.is_some() {
+            return;
+        }
+        self.left_behind = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LEFT_BEHIND_STAY).await;
+            this.update(cx, |this, cx| this.rebuild_rows(cx)).ok();
+        }));
+    }
+
+    /// Whether the rows are those of the place the window left, which stay
+    /// on screen while the place it went to is read (see `left_behind`).
+    /// They aren't items of the place the window shows.
+    pub(super) fn rows_left_behind(&self) -> bool {
+        self.left_behind.is_some()
     }
 
     /// Items were renamed or moved, here, by a drop, or by Undo: the
@@ -1804,6 +1843,9 @@ impl Finder {
 
     /// Rebuild the displayed rows from the listing or search results.
     pub fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
+        // Whatever the rows were, from here on they're made of what the
+        // place the window shows has listed, or a search has found.
+        self.left_behind = None;
         let old: Vec<PathBuf> = self.rows.iter().map(|r| r.entry.path.clone()).collect();
         let order = self.sort_order();
         let tree = self.tree_mode();
@@ -1938,7 +1980,8 @@ impl Finder {
             return true;
         }
         self.enter_results = None;
-        if self.rows.is_empty() {
+        // Rows the window left behind aren't this place's to move into.
+        if self.rows.is_empty() || self.rows_left_behind() {
             return false;
         }
         self.enter_rows(window, cx);
@@ -2799,6 +2842,15 @@ impl Finder {
             .collect()
     }
 
+    /// The entries the window lists, in display order. Rows it left behind
+    /// aren't among them: they're another place's.
+    fn listed_entries(&self) -> Vec<FileEntry> {
+        if self.rows_left_behind() {
+            return Vec::new();
+        }
+        self.rows.iter().map(|r| r.entry.clone()).collect()
+    }
+
     /// Selected entries, in display order.
     pub fn selected_entries(&self) -> Vec<FileEntry> {
         if self.effective_view() == ViewMode::Columns {
@@ -2831,6 +2883,9 @@ impl Finder {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.rows_left_behind() {
+            return;
+        }
         let view = self.effective_view();
         if view == ViewMode::Columns {
             self.move_in_columns(dx, dy, window, cx);
@@ -2870,6 +2925,9 @@ impl Finder {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.rows_left_behind() {
+            return;
+        }
         if self.effective_view() == ViewMode::Columns {
             let col = self.active_column;
             let end = self
@@ -2904,6 +2962,9 @@ impl Finder {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.rows_left_behind() {
+            return;
+        }
         let height = f32::from(self.content_height) / crate::theme::ui_scale();
         let lines = |line: f32| ((height / line).floor() as isize).max(1);
         let delta = match self.effective_view() {
@@ -2973,6 +3034,11 @@ impl Finder {
     /// the next one after it, alphabetically, when none does).
     pub fn type_to_select(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let prefix = self.typed_prefix(text, cx);
+        // The letters still count, for the ones typed after them when the
+        // place the window went to has been read.
+        if self.rows_left_behind() {
+            return;
+        }
         let pick = |names: Vec<String>| -> Option<usize> {
             let lower: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
             lower
@@ -3007,6 +3073,9 @@ impl Finder {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        if self.rows_left_behind() {
+            return;
+        }
         self.selection.select_all(self.rows.len());
         cx.notify();
     }
@@ -3849,7 +3918,7 @@ impl Finder {
         // The selection, or everything shown when nothing is selected.
         let mut input = self.selected_entries();
         if input.is_empty() {
-            input = self.rows.iter().map(|r| r.entry.clone()).collect();
+            input = self.listed_entries();
         }
         let cwd = self
             .current_folder()
@@ -4193,6 +4262,11 @@ impl Finder {
         }
     }
 }
+
+/// How long the rows of the place the window left stay on screen while the
+/// place it went to is read. A folder on a local disk answers well within
+/// it, and placeholders that showed for less would only flicker.
+const LEFT_BEHIND_STAY: Duration = Duration::from_millis(150);
 
 /// How often a window asks the indexes to report their changes after they
 /// are finished, 400 ms apart: for half a minute.
@@ -4560,6 +4634,17 @@ impl Finder {
             .min_h_0()
             .w_full()
             .relative()
+            // Rows the window left behind only show. A press on one, on a
+            // group's header among them, or beside them goes no further: it
+            // selects and opens nothing, starts no drag and no box, and
+            // opens no menu. The mouse's Back and Forward buttons aren't
+            // presses on the rows, and go on to the window.
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                let navigates = matches!(event.button, MouseButton::Navigate(_));
+                if this.rows_left_behind() && !navigates {
+                    cx.stop_propagation();
+                }
+            }))
             // An item marks the right press that opens its menu, and the
             // empty-space menu stays closed for a press with that mark. A
             // mark left by an earlier press says nothing of this one, which

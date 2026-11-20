@@ -93,6 +93,268 @@ fn back_and_cmd_up_select_the_folder_left_in_the_column_view_too(cx: &mut TestAp
     assert_eq!(ui.selected(), ["Projects"]);
 }
 
+/// Go to `place`, as a click on its row in the sidebar does, and stop before
+/// it has been read: the items of the place the window left are still on
+/// screen.
+fn go_before_it_is_read(ui: &mut Ui, place: Location) {
+    let view = ui.view.clone();
+    ui.window(|window, cx| view.update(cx, |f, cx| f.navigate(place, window, cx)));
+}
+
+#[gpui_kit::test]
+fn keys_leave_the_items_of_the_place_left_alone_while_the_next_place_is_read(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("left-place-keys");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.select("notes.txt");
+    ui.press(&cmd("backspace"));
+    ui.update(|f, window, cx| f.navigate(Location::Trash, window, cx));
+    assert_eq!(ui.names(), ["notes.txt"]);
+
+    // A place's items stay on screen until the place gone to next has read
+    // its own, which Recents does only once the index is ready. They only
+    // show: Recents lists files where they are, and what the Trash holds is
+    // kept in a folder of its own, which isn't a place to browse.
+    ui.press_without_settling(&cmd("shift-f"));
+    assert_eq!(ui.read(|f| f.location().clone()), Location::Recents);
+    assert!(ui.files_focused());
+    let select_all = cmd("a");
+    for key in [
+        "down",
+        "up",
+        "left",
+        "right",
+        "home",
+        "end",
+        "shift-down",
+        "shift-end",
+        "shift-pagedown",
+        "pagedown",
+        select_all.as_str(),
+    ] {
+        ui.press_without_settling(key);
+        assert!(ui.selected().is_empty(), "{key}: {:?}", ui.selected());
+    }
+    ui.type_without_settling("n");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+
+    // So Return has nothing to open, Cmd-Return nothing to show in the
+    // folder the Trash keeps it in, and Cmd-Backspace nothing to move to the
+    // Trash once more. A script that asks what the window lists isn't told
+    // of it as one of Recents' either.
+    let (show, trash) = (cmd("enter"), cmd("backspace"));
+    for key in ["enter", show.as_str(), trash.as_str()] {
+        ui.press_without_settling(key);
+    }
+    let listed = ui.read(|f| f.selection_json(true));
+    assert_eq!(listed["location"], "recents");
+    assert_eq!(listed["items"].as_array().map(Vec::len), Some(0));
+
+    // Down Arrow in the search field moves into the items a place lists, and
+    // these aren't Recents'.
+    ui.press_without_settling(&cmd("f"));
+    ui.press_without_settling("down");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+    assert!(!ui.files_focused());
+    ui.settle();
+    assert_eq!(ui.read(|f| f.location().clone()), Location::Recents);
+    assert!(ui.system_calls().is_empty(), "{:?}", ui.system_calls());
+
+    // Recents' own items take the keys.
+    let recent = ui.names();
+    assert!(recent.contains(&"Roadmap.md".to_string()), "{recent:?}");
+    ui.press("down");
+    assert_eq!(ui.selected(), recent[..1]);
+    assert!(ui.files_focused());
+    ui.update(|f, window, cx| f.navigate(Location::Trash, window, cx));
+    assert_eq!(ui.names(), ["notes.txt"], "and the Trash still has its own");
+
+    // A letter typed before a folder has been read selects nothing in the
+    // folder the window left, and still counts for the letters after it.
+    ui.go_to(&fx.path("Projects"));
+    ui.press_without_settling(&cmd("up"));
+    ui.type_without_settling("r");
+    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
+    ui.settle();
+    assert_eq!(ui.selected(), ["Projects"]);
+    ui.type_text("o");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn clicks_leave_the_items_of_the_place_left_alone_in_every_view(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+    let fx = Fixture::new("left-place-clicks");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.select("Budget.csv");
+    ui.press(&cmd("backspace"));
+    let (notes, projects) = (fx.path("notes.txt"), fx.path("Projects"));
+    // Outside a folder the column view is a list, so that is what the
+    // folder's items are drawn as while the Trash is read.
+    for (view, kind) in [
+        ("view-list", "row"),
+        ("view-icons", "tile"),
+        ("view-gallery", "strip"),
+        ("view-columns", "row"),
+    ] {
+        ui.click(view);
+        assert!(ui.files_focused(), "{view}");
+
+        // The folder's items would be the Trash's to the Trash's commands,
+        // which delete for good.
+        go_before_it_is_read(&mut ui, Location::Trash);
+        let (file, folder) = (item_id(kind, &notes), item_id(kind, &projects));
+        assert!(ui.exists(file.clone()), "{view}: the folder's file shows");
+        ui.click_without_settling(file.clone());
+        assert!(ui.selected().is_empty(), "{view}: {:?}", ui.selected());
+        ui.window(|window, cx| window.right_click(file.clone(), cx));
+        assert!(
+            !ui.menu_open(),
+            "{view}: a menu for an item that isn't here"
+        );
+        assert!(ui.selected().is_empty(), "{view}: {:?}", ui.selected());
+        ui.window(|window, cx| window.double_click(file, cx));
+        ui.window(|window, cx| window.double_click(folder, cx));
+        assert!(ui.system_calls().is_empty(), "{view}");
+        assert_eq!(ui.read(|f| f.location().clone()), Location::Trash, "{view}");
+        ui.press_without_settling(&cmd("a"));
+        ui.press_without_settling(&cmd("alt-backspace"));
+        assert!(!ui.dialog_open(), "{view}: nothing to delete for good");
+
+        // What the Trash holds takes clicks once it is listed.
+        ui.settle();
+        assert_eq!(ui.names(), ["Budget.csv"], "{view}");
+        ui.press("down");
+        assert_eq!(ui.selected(), ["Budget.csv"], "{view}");
+        ui.press(&cmd("["));
+        assert_eq!(ui.folder(), Some(fx.dir.clone()), "{view}");
+    }
+
+    // The mouse's Back button is no press on an item, and leads back from a
+    // place before it has been read.
+    go_before_it_is_read(&mut ui, Location::Trash);
+    let back = gpui_kit::MouseButton::Navigate(gpui_kit::NavigationDirection::Back);
+    ui.click_with(back, "content");
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+}
+
+#[gpui_kit::test]
+fn a_place_that_takes_long_to_read_shows_placeholders_after_a_moment(cx: &mut TestAppContext) {
+    let fx = Fixture::new("left-place-slow");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    let notes = item_id("row", &fx.path("notes.txt"));
+    let pass = |ui: &mut Ui, ms: u64| {
+        ui.cx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(ms));
+    };
+
+    // Recents isn't read, as while its index is still being built. The
+    // folder's items stay for a moment: a folder that is read at once takes
+    // their place before the moment is over.
+    ui.press_without_settling(&cmd("shift-f"));
+    ui.view.update(ui.cx, |f, _| f.stall_listing_for_test());
+    pass(&mut ui, 100);
+    assert!(ui.exists(notes.clone()), "the folder's items still show");
+    assert!(!ui.exists("skeleton"));
+
+    // Then placeholders say that Recents is being read, and the window no
+    // longer lists a folder's items under its name.
+    pass(&mut ui, 100);
+    assert!(!ui.exists(notes));
+    assert!(ui.exists("skeleton"));
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(
+        !ui.exists("message-title"),
+        "nor says that Recents is empty"
+    );
+
+    // Refresh reads it after all.
+    ui.press(&cmd("r"));
+    assert!(!ui.exists("skeleton"));
+    let recent = ui.names();
+    assert!(recent.contains(&"Roadmap.md".to_string()), "{recent:?}");
+
+    // What a folder that couldn't be read said isn't said of the next place.
+    ui.go_to(&fx.path("gone"));
+    assert_eq!(
+        ui.snapshot("message-title").label(),
+        Some("Can’t open this folder")
+    );
+    go_before_it_is_read(&mut ui, Location::Recents);
+    assert!(!ui.exists("message-title"));
+    assert!(ui.exists("skeleton"));
+    ui.settle();
+    assert_eq!(ui.names(), recent);
+
+    // The moment is one moment, however many places the window goes on to
+    // in it: what stayed of Recents is gone when it's over.
+    go_before_it_is_read(&mut ui, Location::Trash);
+    ui.view.update(ui.cx, |f, _| f.stall_listing_for_test());
+    pass(&mut ui, 100);
+    assert_eq!(ui.names(), recent, "Recents' items still show");
+    go_before_it_is_read(&mut ui, Location::Folder(fx.dir.clone()));
+    ui.view.update(ui.cx, |f, _| f.stall_listing_for_test());
+    pass(&mut ui, 100);
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(ui.exists("skeleton"));
+}
+
+#[gpui_kit::test]
+fn a_folder_is_gone_into_without_placeholders_on_the_way(cx: &mut TestAppContext) {
+    let fx = Fixture::new("left-place-no-flash");
+    let mut ui = Ui::open(cx, &fx.dir);
+    let left = item_id("tile", &fx.path("notes.txt"));
+    ui.select("Projects");
+    ui.press_without_settling("enter");
+    assert_eq!(ui.folder(), Some(fx.path("Projects")));
+
+    // The folder answers in a few milliseconds. However many frames are
+    // drawn until then, each shows the items of the folder the window left.
+    for frame in 0..3 {
+        assert!(ui.exists(left.clone()), "frame {frame}");
+        assert!(!ui.exists("skeleton"), "frame {frame}");
+    }
+
+    // Its items are in the next frame after its answer.
+    ui.cx.run_until_parked();
+    assert!(!ui.exists("skeleton"));
+    assert!(!ui.exists(left));
+    assert_eq!(ui.names(), ["atlas"]);
+}
+
+#[gpui_kit::test]
+fn a_search_ended_while_a_place_is_read_doesnt_list_the_place_left(cx: &mut TestAppContext) {
+    let fx = Fixture::new("left-place-search");
+    let mut ui = Ui::open(cx, &fx.dir);
+    assert_eq!(ui.names().len(), 4);
+
+    // A search made before Recents has been read shows placeholders until
+    // it answers, like any other.
+    ui.press_without_settling(&cmd("shift-f"));
+    ui.press_without_settling(&cmd("f"));
+    ui.type_without_settling("at");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(ui.exists("skeleton"));
+
+    // With the words gone again before anything has answered, the window is
+    // back to waiting for Recents. The folder's items aren't Recents'.
+    ui.press_without_settling("backspace");
+    ui.press_without_settling("backspace");
+    assert_eq!(ui.read(|f| f.query().to_string()), "");
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert!(ui.exists("skeleton"));
+
+    ui.settle();
+    let recent = ui.names();
+    assert!(
+        recent.contains(&"Project Atlas.txt".to_string()),
+        "{recent:?}"
+    );
+}
+
 #[gpui_kit::test]
 fn a_key_bound_twice_acts_once(cx: &mut TestAppContext) {
     let fx = Fixture::new("nav-keys-twice");
@@ -591,31 +853,6 @@ fn cmd_return_in_the_trash_acts_only_on_a_result_of_a_search(cx: &mut TestAppCon
     ui.press(&cmd("enter"));
     assert_eq!(ui.folder(), Some(fx.dir.clone()));
     assert_eq!(ui.selected(), ["Roadmap.md"]);
-}
-
-#[gpui_kit::test]
-fn cmd_return_leaves_an_item_of_the_trash_alone_while_the_next_place_is_read(
-    cx: &mut TestAppContext,
-) {
-    let fx = Fixture::new("reveal-key-stale");
-    let mut ui = Ui::open(cx, &fx.dir);
-    ui.select("notes.txt");
-    ui.press(&cmd("backspace"));
-    ui.update(|f, window, cx| f.navigate(Location::Trash, window, cx));
-
-    // A place's items stay on screen until the place gone to next has read
-    // its own, which Recents does only once the index is ready. Recents is
-    // a list the key works in, and what's selected is still the Trash's.
-    ui.press_without_settling(&cmd("shift-f"));
-    ui.press_without_settling("down");
-    assert_eq!(
-        ui.selected(),
-        ["notes.txt"],
-        "the Trash's item, still listed"
-    );
-    ui.press(&cmd("enter"));
-    assert_eq!(ui.read(|f| f.location().clone()), Location::Recents);
-    assert!(ui.selected().is_empty(), "{:?}", ui.selected());
 }
 
 #[gpui_kit::test]

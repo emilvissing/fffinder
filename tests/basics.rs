@@ -1332,6 +1332,121 @@ fn a_quick_drag_past_a_folder_leaves_it_closed(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_folder_of_the_place_the_window_left_takes_no_drag(cx: &mut TestAppContext) {
+    use fffinder::model::Location;
+    let fx = Fixture::new("spring-left");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    let file = ui
+        .snapshot(item_id("name-cell", &fx.path("notes.txt")))
+        .bounds();
+    let folder = ui.snapshot(item_id("row", &fx.path("Projects"))).bounds();
+    let roadmap = ui.snapshot(item_id("row", &fx.path("Roadmap.md"))).bounds();
+    // The next frame is drawn, and the mouse moves on with the button down.
+    // Spawned work isn't let run, so a place gone to stays unread.
+    let drag_on_to = |ui: &mut Ui, position: Point<Pixels>| {
+        ui.window(|window, cx| {
+            use gpui_kit::InputEvent as _;
+            use gpui_kit::test::TestWindowExt as _;
+            window.render_frame(cx);
+            window.dispatch_event(
+                gpui_kit::MouseMoveEvent {
+                    position,
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers::none(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+        });
+    };
+
+    // The window goes to Recents with a drag under way. Until Recents has
+    // been read the folder's items still show, and a drop on the folder
+    // among them is a drop on Recents, which takes none.
+    ui.drag_and_hold(file.center(), folder.center());
+    ui.press_without_settling(&cmd("shift-f"));
+    let nudged = folder.center() + point(px(3.), px(0.));
+    drag_on_to(&mut ui, nudged);
+    ui.release(nudged);
+    assert_eq!(ui.read(|f| f.location().clone()), Location::Recents);
+    assert!(fx.path("notes.txt").exists());
+    assert!(!fx.path("Projects/notes.txt").exists());
+
+    // Nor does a drag that comes to rest on it wait for it to open, and
+    // open it once the wait is over, when Recents takes long to read.
+    ui.press(&cmd("["));
+    assert_eq!(ui.folder(), Some(fx.dir.clone()));
+    ui.drag_and_hold(file.center(), roadmap.center());
+    ui.press_without_settling(&cmd("shift-f"));
+    ui.view.update(ui.cx, |f, _| f.stall_listing_for_test());
+    drag_on_to(&mut ui, folder.center());
+    ui.settle();
+    ui.settle();
+    assert_eq!(ui.read(|f| f.location().clone()), Location::Recents);
+    ui.release(folder.center());
+}
+
+#[gpui_kit::test]
+fn a_press_made_before_the_window_left_drags_nothing_away(cx: &mut TestAppContext) {
+    use gpui_kit::InputEvent as _;
+    let fx = Fixture::new("drag-left");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.go_to(&fx.path("Projects/atlas"));
+    let inside = fx.path("Projects/atlas/Project Atlas.txt");
+    let file = ui.snapshot(item_id("name-cell", &inside)).bounds();
+    let below = file.center() + point(px(0.), px(120.));
+
+    // The mouse goes down on a file and stays down while the window goes up
+    // a folder, which isn't read yet.
+    ui.window(|window, cx| {
+        for event in [
+            gpui_kit::MouseMoveEvent {
+                position: file.center(),
+                pressed_button: None,
+                modifiers: Modifiers::none(),
+            }
+            .to_platform_input(),
+            gpui_kit::MouseDownEvent {
+                button: MouseButton::Left,
+                position: file.center(),
+                modifiers: Modifiers::none(),
+                click_count: 1,
+                first_mouse: false,
+            }
+            .to_platform_input(),
+        ] {
+            window.dispatch_event(event, cx);
+        }
+    });
+    ui.press_without_settling(&cmd("up"));
+    assert_eq!(ui.folder(), Some(fx.path("Projects")));
+
+    // The file still shows, and moving the mouse on doesn't pick it up: let
+    // go of over the file area, it would be moved to the folder gone to.
+    ui.window(|window, cx| {
+        use gpui_kit::test::TestWindowExt as _;
+        window.render_frame(cx);
+        window.dispatch_event(
+            gpui_kit::MouseMoveEvent {
+                position: below,
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Modifiers::none(),
+            }
+            .to_platform_input(),
+            cx,
+        );
+    });
+    assert!(ui.exists(item_id("name-cell", &inside)));
+    assert!(!ui.window(|_, cx| cx.has_active_drag()));
+    ui.release(below);
+    assert!(inside.exists());
+    assert!(!fx.path("Projects/Project Atlas.txt").exists());
+    assert_eq!(ui.names(), ["atlas"]);
+}
+
+#[gpui_kit::test]
 fn holding_a_drag_over_what_covers_a_folder_leaves_it_closed(cx: &mut TestAppContext) {
     let fx = Fixture::new("spring-covered");
     let mut ui = Ui::open(cx, &fx.dir);

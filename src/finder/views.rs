@@ -357,6 +357,13 @@ impl Finder {
     /// Dragging `el` drags item `ix`, with the rest of the selection if it's
     /// selected, within fffinder and out to other apps.
     fn item_drag(&self, el: Stateful<Div>, ix: usize) -> Stateful<Div> {
+        // An item the window left behind isn't one to drag away. A press
+        // made on it before the window left would otherwise still become a
+        // drag, and a drop in the file area would move it to the place the
+        // window has gone to.
+        if self.rows_left_behind() {
+            return el;
+        }
         let row = &self.rows[ix];
         let selected = self.selection.contains(ix);
         let drag_paths: Vec<PathBuf> = if selected {
@@ -458,7 +465,10 @@ impl Finder {
     ) -> AnyElement {
         let row = &self.rows[ix];
         let view = cx.entity();
-        let el = if row.entry.is_navigable() {
+        // A folder the window left behind isn't one to drop items on, or to
+        // hold them over until it opens. Such a drop is on the place the
+        // window has gone to, like one beside the rows.
+        let el = if row.entry.is_navigable() && !self.rows_left_behind() {
             let folder = Location::Folder(row.entry.path.clone());
             let el = super::transfer::spring_loaded(el, row.entry.path.clone(), cx);
             super::transfer::folder_drop_target(el, row.entry.path.clone(), cx).on_mouse_down(
