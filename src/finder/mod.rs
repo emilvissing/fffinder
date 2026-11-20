@@ -334,6 +334,41 @@ fn paths_of(rows: &[Row]) -> impl Iterator<Item = &Path> {
     rows.iter().map(|row| row.entry.path.as_path())
 }
 
+/// Where `entry` is, with what its row shows of the file there that changes
+/// when the file is saved: its size, and when it was last modified.
+fn as_listed(entry: &FileEntry) -> (&Path, Option<u64>, Option<SystemTime>) {
+    (&entry.path, entry.size, entry.modified)
+}
+
+/// Have the rows of `shown` show their items as `found` has them, where an
+/// item came back with another size or date, as a file has that was saved
+/// where it is. No row comes, goes or moves by it.
+///
+/// # Arguments
+///
+/// * `shown` - The results on screen
+/// * `found` - The answer of the same search made again
+///
+/// # Returns
+///
+/// Whether any row changed
+fn show_as_found(shown: &mut [Row], found: &[Row]) -> bool {
+    let found: HashMap<&Path, &Row> = found
+        .iter()
+        .map(|row| (row.entry.path.as_path(), row))
+        .collect();
+    let mut changed = false;
+    for row in shown {
+        if let Some(&now) = found.get(row.entry.path.as_path())
+            && as_listed(&row.entry) != as_listed(&now.entry)
+        {
+            *row = now.clone();
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// What the index has reported, since a list on screen was made, that the
 /// list may not show yet.
 enum Stale {
@@ -610,7 +645,7 @@ pub struct Finder {
     filter_debounce: Task<()>,
     /// Paths the filter kept, for the rows in `filter_source`.
     filter_keep: Option<HashSet<PathBuf>>,
-    filter_source: Option<Vec<PathBuf>>,
+    filter_source: Option<Vec<filter::FilterInput>>,
     filter_error: Option<String>,
     filtering: bool,
     /// Rows before the filter, for the status bar.
@@ -1708,9 +1743,10 @@ impl Finder {
             if seen != recent {
                 // A file that is written to goes first and leaves the rest
                 // as it is. So one that Recents has first already changes
-                // nothing, however often it's written to. One it doesn't
-                // have first is a single change, which isn't waited for to
-                // end: a download can take long.
+                // nothing but its own size and date, however often it's
+                // written to, and those wait for the next read. One it
+                // doesn't have first is a single change, which isn't waited
+                // for to end: a download can take long.
                 let written = self.engine.only_written_since(seen);
                 let first = self.listing.first().map(|entry| entry.path.as_path());
                 news = written.is_none();
@@ -1726,7 +1762,8 @@ impl Finder {
     }
 
     /// Read Recents again for what the index reported, without a sign that
-    /// it's being read, and show the list if it came out another one.
+    /// it's being read, and show the list if it came out another one, or
+    /// the same one with a file in it that has another size or date.
     fn reload_recents(&mut self, cx: &mut Context<Self>) {
         let engine = self.engine.clone();
         self.recents_behind.stale = None;
@@ -1736,12 +1773,13 @@ impl Finder {
                 .background_spawn(async move { read_recents(&engine) })
                 .await;
             this.update(cx, |this, cx| {
-                // A file written to again is where it was: first.
+                // A file written to again is where it was, first, with
+                // another size and date for its row to show.
                 let fresh = !this
                     .listing
                     .iter()
-                    .map(|entry| &entry.path)
-                    .eq(entries.iter().map(|entry| &entry.path));
+                    .map(as_listed)
+                    .eq(entries.iter().map(as_listed));
                 this.recents_behind.caught_up(fresh);
                 if fresh {
                     this.listing = entries;
@@ -1811,6 +1849,10 @@ impl Finder {
 
     fn refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
         self.previews.clear();
+        // A filter can go by more than it is given of each item, the time
+        // of day for one, so it runs again even for items that come back as
+        // they were.
+        self.filter_source = None;
         self.load_listing(Vec::new(), true, cx);
         if self.is_searching() {
             self.run_search(false, cx);
@@ -2230,7 +2272,9 @@ impl Finder {
     /// [`Self::run_search`], or with `stale` the same search made again
     /// quietly, to catch up with what the index reported. Nothing on screen
     /// says that one is running, and its answer takes the place of the
-    /// results only where those changes show in it.
+    /// results only where those changes show in it. Where they don't, the
+    /// results stay, and show an item that came back with another size or
+    /// date as the answer has it (see [`show_as_found`]).
     fn start_search(&mut self, debounce: bool, stale: Option<Stale>, cx: &mut Context<Self>) {
         if self.query.is_empty() {
             return;
@@ -2335,11 +2379,24 @@ impl Finder {
                         || stale
                             .as_ref()
                             .is_none_or(|stale| stale.shows_in(&this.results, &rows));
+                    // An answer that isn't shown still says how the items
+                    // on screen are now, and their rows take that from it.
+                    // A file that was saved comes first among the matches
+                    // that are as good as it, so the answer after a save is
+                    // often the same items in another order: were only an
+                    // answer that is shown to bring a new size and date,
+                    // the file's row would keep the ones it had.
+                    let updated = !fresh && show_as_found(&mut this.results, &rows);
                     if quiet {
                         // An index still being built hasn't had its say.
-                        this.results_behind.caught_up(fresh || retry);
+                        this.results_behind.caught_up(fresh || updated || retry);
                     }
                     if !fresh {
+                        if updated {
+                            this.rebuild_rows(cx);
+                            // The selected item may be one that was saved.
+                            this.selection_changed(cx);
+                        }
                         return retry;
                     }
                     this.results = rows;

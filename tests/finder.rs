@@ -1074,6 +1074,124 @@ fn results_stay_when_what_changed_isnt_among_them(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn results_show_a_file_as_it_was_last_saved_once_the_search_has_run_again(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-save");
+    written_ago(&fx, "Roadmap.md", 20);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("shift-p"));
+    ui.press(&cmd("f"));
+    ui.type_text("roadmap");
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    ui.select("Roadmap.md");
+    let roadmap = fx.path("Roadmap.md");
+    let text = |ui: &Ui| ui.read(|f| f.preview_text_for_test(&roadmap));
+    let size = |ui: &Ui| ui.read(|f| f.rows_for_test()[0].size.to_string());
+    assert_eq!(size(&ui), "10 bytes");
+    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n"));
+
+    // Another program saves the file under another name, one with the
+    // search's words in it, which then takes the file's. The index reports
+    // the draft, so the search runs again, and finds the one file it found
+    // before. The row and the preview show the file as it is now.
+    let draft = fx.path("Roadmap.md.draft");
+    let save = |ui: &mut Ui, text: &str| {
+        std::fs::write(&draft, text).unwrap();
+        std::fs::rename(&draft, &roadmap).unwrap();
+        ui.reindex();
+        ui.report_change(None, Some(&draft));
+        ui.report_change(Some(&draft), Some(&roadmap));
+        ui.look_for_changes(2);
+    };
+    save(&mut ui, "# Roadmap\n\nShip it.\n");
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert_eq!(size(&ui), "20 bytes");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n\nShip it.\n"));
+
+    // Results that show a file as it is now have changed, so the search is
+    // followed as closely as before. Had they counted as coming out as they
+    // were, it would be held back for three looks by the third save.
+    for saved in ["# Roadmap\n\nShip it soon.\n", "# Roadmap\n\nShipped.\n"] {
+        save(&mut ui, saved);
+        assert_eq!(text(&ui).as_deref(), Some(saved));
+    }
+
+    // An answer that has every item as its row shows it changes nothing.
+    // The draft is reported and gone, twice over, and the search is held
+    // back as for any results that came out as they were: the save after
+    // that shows at the fourth look.
+    for _ in 0..2 {
+        ui.report_change(None, Some(&draft));
+        ui.look_for_changes(2);
+    }
+    save(&mut ui, "# Roadmap\n\nShipped it.\n");
+    let before = "# Roadmap\n\nShipped.\n";
+    assert_eq!(text(&ui).as_deref(), Some(before), "not yet");
+    ui.look_for_changes(2);
+    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n\nShipped it.\n"));
+
+    // After a rescan, when any file may have changed, the row and the
+    // preview show the file as it is now as well.
+    std::fs::write(&roadmap, "# Roadmap\n").unwrap();
+    ui.rescan();
+    ui.look_for_changes(2);
+    assert_eq!(size(&ui), "10 bytes");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n"));
+}
+
+#[gpui_kit::test]
+fn a_saved_file_shows_as_it_is_now_in_results_that_stay_as_they_were(cx: &mut TestAppContext) {
+    let fx = Fixture::new("search-follows-save-among-equals");
+    // Two files that match as well as each other. The one that changed last
+    // is listed first.
+    std::fs::write(fx.path("plan one.md"), "# One\n").unwrap();
+    std::fs::write(fx.path("plan two.md"), "# Two\n").unwrap();
+    written_ago(&fx, "plan one.md", 30);
+    written_ago(&fx, "plan two.md", 10);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("shift-p"));
+    ui.press(&cmd("f"));
+    ui.type_text("plan");
+    let as_found = ["plan two.md", "plan one.md"];
+    assert_eq!(ui.names(), as_found);
+    ui.select("plan one.md");
+    let one = fx.path("plan one.md");
+    let text = |ui: &Ui| ui.read(|f| f.preview_text_for_test(&one));
+    let size = |ui: &Ui| ui.read(|f| f.rows_for_test()[1].size.to_string());
+    assert_eq!(size(&ui), "6 bytes");
+
+    // The older one is saved, under a draft's name that has the search's
+    // word. The search runs again and finds the saved file first now.
+    // Results don't reshuffle for that, so the list stays as it is, and the
+    // file's row and preview show it as it is now all the same.
+    let draft = fx.path("plan one.md.draft");
+    let save = |ui: &mut Ui, text: &str| {
+        std::fs::write(&draft, text).unwrap();
+        std::fs::rename(&draft, &one).unwrap();
+        ui.reindex();
+        ui.report_change(None, Some(&draft));
+        ui.report_change(Some(&draft), Some(&one));
+        ui.look_for_changes(2);
+    };
+    save(&mut ui, "# One\n\nMore of it.\n");
+    assert_eq!(ui.names(), as_found);
+    assert_eq!(size(&ui), "19 bytes");
+    assert_eq!(ui.selected(), ["plan one.md"]);
+    assert_eq!(text(&ui).as_deref(), Some("# One\n\nMore of it.\n"));
+
+    // The same when the answer has a match that no report was of: the match
+    // isn't listed, and the saved file's row shows it as it is now.
+    std::fs::write(fx.path("plan three.md"), "# Three\n").unwrap();
+    save(&mut ui, "# One\n");
+    assert_eq!(ui.names(), as_found);
+    assert_eq!(size(&ui), "6 bytes");
+    assert_eq!(text(&ui).as_deref(), Some("# One\n"));
+}
+
+#[gpui_kit::test]
 fn a_search_held_back_is_followed_closely_again_after_a_quiet_minute(cx: &mut TestAppContext) {
     let fx = Fixture::new("search-follows-after-quiet");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -1422,6 +1540,53 @@ fn recents_previews_a_file_as_it_was_last_written(cx: &mut TestAppContext) {
     assert_eq!(ui.names()[0], "Roadmap.md", "{:?}", ui.names());
     assert_eq!(ui.selected(), ["Roadmap.md"]);
     assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n\nShip it.\n"));
+}
+
+#[gpui_kit::test]
+fn recents_shows_a_file_saved_where_it_was_as_it_is_now(cx: &mut TestAppContext) {
+    let fx = Fixture::new("recents-saved-in-place");
+    let written = |name: &str, minutes: u64| written_ago(&fx, name, minutes);
+    written("Roadmap.md", 10);
+    written("notes.txt", 20);
+    written("Budget.csv", 30);
+    written("Projects/atlas/Project Atlas.txt", 40);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.press(&cmd("shift-f"));
+    ui.press(&cmd("shift-p"));
+    let newest_first = ["Roadmap.md", "notes.txt", "Budget.csv", "Project Atlas.txt"];
+    assert_eq!(ui.names(), newest_first);
+    let roadmap = fx.path("Roadmap.md");
+    let text = |ui: &Ui| ui.read(|f| f.preview_text_for_test(&roadmap));
+    let size = |ui: &Ui| ui.read(|f| f.rows_for_test()[0].size.to_string());
+    ui.select("Roadmap.md");
+    assert_eq!(size(&ui), "10 bytes");
+    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n"));
+
+    // Saved under another name that then takes the file's, which the index
+    // reports as a file renamed. It was the newest and still is, so Recents
+    // is read again and comes out in the order it was in.
+    let draft = fx.path("Roadmap.md.draft");
+    let save = |ui: &mut Ui, text: &str| {
+        std::fs::write(&draft, text).unwrap();
+        std::fs::rename(&draft, &roadmap).unwrap();
+        ui.reindex();
+        ui.report_change(Some(&draft), Some(&roadmap));
+        ui.look_for_changes(2);
+    };
+    save(&mut ui, "# Roadmap\n\nShip it.\n");
+    assert_eq!(ui.names(), newest_first);
+    assert_eq!(size(&ui), "20 bytes");
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert_eq!(text(&ui).as_deref(), Some("# Roadmap\n\nShip it.\n"));
+
+    // A list that shows a file as it is now has changed, as one in another
+    // order has, so Recents is followed as closely as before. Had it counted
+    // as coming out as it was, it would be held back by the third save.
+    for saved in ["# Roadmap\n\nShip it soon.\n", "# Roadmap\n\nShipped.\n"] {
+        save(&mut ui, saved);
+        assert_eq!(ui.names(), newest_first);
+        assert_eq!(text(&ui).as_deref(), Some(saved));
+    }
 }
 
 #[gpui_kit::test]
@@ -2006,7 +2171,8 @@ fn going_to_another_folder_calls_off_a_key_that_waits_for_the_filter(cx: &mut Te
     ui.press_without_settling("alt-up");
     ui.settle();
     assert_eq!(ui.folder(), Some(fx.path("Projects")));
-    assert_eq!(ui.names(), ["big.log"]);
+    // atlas holds huge.log, so it passes by its size like big.log.
+    assert_eq!(ui.names(), ["atlas", "big.log"]);
     assert!(
         !ui.files_focused(),
         "Down Arrow was pressed for the folder the window left"

@@ -5,7 +5,7 @@
 use crate::theme::ui;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use fffinder_core::{FileEntry, KindFilter, SmartFolder};
 use gpui_kit::TestSupportExt as _;
@@ -27,6 +27,11 @@ use crate::nushell;
 
 /// Search results fetched while a filter is on, so it has enough to work with.
 pub const FILTER_SEARCH_LIMIT: usize = 5000;
+
+/// An item a filter was run over: its path, and the size and date the
+/// filter was given for it, which can change while the item stays where it
+/// is.
+pub(super) type FilterInput = (PathBuf, Option<u64>, Option<SystemTime>);
 
 /// What a window searches with besides the words: the kind, the scope, Name
 /// or Contents, and the filter with its bar.
@@ -116,9 +121,10 @@ impl Finder {
     }
 
     /// Keep only the rows the filter selected, starting a new run when the
-    /// rows changed. Rows stay as they are until the first run finishes. The
-    /// row of a name being edited in the views stays whatever the filter
-    /// selected.
+    /// rows changed: when they are other items, or in another order, or one
+    /// has another size or date. Rows stay as they are until the first run
+    /// finishes. The row of a name being edited in the views stays whatever
+    /// the filter selected.
     pub(super) fn apply_filter_to(&mut self, rows: &mut Vec<Row>, cx: &mut Context<Self>) {
         if self.filter.is_empty() {
             return;
@@ -129,9 +135,16 @@ impl Finder {
         if rows.is_empty() && self.is_searching() && self.search_stats.is_none() {
             return;
         }
-        let paths: Vec<PathBuf> = rows.iter().map(|r| r.entry.path.clone()).collect();
-        if self.filter_source.as_ref() != Some(&paths) {
-            self.filter_source = Some(paths);
+        // An item can come back where it was with another size or date: a
+        // file that another program saved, or a folder once the index has
+        // told its size. The filter may go by those, so what it answered
+        // for the item as it was says nothing of the item as it is.
+        let given: Vec<FilterInput> = rows
+            .iter()
+            .map(|r| (r.entry.path.clone(), r.entry.size, r.entry.modified))
+            .collect();
+        if self.filter_source.as_ref() != Some(&given) {
+            self.filter_source = Some(given);
             let entries: Vec<FileEntry> = rows.iter().map(|r| r.entry.clone()).collect();
             self.start_filter(entries, cx);
         }

@@ -4780,6 +4780,180 @@ fn a_filter_waits_for_the_rows_a_search_has_yet_to_find(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+fn a_filter_runs_again_for_a_file_that_was_saved(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-file-saved");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    let status = |ui: &mut Ui| ui.snapshot("status-text").label().unwrap().to_string();
+    ui.press(&cmd("alt-f"));
+    ui.type_text("size > 10b");
+    ui.press("enter");
+    assert_eq!(ui.names(), ["notes.txt"]);
+
+    // Another program saves a file the way most do: under another name,
+    // which then takes the file's. The folder is read again and lists the
+    // same items in the same order, and the one that grew passes now.
+    let save = |name: &str, text: &str| {
+        let draft = fx.path("draft.tmp");
+        std::fs::write(&draft, text).unwrap();
+        std::fs::rename(draft, fx.path(name)).unwrap();
+    };
+    save("Budget.csv", "a,b\n1,2\n3,4\n");
+    ui.look_for_changes(1);
+    assert_eq!(ui.names(), ["Budget.csv", "notes.txt"]);
+    let passing = "2 of 4 items pass the filter";
+    assert!(status(&mut ui).starts_with(passing), "{}", status(&mut ui));
+
+    // One that shrank doesn't pass any more.
+    save("notes.txt", "n\n");
+    ui.look_for_changes(1);
+    assert_eq!(ui.names(), ["Budget.csv"]);
+    let passing = "1 of 4 items pass the filter";
+    assert!(status(&mut ui).starts_with(passing), "{}", status(&mut ui));
+
+    // The message that none passes goes when one does.
+    save("Budget.csv", "a\n");
+    ui.look_for_changes(1);
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+    assert_eq!(
+        ui.snapshot("message-title").label(),
+        Some("No Items Pass the Filter")
+    );
+    save("Roadmap.md", "# Roadmap\n\nShip it.\n");
+    ui.look_for_changes(1);
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    assert!(!ui.exists("message-title"));
+
+    // A file written over where it is changes nothing about its folder,
+    // which isn't read again for it. Refresh reads it, and the filter goes
+    // by the file as it came back.
+    std::fs::write(fx.path("notes.txt"), "plain notes\n").unwrap();
+    ui.look_for_changes(1);
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+    ui.press(&cmd("r"));
+    assert_eq!(ui.names(), ["notes.txt", "Roadmap.md"]);
+}
+
+#[gpui_kit::test]
+fn a_filter_runs_again_for_a_file_saved_at_the_size_it_had(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-file-date");
+    // The notes were last saved years ago.
+    let notes = fx.path("notes.txt");
+    let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&notes)
+        .unwrap()
+        .set_modified(long_ago)
+        .unwrap();
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    ui.update(|f, _, cx| f.set_filter("modified < 2020-01-01".into(), cx));
+    assert_eq!(ui.names(), ["notes.txt"]);
+
+    // Saved with the text they had, they are as long as they were, and
+    // have another date for a filter to go by.
+    let draft = fx.path("draft.tmp");
+    std::fs::write(&draft, "plain notes\n").unwrap();
+    std::fs::rename(draft, notes).unwrap();
+    ui.look_for_changes(1);
+    assert!(ui.names().is_empty(), "{:?}", ui.names());
+}
+
+#[gpui_kit::test]
+fn a_filter_judges_folders_by_the_sizes_that_come_after_them(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-folder-sizes");
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    // Projects holds five bytes, all of them in atlas.
+    ui.update(|f, _, cx| f.set_filter("size == 5b".into(), cx));
+    assert_eq!(ui.names(), ["Projects"]);
+
+    // A folder's size comes from the index a moment after the folder it is
+    // in was listed, which is when the filter was first given its items.
+    ui.go_to(&fx.path("Projects"));
+    assert_eq!(ui.names(), ["atlas"]);
+    ui.press(&cmd("["));
+    assert_eq!(ui.names(), ["Projects"]);
+
+    // A folder without a size has nothing to compare, which `nu` takes for
+    // an error where the comparison is joined to another condition. No such
+    // error is left standing once the size has come.
+    ui.update(|f, _, cx| f.set_filter("kind == Folder and size > 4b".into(), cx));
+    assert_eq!(ui.names(), ["Projects"]);
+    ui.go_to(&fx.path("Projects"));
+    assert_eq!(ui.read(|f| f.filter_error().map(str::to_string)), None);
+    assert!(!ui.exists("filter-error"));
+    assert_eq!(ui.names(), ["atlas"]);
+}
+
+#[gpui_kit::test]
+fn refresh_runs_the_filter_again(cx: &mut TestAppContext) {
+    let Some(nu) = fffinder::nushell::find_nu(None) else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    let fx = Fixture::new("filter-refresh");
+    // A filter can go by more than it is given of each item: the time of
+    // day, or as here what a file says.
+    let wanted = fx.path("Projects/wanted.txt");
+    std::fs::write(&wanted, "Roadmap.md\n").unwrap();
+    let mut ui = Ui::open_with(
+        cx,
+        &fx.dir,
+        Open {
+            nu: Some(nu),
+            ..Default::default()
+        },
+    );
+    ui.update(|f, _, cx| {
+        let filter = "| where name in (open --raw Projects/wanted.txt | lines)";
+        f.set_filter(filter.into(), cx)
+    });
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+
+    // While the items come back as they were the filter isn't run again,
+    // however often the folder is looked at or read: each run starts a `nu`.
+    std::fs::write(&wanted, "Budget.csv\n").unwrap();
+    ui.look_for_changes(2);
+    ui.update(|f, _, cx| f.reload_quietly(cx));
+    assert_eq!(ui.names(), ["Roadmap.md"]);
+
+    ui.press(&cmd("r"));
+    assert_eq!(ui.names(), ["Budget.csv"]);
+}
+
+#[gpui_kit::test]
 fn a_filter_that_keeps_nothing_says_so_and_offers_to_remove_it(cx: &mut TestAppContext) {
     let Some(nu) = fffinder::nushell::find_nu(None) else {
         eprintln!("nu not installed; skipping");
