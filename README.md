@@ -5,9 +5,14 @@ what was built, how each change was checked, and the improvements that were writ
 
 ## Where things stand
 
-- `search-ui-polish` is the product branch: improvements to search and to the UI on top of upstream's `66c919b`,
-  one commit each. Every commit's message ends with its changelog entry.
-- Work stopped at a cut-off: everything rated 4 of 5 for value to a user was built, and the rest was saved here.
+- `search-ui-polish` is the product branch: 47 improvements to search and to the UI on top of upstream's `66c919b`,
+  one commit each, with one commit to the screenshot example before them and one that writes `CHANGELOG.md` after
+  them. Every improvement's commit message ends with its changelog entry.
+- Work stopped at a cut-off. What was already being worked on was finished, and the rest was saved here. Four
+  write-ups were set aside at the owner's request before anyone had started them: two improvements
+  (`column-row-menu-wrong-item`, `split-active-pane`) and two fix-ups from the review of the whole branch
+  (`fix-wording-after-later-changes`, `fix-folder-search-own-name-pool`). They are in `later.md` with the rest, each
+  where its rating puts it.
 - Nothing on `search-ui-polish` has been linked or run on macOS or Windows. It is compiled and linted for both
   (check and clippy, with and without the `term` feature), and the tests run on Linux.
 - No pull request was opened.
@@ -19,10 +24,12 @@ what was built, how each change was checked, and the improvements that were writ
 | `later.md` | The backlog: every improvement that is written up and not built, highest value first, with the problem, a proposal, tests and risks. Start here. |
 | `briefs/<id>.json` | The full write-up of every improvement, built or not, with the verifier's plan and notes that later reviews added. |
 | `done/<id>.json` | The reviewer's record of each improvement that landed: what changed for a user, what was left out, the tests, what the review fixed, what it found and did not fix, and the doubts that remain. |
-| `final-pass-notes.md` | Running notes: things only the owner can check or decide, and finds that did not get a write-up. |
+| `final-pass-notes.md` | Running notes, one paragraph per change: things only the owner can check or decide, and finds that did not get a write-up. |
+| `review/` | The review of the whole branch: what six readers found, each through one lens, with a skeptic's verdict on every finding, and the last check of the changelog. |
+| `final-fixes.md` | What that review led to: which finds became fix-ups, which of those were built, and what is still open. |
+| `changelog-fixes.md`, `assemble-changelog.py` | How the [Unreleased] section of `CHANGELOG.md` was put together from the commit messages, and the corrections made to it. |
 | `GUIDE.md` | The rules every implementer and reviewer followed: house style, the test requirement, pictures, documentation, the commit format. |
 | `queue/`, `deps.json` | The order of work and which improvement builds on which. `queue/later.txt` is the saved list. |
-| `parked/` | Partial work that was stopped at the cut-off, as patches against `search-ui-polish`. |
 | `report/` | The generator of the progress page and the curated list of things for the owner (`owner.json`). |
 | `*.sh`, `*.py`, `*.js` | The tools: `check.sh` (format, clippy, the whole test suite), `shot.sh` (a picture of the real window, headless), `xcheck.sh` (compile checks for Windows and macOS from Linux), the queue and its claims, and the workflow scripts. |
 
@@ -39,6 +46,8 @@ and build output.
    change, read the changed functions whole, looked at the window in pictures, fixed what it found, rebased onto the
    branch, ran `check.sh` again, and only then put the commit on `search-ui-polish` and wrote `done/<id>.json`.
 4. Every few landings the branch was compiled for Windows and macOS.
+5. Near the end, six readers went through the whole branch for faults that a review of one change misses, and a
+   skeptic tried to refute each finding. The confirmed ones became fix-ups, built the same way.
 
 ## Picking up the backlog
 

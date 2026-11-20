@@ -70,3 +70,22 @@ Left for later, for the report and later.md:
 - sorted-cut-ignores-folders-on-top (sev 1): by the plan's choice a sort chooses before folders are put on top; the
   wording fix adds the sentence to the manual.
 - #4 above (selection moved without asking for its preview) and #6 above.
+
+## Outcome (20 Nov, when the branch was finished)
+
+Four of the six fix-ups were built, each by an implementer and then a reviewer, like every other change:
+
+| Fix-up | Commit | Changelog |
+| --- | --- | --- |
+| fix-own-small-faults (#1 above, the dead keys after Go to Folder, Relevance chosen again) | ffb02de | none: the faults were in changes no release has had |
+| fix-filter-reruns-and-fresh-rows (#2 and #3) | 5e68c44 | Fixed, for the filter half |
+| fix-here-folder-spelling | a085120 | Fixed |
+| fix-rename-press-selection | 4efa254 | Fixed |
+
+Two were set aside before they were started, at the owner's request, and are the first entries of later.md:
+fix-wording-after-later-changes (#5 above: a few sentences in the Search Syntax dialog, the manual and the README
+that later changes made inexact) and fix-folder-search-own-name-pool (a search of one large folder for a word that
+is in the folder's own name can miss matches).
+
+Everything under "Left for later" above is still open, and so are the finds each reviewer listed under "Found, not
+fixed" (final-pass-notes.md has them by change).

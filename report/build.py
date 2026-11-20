@@ -175,6 +175,12 @@ if xc["commit"]:
         xc_behind = 0
 
 owner = json.load(open(f"{ROOT}/report/owner.json"))
+# When the branch is finished, report/final.json says how the final pass went.
+final = None
+try:
+    final = json.load(open(f"{ROOT}/report/final.json"))
+except OSError:
+    pass
 landed_ids = done_ids
 owner = [o for o in owner if not o["id"] or o["id"] in landed_ids]
 
@@ -273,6 +279,33 @@ def later_block():
 
 
 pct = round(100 * n_landed / total) if total else 0
+
+
+def coming_block():
+    return f"""  <section>
+    <h2>{'Finishing now' if later else 'Still to come'}</h2>
+    <p class="lede">{'The cut-off is everything rated four of five. These are the last items before the final pass: a review of the whole branch, the changelog, and the last checks.' if later else 'What the lanes are on now, then the queue, highest value first.'} Dots show value to a user out of five; S, M and L are the size of the change.</p>
+    <ul class="list">{coming_rows() or '<li class="empty">Nothing is left to build. The final pass is next.</li>'}</ul>
+  </section>
+
+"""
+
+
+def final_block():
+    items = "".join(f"<li>{inline_md(x)}</li>" for x in final["done"])
+    return (
+        '  <section>\n    <h2>Final pass</h2>\n'
+        f'    <p class="lede">{inline_md(final["lede"])}</p>\n'
+        f'    <ul class="checks">{items}</ul>\n  </section>\n'
+    )
+
+
+def inline_md(text):
+    """Escape, then `code` and **bold**."""
+    out = esc(text)
+    out = re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
+    return re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", out)
+
 xc_line = (
     f'Compiles and lints for Windows and macOS at <code>{esc(xc["commit"])}</code>'
     + (f", {xc_behind} landing{'s' if xc_behind != 1 else ''} ago" if xc_behind else ", the current tip")
@@ -404,7 +437,7 @@ h3 {{ font: 600 14px var(--text); margin: 0; display: flex; align-items: center;
   <header>
     <div class="path"><span>emilvissing</span><i>›</i><span>fffinder</span><i>›</i><b>{esc(TRUNK)}</b></div>
     <h1>Search and UI polish</h1>
-    <p class="intro">Every improvement on the branch is one commit, written by one agent and then attacked, fixed and landed by a second. This page follows the branch as it grows.</p>
+    <p class="intro">Every improvement on the branch is one commit, written by one agent and then attacked, fixed and landed by a second. {esc(final["intro"]) if final else "This page follows the branch as it grows."}</p>
   </header>
 
   <section class="status" aria-label="Where things stand">
@@ -417,7 +450,7 @@ h3 {{ font: 600 14px var(--text); margin: 0; display: flex; align-items: center;
     <div class="bar" role="img" aria-label="{n_landed} of {total} landed, {n_flight} in progress">
       <span class="done" style="width:{100 * n_landed / total if total else 0:.2f}%"></span><span class="fly" style="width:{100 * n_flight / total if total else 0:.2f}%"></span>
     </div>
-    <p class="fine">{kinds['Fixed']} fixed, {kinds['Changed']} changed, {kinds['Added']} added. {f"{tests_now} tests pass on Linux. " if tests_now else ""}{xc_line}. Nothing has been linked or run on macOS or Windows.</p>
+    <p class="fine">{kinds['Fixed']} fixed, {kinds['Changed']} changed, {kinds['Added']} added. {f"{final['tests']} tests pass on Linux at the final commit. " if final and final.get("tests") else (f"{tests_now} tests pass on Linux. " if tests_now else "")}{xc_line}. Nothing has been linked or run on macOS or Windows.</p>
   </section>
 
   <section>
@@ -440,11 +473,7 @@ h3 {{ font: 600 14px var(--text); margin: 0; display: flex; align-items: center;
     <p class="empty" id="none" hidden>Nothing landed matches that.</p>
   </section>
 
-  <section>
-    <h2>{'Finishing now' if later else 'Still to come'}</h2>
-    <p class="lede">{'The cut-off is everything rated four of five. These are the last items before the final pass: a review of the whole branch, the changelog, and the last checks.' if later else 'What the lanes are on now, then the queue, highest value first.'} Dots show value to a user out of five; S, M and L are the size of the change.</p>
-    <ul class="list">{coming_rows() or '<li class="empty">Nothing is left to build. The final pass is next.</li>'}</ul>
-  </section>
+{final_block() if final else coming_block()}
 {later_block()}
 
   <section>
@@ -454,7 +483,7 @@ h3 {{ font: 600 14px var(--text); margin: 0; display: flex; align-items: center;
       <li>The whole test suite, formatting and clippy pass on the commit that lands, after it is rebased onto the branch.</li>
       <li>Anything visible is looked at in pictures of the real window, before and after, in light and dark.</li>
       <li>Every few landings the branch is compiled and linted for Windows and macOS, with and without the terminal feature. That is a compile check only.</li>
-      <li>No pull request has been opened. The branch is pushed to your fork after every landing.</li>
+      <li>No pull request has been opened. {"The branch and its changelog are on your fork." if final else "The branch is pushed to your fork after every landing."}</li>
     </ul>
   </section>
 

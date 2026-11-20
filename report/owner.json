@@ -438,5 +438,85 @@
   "cat": "upstream",
   "id": "",
   "text": "GitHub Actions is not enabled on the fork, so the repository's own CI has not run on this branch. Enabling it would run the real macOS and Windows jobs on every push, with no pull request needed."
+ },
+ {
+  "cat": "call",
+  "id": "fix-own-small-faults",
+  "text": "A triple click on Search This Computer now presses Search Any Kind with its third click when that button has come under the pointer, and Search Any Kind saves Any as the kind. Before, clicks after a double-click did nothing until the mouse rested or moved. If the next button should wait for a pause, one guard decides it."
+ },
+ {
+  "cat": "mac",
+  "id": "fix-here-folder-spelling",
+  "text": "Search Only in a folder typed in another letter case has never run: Linux tells the cases apart, so its test returns early there. On a Mac, with your home folder as a search location, `fffinder ~/documents --query <a word in a name there> --here` should list matches where it said No Results. Also worth one try: a folder on an exFAT, FAT or network volume, opened the normal way, should still be searchable."
+ },
+ {
+  "cat": "changed",
+  "id": "fix-here-folder-spelling",
+  "text": "A folder reached through a symbolic link is now searched where the link points, and its results show that place, not the link (unless Follow symbolic links is on). A link or a `..` that leads outside the search locations builds a temporary index of the folder it leads to, which can be a whole volume."
+ },
+ {
+  "cat": "limit",
+  "id": "fix-here-folder-spelling",
+  "text": "Windows, read and not run: when a link or a `..` leads outside the search locations, the folder is searched by the path Windows resolves it to, which begins with `\\\\?\\`. Results there would show that prefix in their paths, and opening one from the list may fail. Before this change such a folder found nothing at all."
+ },
+ {
+  "cat": "changed",
+  "id": "fix-filter-reruns-and-fresh-rows",
+  "text": "With a Nushell filter on, opening a folder that holds folders now runs `nu` twice (again once the folder sizes are in), and a folder whose files are saved again and again runs the filter at each reread, at most every two seconds. Refresh always runs the filter again."
+ },
+ {
+  "cat": "limit",
+  "id": "fix-filter-reruns-and-fresh-rows",
+  "text": "A file saved the usual quick way (written in place) still does not make a name search or Recents read again, so its row keeps the old size and date until the list is next made. What is fixed is the fresh answer that was read and then thrown away."
+ },
+ {
+  "cat": "call",
+  "id": "fix-rename-press-selection",
+  "text": "A folder renamed in the sidebar's tree and confirmed with Return no longer takes the selection among the files when other items are selected there. It follows from the rule that fixes the wrong-file menu: a right-click on a file that is already selected looks the same as Return. With nothing else selected the folder is selected under its new name, as before."
+ },
+ {
+  "cat": "limit",
+  "id": "fix-rename-press-selection",
+  "text": "Two cases remain. A click on an item inside the folder whose name is being edited still ends with the folder selected, so Cmd+Backspace right after it moves the folder to the Trash (the highlight shows the folder). And search results inside a folder renamed in the window keep their old paths until the search runs again; their commands fail with a notification."
+ },
+ {
+  "cat": "mac",
+  "id": "accented-names-search",
+  "text": "Accented names were not run on a Mac. That Finder stores `é` as the letter followed by its accent, and that typed text arrives as one character, are from knowledge. To try: make `Résumé.pdf` in Finder, then search `résumé` and `resume`. Both should list it with the word highlighted, also with Allow typos off."
+ },
+ {
+  "cat": "changed",
+  "id": "accented-names-search",
+  "text": "A word typed without accents now finds names that have them, listed after the names with the word as typed: `resume` finds `Résumé.pdf`, `cafe` finds `Café.app`, and a one-letter search `e` also lists names that only have `é`. A word typed with an accent is taken as typed, so `résumé` does not find `resume.pdf`."
+ },
+ {
+  "cat": "call",
+  "id": "accented-names-search",
+  "text": "The engine crate now depends directly on `icu_normalizer`. The UI kit already builds that crate, so Cargo.lock gains no new package, only the link. The write-up left a new dependency to you; if you would rather not have it in the engine, that is the line to take out, and the feature with it."
+ },
+ {
+  "cat": "limit",
+  "id": "accented-names-search",
+  "text": "For names that store each accent in one character with its letter (names made on Windows or Linux), a word typed without accents finds them only up to two accented letters per word, ranks them among the loose matches, and in a large folder can leave them out. Names stored the macOS way are found fully."
+ },
+ {
+  "cat": "limit",
+  "id": "accented-names-search",
+  "text": "Cost where most names are not plain ASCII (a Korean, Japanese or Chinese home folder): a search took 3.5 times as long in a debug build on a 30,000-file test tree. Not measured in a release build. On an ASCII tree the difference is between nothing and 6%."
+ },
+ {
+  "cat": "changed",
+  "id": "near-miss-beside-scattered",
+  "text": "With Allow typos on, near misses of a word are now listed whenever no result has the word as typed, beside the results that have its letters in order. So a misspelled word finds its file in a large folder (`benchmrak` finds `benchmark.rs`), and a search by letters with gaps, such as `pckg`, can list a near miss such as `pkg-config` beside or ahead of `package.json`. With Allow typos off nothing changes."
+ },
+ {
+  "cat": "call",
+  "id": "near-miss-beside-scattered",
+  "text": "A name ranks 30 points higher when one of its words begins with a near miss of a word of five letters or more. The reviewer chose five where the implementer had six: five puts more misspelled names first (33 of 41 against 17 in the test tree), and costs searches that type five letters across a folder and a name (`libbu` for a `build.rs` under a folder beginning with lib went from first to tenth). It is one constant, `NEAR_NAME_LETTERS`."
+ },
+ {
+  "cat": "limit",
+  "id": "near-miss-beside-scattered",
+  "text": "Four-letter words get their near misses listed but not ranked, so `mian` lists a folder named Many ahead of `main.rs`. Apps are still found by letters in order only (`safair` finds no Safari). A new file that is only a near miss of the search waits for Refresh."
  }
 ]

@@ -1,0 +1,13 @@
+{
+ "intro": "The branch is finished: 47 improvements and their changelog are on your fork.",
+ "tests": 845,
+ "lede": "After the last improvement landed, the finished branch was checked as a whole. Everything below ran on the final code.",
+ "done": [
+  "**Review of the whole branch.** Six readers went through all the changes together, each through one lens, and a skeptic tried to refute every finding. 25 held. Four fix-ups were built from them the usual way and are among the 47. Two more were set aside at your request, with everything else the review found, in `later.md`.",
+  "**Changelog.** `CHANGELOG.md` has an entry under [Unreleased] for 46 of the 47 improvements: 7 added, 7 changed, 32 fixed. The one without an entry mends faults in changes that no release has had. The entries come from the commit messages. A reader and a skeptic checked the assembled text against the code, and 15 sentences were corrected, most because a later change had made them untrue.",
+  "**Tests.** Formatting, clippy and the whole suite pass on the final code: 845 tests. Three more fail only in this container, which runs as root and is never refused a file.",
+  "**Windows and macOS.** The final commit compiles and lints for both, with and without the terminal feature. That is a compile check: nothing was linked or run there.",
+  "**Linux with the newer toolchain.** Clippy from Rust 1.100.0 is clean with and without the terminal feature, and every Nushell file passes `nu-check`.",
+  "**Not done.** GitHub Actions is not enabled on the fork, so the repository's own macOS and Windows jobs have not run on this branch. The list under “Check on a Mac” is what only a person at a Mac can confirm."
+ ]
+}
