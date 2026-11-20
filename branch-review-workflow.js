@@ -64,7 +64,7 @@ const VERDICT_SCHEMA = {
 
 const COMMON = `fffinder is a Finder-style file browser written in Rust: a GPUI Kit window (src/) on top of a search engine crate (crates/fffinder-core, which wraps the fff-search crate), with a Nushell module (nu/fff.nu), a control server (src/server) and a terminal mode (feature "term", src/term).
 
-The branch search-ui-polish holds 35 commits on top of upstream's 66c919b: one screenshot-tool commit and 34 improvements to search and to the UI, one commit each. See them with \`git -C ${SNAP} log --oneline 66c919b..HEAD\`. Each improvement was written by one agent and then reviewed, fixed and landed by another, against the branch as it stood at that moment, and each has tests that pass. What nobody has done is look at them together.
+The branch search-ui-polish holds ${args.commits} commits on top of upstream's 66c919b: one screenshot-tool commit and ${args.commits - 1} improvements to search and to the UI, one commit each. See them with \`git -C ${SNAP} log --oneline 66c919b..HEAD\`. Each improvement was written by one agent and then reviewed, fixed and landed by another, against the branch as it stood at that moment, and each has tests that pass. What nobody has done is look at them together.
 
 Where to read:
 - The code, read-only: ${SNAP} (a snapshot at ${TIP}). Use git there (log, show, diff, blame, grep) and rg.

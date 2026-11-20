@@ -35,5 +35,5 @@
   "worth_doing": true,
   "already_handled": false
  },
- "orchestrator_notes": "'tab-bar-overflow' lands right before this one and makes the tab strip scroll; build on it."
+ "orchestrator_notes": "'tab-bar-overflow' lands right before this one and makes the tab strip scroll; build on it. An earlier attempt at this improvement was stopped about fifteen minutes in, on 20 Nov at 00:30 UTC, when the lane was redirected, and the owner then asked that it be finished. Its partial, unreviewed work is saved as a patch against f5562db: /home/user/polish-tools/parked/tab-drop-and-close.partial.patch (examples/screenshot.rs, src/finder/list.rs, src/finder/tab_bar.rs, src/workspace.rs, tests/basics.rs, tests/file_ops.rs; 297 lines added). Read the brief and the code first, then read the patch: if it is on the right track, start from it (`git apply --3way <patch>` in your lane) and finish it; if not, start over and say why. Either way the change is yours: check every line of it as if you had written it. 'tab-bar-overflow' (7e5689c) is on the trunk and changed the tab bar to scroll: read its done record for what its tests pin and for its notes to this brief."
 }

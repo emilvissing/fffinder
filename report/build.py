@@ -148,6 +148,17 @@ for p in glob.glob(f"{ROOT}/briefs/*.json"):
         "pos": queue_pos.get(i, ("z", 999)),
     })
 coming.sort(key=lambda r: (r["state"] != "flight", -r["value"], r["pos"]))
+# After the cut-off, only what queue/all.txt names is still being built; the rest is saved for later.
+try:
+    within = {l.split("#")[0].strip() for l in open(f"{ROOT}/queue/all.txt") if l.split("#")[0].strip()}
+except OSError:
+    within = None
+if within is not None and os.path.exists(f"{ROOT}/queue/later.txt"):
+    later = [r for r in coming if r["id"] not in within and r["state"] != "flight"]
+    coming = [r for r in coming if r["id"] in within or r["state"] == "flight"]
+else:
+    later = []
+later.sort(key=lambda r: (-r["value"], r["id"]))
 
 # ----- checks -------------------------------------------------------------------
 xc = {"commit": "", "time": ""}
@@ -232,12 +243,12 @@ def landed_rows():
     return "".join(rows)
 
 
-def coming_rows():
+def coming_rows(items=None):
     rows = []
-    for r in coming:
+    for r in (coming if items is None else items):
         dots = "".join('<i class="on"></i>' if n < r["value"] else "<i></i>" for n in range(5))
         state = (
-            f'<span class="state flight">Lane {esc(r["lane"])}</span>' if r["state"] == "flight" else '<span class="state">Queued</span>'
+            f'<span class="state flight">Lane {esc(r["lane"])}</span>' if r["state"] == "flight" else f'<span class="state">{"Saved" if items is not None else "Queued"}</span>'
         )
         tag = '<span class="tag">found in review</span>' if r["from_review"] else ""
         rows.append(
@@ -248,6 +259,17 @@ def coming_rows():
             f"{state}</li>"
         )
     return "".join(rows)
+
+
+def later_block():
+    if not later:
+        return ""
+    return (
+        '<section><h2>Saved for later</h2>'
+        f'<p class="lede">{len(later)} improvements that are written up and not built. Each has its problem, a proposal, tests and risks in '
+        '<code>later.md</code> on the <a href="https://github.com/emilvissing/fffinder/tree/search-ui-polish-notes">search-ui-polish-notes</a> branch of your fork.</p>'
+        f'<details class="later"><summary>Show all {len(later)}</summary><ul class="list">{coming_rows(later)}</ul></details></section>'
+    )
 
 
 pct = round(100 * n_landed / total) if total else 0
@@ -364,6 +386,7 @@ h3 {{ font: 600 14px var(--text); margin: 0; display: flex; align-items: center;
 .state {{ font: 500 12px var(--text); color: var(--muted); min-width: 4.5em; text-align: right; }}
 .state.flight {{ color: var(--live); background: var(--live-bg); border-radius: 4px; padding: 1px 7px; text-align: center; }}
 
+.later > summary {{ cursor: pointer; font: 500 14px var(--text); color: var(--accent); margin-bottom: 10px; }}
 .checks {{ margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; max-width: 72ch; }}
 .foot {{ display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: space-between; font: 12px var(--mono); color: var(--muted); border-top: 1px solid var(--line); padding-top: 12px; }}
 
@@ -389,6 +412,7 @@ h3 {{ font: 600 14px var(--text); margin: 0; display: flex; align-items: center;
       <span><span class="big">{n_landed}</span> <span class="unit">landed</span></span>
       <span><span class="big">{n_flight}</span> <span class="unit">being worked on</span></span>
       <span><span class="big">{n_queued}</span> <span class="unit">queued</span></span>
+      {f'<span><span class="big">{len(later)}</span> <span class="unit">saved for later</span></span>' if later else ''}
     </div>
     <div class="bar" role="img" aria-label="{n_landed} of {total} landed, {n_flight} in progress">
       <span class="done" style="width:{100 * n_landed / total if total else 0:.2f}%"></span><span class="fly" style="width:{100 * n_flight / total if total else 0:.2f}%"></span>
@@ -417,10 +441,11 @@ h3 {{ font: 600 14px var(--text); margin: 0; display: flex; align-items: center;
   </section>
 
   <section>
-    <h2>Still to come</h2>
-    <p class="lede">What the lanes are on now, then the queue, highest value first. Dots show value to a user out of five; S, M and L are the size of the change.</p>
-    <ul class="list">{coming_rows() or '<li class="empty">The queue is empty.</li>'}</ul>
+    <h2>{'Finishing now' if later else 'Still to come'}</h2>
+    <p class="lede">{'The cut-off is everything rated four of five. These are the last items before the final pass: a review of the whole branch, the changelog, and the last checks.' if later else 'What the lanes are on now, then the queue, highest value first.'} Dots show value to a user out of five; S, M and L are the size of the change.</p>
+    <ul class="list">{coming_rows() or '<li class="empty">Nothing is left to build. The final pass is next.</li>'}</ul>
   </section>
+{later_block()}
 
   <section>
     <h2>How each one was checked</h2>
@@ -433,7 +458,7 @@ h3 {{ font: 600 14px var(--text); margin: 0; display: flex; align-items: center;
     </ul>
   </section>
 
-  <footer class="foot"><span>{total} items, {n_landed} landed, {total - n_landed} to go</span><span>tip {esc(tip[:7])} · updated {esc(stamp)}</span></footer>
+  <footer class="foot"><span>{total} items, {n_landed} landed, {total - n_landed} to go{f', {len(later)} saved for later' if later else ''}</span><span>tip {esc(tip[:7])} · updated {esc(stamp)}</span></footer>
 </div>
 
 <script>

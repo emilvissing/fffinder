@@ -1,0 +1,35 @@
+{
+ "id": "column-row-menu-wrong-item",
+ "title": "Column view: a right-click on the selected row of an earlier column opens the menu for another file, and its Move to Trash trashes that one",
+ "area": "ui",
+ "kind": "bug",
+ "problem": "Found with a probe by the reviewer of 'column-pane-selection-by-path' (done record: /home/user/polish-tools/done/column-pane-selection-by-path.json, first item under 'Found, not fixed'), and read by the orchestrator. In the column view every column but the one in use shows its selected row in grey: the folder you came through. A right-click on such a row opens the item menu, but for the item of the column in use, not for the row under the pointer: in the probe, the menu over the folder Projects read Cut \"b.txt\", and its Move to Trash would have trashed b.txt. The cause is in `render_column_row` (src/finder/views.rs): the row's right-press handler selects only when the row is not already the column's selected one (`if this.columns.get(col).is_some_and(|p| p.selected != Some(ix)) { this.select_in_column(col, ix, window, cx); }`), so for a row that is already selected nothing changes, the column in use stays the later one, and the menu is built from `selected_entries()`, which follows the column in use. A person right-clicks a folder and can move a different file to the Trash, rename it, or copy it, from a menu that names the other file only in some of its rows.",
+ "proposal": "Reproduce first with a headless test: column view, a folder selected in the first column and a file selected in the second (so the second is the column in use), right-click the first column's grey row; the item menu's entries name the second column's file (tests/controls.rs the_item_menu_shows_a_result_in_its_enclosing_folder and tests/columns.rs show how menus and columns are read in tests). Then make the right press act on the row under the pointer: when the row is already its column's selected one but its column is not the one in use, make that column the one in use, as a left click on the row or the Left arrow would (the reviewer's pointer: `|| col != this.active_column` in that condition, or what Left does). Read `select_in_column` whole first, as 'column-pane-selection-by-path' left it: it closes the columns to the right of the row's column and opens the folder's own column again, and that is also what a left click on the grey row does today; say whether the right press should do exactly the same (the columns to the right collapse to the folder's own) and make the menu and the highlight agree with whatever shows. Check every command of the menu against the row afterwards (Open, Cut, Copy, Rename…, Move to Trash, Get Info, Quick Look, Copy Path, Show in Enclosing Folder where it applies), and the keys pressed while the menu is open. Check the same press with several items selected in the rows' selection (Select All in column view is listed as an oddity in that record), with a rename in progress, and in a file chooser.",
+ "files": [
+  "src/finder/views.rs",
+  "src/finder/mod.rs",
+  "tests/columns.rs",
+  "docs/manual.md"
+ ],
+ "original_test_plan": "A headless test that fails today: with a later column in use, a right-click on the grey selected row of an earlier column opens a menu whose items name that row's item, and Move to Trash from it trashes that item and nothing else (assert on the file system: the other file is still there). The same for Rename… (the field opens on that row) and Copy (the clipboard holds that row's path). Guards: a right-click on an unselected row of any column, on the selected row of the column in use, and on a file's row behave as before; the keyboard is where it was after the menu closes with Escape.",
+ "original_risks": "Making the earlier column the one in use closes the columns to its right, which is a visible change on a right-click; a left click on that row already does it, so it is consistent, but look at it in a picture and say so in the record. 'column-pane-selection-by-path' (7e8df53) just rewrote how columns keep and remap their selection (by path) and 'stale-previews-and-cancel' (52e7de4) how the preview follows it: build on both, and keep their tests passing. `item_menu_at` is set by this handler and read by the empty-space menu ('collapsed-groups-empty-view' explains the mark); leave that line as it is.",
+ "raised_by": [
+  "review of column-pane-selection-by-path"
+ ],
+ "verifier": {
+  "verdict": "unverified",
+  "claim_check": "Not checked by a second reviewer. The reviewer of 'column-pane-selection-by-path' probed it (the menu over the folder Projects read Cut \"b.txt\"), and the orchestrator read the right-press handler in `render_column_row` on the trunk (7e8df53): it selects only when `p.selected != Some(ix)`. Reproduce before changing anything.",
+  "implementation_notes": "See the proposal: a starting point, not a checked plan. Read the done record of 'column-pane-selection-by-path' first.",
+  "test_plan": "See original_test_plan.",
+  "touches": [
+   "src/finder/views.rs",
+   "tests/columns.rs"
+  ],
+  "risks": "See original_risks.",
+  "user_value": 5,
+  "effort": "S",
+  "worth_doing": true,
+  "already_handled": false
+ },
+ "orchestrator_notes": "Queued after the cut-off of 20 Nov because it can send the wrong file to the Trash. Keep it small: the one fault, its test, a sentence in the manual only if the manual says something about right-clicks in columns that the fix makes untrue."
+}

@@ -1,6 +1,6 @@
 # Lane F after the cut-off of 00:30 UTC, 20 Nov: items rated 4 of 5 only.
 column-pane-selection-by-path
-split-active-pane
 stale-rows-on-place-change
-accented-names-search
 near-miss-beside-scattered
+tab-drop-and-close
+accented-names-search

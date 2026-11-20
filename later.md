@@ -1,12 +1,14 @@
 # Saved for later
 
-35 improvements that are written up and not built. Each was found by reading the code; those marked
+36 improvements that are written up and not built. Each was found by reading the code; those marked
 "verified" were checked against the code by a second reviewer before any work started, and those marked
 "found in review" were found while another change was being reviewed and have not had that second check.
 Highest value first. The full write-up of each, with the verifier's plan, is `briefs/<id>.json`.
 
 | Value | Size | Area | Item | |
 | --- | --- | --- | --- | --- |
+| 5 | S | ui | [Column view: a right-click on the selected row of an earlier column opens the menu for another file, and its Move to Trash trashes that one](#column-row-menu-wrong-item) | found in review |
+| 4 | M | ui | [Split view: show which pane is active, and make Tab switch panes instead of stranding focus in the toolbar](#split-active-pane) | verified |
 | 3 | M | ui | [Collapsible sidebar sections (Favorites, Smart Folders, Locations) that stay collapsed](#collapsible-sidebar-sections) | verified |
 | 3 | M | search | [Contents results do not show what matched: highlight the match in the Match column and start the snippet near it](#content-match-highlight) | verified |
 | 3 | M | ui | [Menus that don't fit where they're shown: dead items in a file chooser, a mislabeled Actions item in the Trash, no menu on the Trash row](#context-menus-fit) | verified |
@@ -31,7 +33,6 @@ Highest value first. The full write-up of each, with the verifier's plan, is `br
 | 3 | M | ui | [Select All in a large folder makes every frame and every refresh scale with the selection size](#select-all-perf) | verified |
 | 3 | S | ui | [Settings: rows run past the dialog's edge with wider fonts ('Remember each folder's vi', the letter case buttons, Try It)](#settings-rows-fit) | found in review |
 | 3 | M | ui | [Split view clips the main pane's toolbar: the sidebar takes its room from the window, not the pane](#split-view-toolbar-clip) | verified |
-| 3 | M | ui | [Tabs: drop items on a tab, middle-click to close, Close Other Tabs, and a drag label](#tab-drop-and-close) | verified |
 | 3 | S | ui | [A table preview's columns ignore the room they have: an archive's two columns scroll sideways in the Preview Pane, and stay 140 points wide in Quick Look](#table-preview-column-widths) | found in review |
 | 3 | S | ui | [Tree sidebar: the Down arrow can't get past the first Smart Folder, and a Smart Folder's row has no Cmd+click or middle-click](#tree-arrows-past-smart-folder) | found in review |
 | 3 | S | ui | [Type-to-select cannot contain a space: Space opens Quick Look in the middle of a name](#type-select-space) | verified |
@@ -42,6 +43,115 @@ Highest value first. The full write-up of each, with the verifier's plan, is `br
 | 2 | S | ui | [The path bar rescans /Volumes on the window's thread every frame (macOS)](#path-bar-no-io) | verified |
 | 2 | S | ui | [Page Up/Down and Cmd+=/−/0 act on the wrong thing when the item isn't a PDF or Quick Look has its own window](#preview-page-keys) | verified |
 | 2 | M | search | [The 'opened before for this search' boost is lost when the search is scoped, kind-filtered, quoted, or uses a glob](#query-history-boost) | verified |
+
+## column-row-menu-wrong-item
+
+**Column view: a right-click on the selected row of an earlier column opens the menu for another file, and its Move to Trash trashes that one**
+
+Value 5 of 5, size S, ui, bug.
+
+**Problem.** Found with a probe by the reviewer of 'column-pane-selection-by-path' (done record: /home/user/polish-tools/done/column-pane-selection-by-path.json, first item under 'Found, not fixed'), and read by the orchestrator. In the column view every column but the one in use shows its selected row in grey: the folder you came through. A right-click on such a row opens the item menu, but for the item of the column in use, not for the row under the pointer: in the probe, the menu over the folder Projects read Cut "b.txt", and its Move to Trash would have trashed b.txt. The cause is in `render_column_row` (src/finder/views.rs): the row's right-press handler selects only when the row is not already the column's selected one (`if this.columns.get(col).is_some_and(|p| p.selected != Some(ix)) { this.select_in_column(col, ix, window, cx); }`), so for a row that is already selected nothing changes, the column in use stays the later one, and the menu is built from `selected_entries()`, which follows the column in use. A person right-clicks a folder and can move a different file to the Trash, rename it, or copy it, from a menu that names the other file only in some of its rows.
+
+**Proposal.** Reproduce first with a headless test: column view, a folder selected in the first column and a file selected in the second (so the second is the column in use), right-click the first column's grey row; the item menu's entries name the second column's file (tests/controls.rs the_item_menu_shows_a_result_in_its_enclosing_folder and tests/columns.rs show how menus and columns are read in tests). Then make the right press act on the row under the pointer: when the row is already its column's selected one but its column is not the one in use, make that column the one in use, as a left click on the row or the Left arrow would (the reviewer's pointer: `|| col != this.active_column` in that condition, or what Left does). Read `select_in_column` whole first, as 'column-pane-selection-by-path' left it: it closes the columns to the right of the row's column and opens the folder's own column again, and that is also what a left click on the grey row does today; say whether the right press should do exactly the same (the columns to the right collapse to the folder's own) and make the menu and the highlight agree with whatever shows. Check every command of the menu against the row afterwards (Open, Cut, Copy, Rename…, Move to Trash, Get Info, Quick Look, Copy Path, Show in Enclosing Folder where it applies), and the keys pressed while the menu is open. Check the same press with several items selected in the rows' selection (Select All in column view is listed as an oddity in that record), with a rename in progress, and in a file chooser.
+
+**Tests.** A headless test that fails today: with a later column in use, a right-click on the grey selected row of an earlier column opens a menu whose items name that row's item, and Move to Trash from it trashes that item and nothing else (assert on the file system: the other file is still there). The same for Rename… (the field opens on that row) and Copy (the clipboard holds that row's path). Guards: a right-click on an unselected row of any column, on the selected row of the column in use, and on a file's row behave as before; the keyboard is where it was after the menu closes with Escape.
+
+**Risks.** Making the earlier column the one in use closes the columns to its right, which is a visible change on a right-click; a left click on that row already does it, so it is consistent, but look at it in a picture and say so in the record. 'column-pane-selection-by-path' (7e8df53) just rewrote how columns keep and remap their selection (by path) and 'stale-previews-and-cancel' (52e7de4) how the preview follows it: build on both, and keep their tests passing. `item_menu_at` is set by this handler and read by the empty-space menu ('collapsed-groups-empty-view' explains the mark); leave that line as it is.
+
+**Notes from later reviews.** Queued after the cut-off of 20 Nov because it can send the wrong file to the Trash. Keep it small: the one fault, its test, a sentence in the manual only if the manual says something about right-clicks in columns that the fix makes untrue.
+
+## split-active-pane
+
+**Split view: show which pane is active, and make Tab switch panes instead of stranding focus in the toolbar**
+
+Value 4 of 5, size M, ui, ux.
+
+**Problem.** Nothing marks the active pane. Workspace::render draws both panes the same, with a 1px divider (src/workspace.rs:291-317), and neither toolbar changes. After Cmd+Backslash, focus moves to the new pane (workspace.rs:262) while the old pane's selection stays bright blue in icon view (see inactive-selection-colour). F5, F6 and Delete act on whichever pane has focus (src/finder/tab_bar.rs:219-255; src/actions.rs:153, 221). No key moves between panes: Tab isn't bound in src/actions.rs, so it falls to the kit root's `tab` -> focus_next (gpui-base-0.8.1/src/root.rs:44, 222-224). That jumps to a toolbar button, since buttons are tab stops (gpui-component-0.8.1/src/button/button.rs:286) and `files_focus` is a plain handle (src/finder/mod.rs:539). Shift+Tab can't return to the files, in one-pane windows too. Related gaps: Copy to Other Pane and Move to Other Pane are only in the macOS menu bar (actions.rs:422-423); item_menu in src/finder/menus.rs and the Actions menu (src/finder/toolbar.rs:727-733) don't have them. `frontmost()` always answers the control socket with `workspace.active()`, even when the user is in the split pane (src/lib.rs:190). Any pane's navigation sets the window title (mod.rs:922).
+
+**Proposal.** src/workspace.rs: track `active_pane: EntityId`, set from `cx.on_focus_in` on each pane's root focus handle and in toggle_split()/focus_active(). Add `active_pane()`, `is_active_pane(id)` and `focus_other_pane(of, window, cx)`. In render(), while split, give the active pane's wrapper a 2px `theme.primary` top edge with id `pane-active`, transparent on the other. src/lib.rs `frontmost()`: return the active pane. src/actions.rs: add a `SwitchPane` action bound to `tab` and `shift-tab` in the FILES context, plus a Window menu item 'Switch Pane'. The handler in src/finder/tab_bar.rs focuses the other pane's files; with one pane it does nothing, so Tab no longer strands focus. src/finder/toolbar.rs:517-525: draw the title in `muted_foreground` in the inactive pane of a split window. src/finder/mod.rs:922: set the window title only from the active pane. src/finder/menus.rs `item_menu`: when `has_split_view`, add 'Copy to Other Pane' and 'Move to Other Pane' with `.action(..)`, which shows F5 and F6. The dimmed selection in the inactive pane's icon and gallery views comes from the inactive-selection-colour candidate (same views.rs change). Update docs/manual.md (Tabs and split view, shortcut tables) and CHANGELOG.md.
+
+**Checked plan.** Keep the goal, but change five things in the proposal.
+
+**1. Tab binding: split view only, not a no-op in one-pane windows**
+- The proposal binds Tab in `FILES`, which also matches `"FinderFiles OnePane"`. That would remove the only Tab route from the file list to the toolbar and sidebar in every ordinary window, and still would not let Shift+Tab return to the files.
+- In `src/actions.rs`, add `SwitchPane` to `actions!` and a context `context("FinderFiles && !OnePane")`. `!` is supported (`gpui-pre-0.3.10/src/keymap/context.rs:289-296, 389`), and `"FinderFiles && OnePane"` at `actions.rs:124` is the precedent.
+- Bind `shift-tab` first and `tab` last, so the menu bar shows Tab (see the comment at `actions.rs:141`). The deeper context beats the kit root's `tab` (`gpui-pre-0.3.10/src/keymap.rs:216-217`).
+- Add `MenuItem::action("Switch Pane", SwitchPane)` after Split View (`actions.rs:421`).
+- Fix the stranding itself with one line at `src/finder/mod.rs:539`: `cx.focus_handle().tab_stop(true)`. The kit's Tab ring then includes the files, Shift+Tab returns, and one-pane Tab-from-files behaves as it does today.
+
+**2. Handler**
+- Add `Finder::switch_pane` in `src/finder/tab_bar.rs`: take `cx.entity_id()`, then `self.with_host(window, cx, move |w, window, cx| w.focus_other_pane(me, window, cx))`.
+- Register it on the Finder root beside `copy_to_other_pane` (`src/finder/mod.rs:3131-3132`), not on the content div. `every_menu_bar_action_has_a_handler` (`tests/controls.rs:223-299`) expects menu-bar actions to be available with focus in the search field; add `SwitchPane` to its list.
+- With no other pane it silently does nothing.
+
+**3. Active-pane state in `src/workspace.rs`: do not rely on `cx.on_focus_in` alone**
+- Focus events only fire in an active window, and a test window does not start active (`tests/common/mod.rs:551-552`). They would also need a stored subscription per tab.
+- Use a `split_active: bool` field instead:
+  - Set it explicitly in `toggle_split` (true on open, false on close) and in the new `focus_other_pane`.
+  - For mouse activation, sync at the top of `Workspace::render`: if exactly one of `split.focus_handle(cx).contains_focused(window, cx)` and `self.active().focus_handle(cx).contains_focused(window, cx)` is true, store it.
+- This works because `Window::focus` calls `refresh()` (`gpui-pre-0.3.10/src/window.rs:2418-2428`), so every focus change redraws; `views.rs:547` already relies on that. A dialog or menu holding focus leaves the remembered value, and hidden tabs are never consulted.
+- Pitfall: `contains_focused` reads the last rendered frame (`window.rs:533-536`), so a pane that has never been drawn reports false. That is why `toggle_split` must set the field itself.
+- Add `active_pane() -> &Entity<Finder>`, `is_active_pane(id)` and `focus_other_pane(of, window, cx)`. The last reuses `other_pane` (`workspace.rs:146`), focuses `files_focus_handle()`, sets the window title to that pane's `title()`, and calls `cx.notify()`.
+
+**4. Marker**
+- A 2px border on the pane wrapper would shift the toolbar down 2px whenever split is on, while the macOS traffic lights stay fixed at y=18 (`src/lib.rs:426`).
+- Draw it as an absolutely positioned 2px `theme.primary` bar inside a `.relative()` wrapper, for the active pane only while split. `theme.primary` is the system accent (`src/theme.rs:238`; `bars.rs:29` uses it the same way).
+- In `src/finder/toolbar.rs:517-525`, add `.when(split && !active, |d| d.text_color(muted_foreground))`. Compute `active` in render through `host.read(cx).is_active_pane(cx.entity_id())`.
+- Only read the host from render paths, as `has_split_view` does (`tab_bar.rs:50`). Never read it from code reachable while the Workspace is being updated, such as `files_changed` → `reload_quietly`; `Entity::read` panics on a leased entity.
+
+**5. Window title**
+- Leave `src/finder/mod.rs:922` alone. Navigating a pane already requires interacting with it, which makes it active. A host read inside `location_changed` adds the lease hazard above for no gain.
+- The real gap is that switching panes does not update the title. Set it in `focus_other_pane` and when the render sync flips `split_active`.
+
+**Kept as proposed**
+- `src/lib.rs:190`: `workspace.read(cx).active_pane().clone()`.
+- `src/finder/menus.rs` `item_menu`: when `finder.has_split_view(cx)`, add "Copy to Other Pane" and "Move to Other Pane" with `.action(Box::new(..))` near the Cut/Copy group. The popup dispatches to the pre-menu focus and shows F5/F6 (`gpui-component-0.8.1/src/menu/popup_menu.rs:904-920, 1138-1164`). The Trash menu returns earlier, so it stays unchanged.
+
+**Docs**
+- `docs/manual.md`: split-view paragraph (line 160), Window menu row (784), item context menu list (~795), shortcut tables (~869, ~917).
+- `docs/protocol.md:108, 121`: the active pane answers.
+- `CHANGELOG.md`.
+
+The dimmed selection in icons and gallery stays with the inactive-selection-colour candidate (`views.rs:519, 1309`).
+
+**Tests.** Add the tests to `tests/file_ops.rs`, either extending `tabs_and_split_view` (line 1031) or as a new `tab_switches_panes_in_split_view`. Open with `Ui::open_with(cx, &fx.dir, Open { workspace: true, ..Default::default() })` and take `ui.workspace.clone().unwrap()`.
+
+**Split view**
+1. `ui.press(&cmd("\\"))`, then fetch the pane with `workspace.read_with(ui.cx, |w, _| w.split_pane().cloned())`.
+2. Assert the split pane's files are focused with `ui.window(|window, cx| pane.read(cx).files_focused(window))`, and that `workspace.read_with(ui.cx, |w, _| w.active_pane().entity_id())` equals `pane.entity_id()`.
+3. `ui.press("tab")`: assert `ui.files_focused()` (the main view) and that `active_pane()` is the main id.
+4. `ui.press("shift-tab")`: back to the split pane.
+5. Navigate the split pane to `Projects`, as lines 1099-1105 already do. Then `ui.press("tab")`, `ui.select("notes.txt")`, `ui.press("f5")`, and assert `fx.path("Projects/notes.txt").exists()`.
+
+**Context menu**
+- Set list view before splitting, as `tests/columns.rs:428-429` does, because element ids repeat across panes.
+- With the split pane in another folder, `ui.right_click(item_id("row", &fx.path("notes.txt")))` and assert `ui.menu_labels()` contains "Copy to Other Pane" and "Move to Other Pane".
+- In a one-pane `Ui::open`, assert they are absent.
+
+**Mouse activation**
+- Use `window.find_all("content")` sorted by x, the pattern at `tests/columns.rs:443-453`, and `ui.click_point(..)` in the left pane.
+- Assert `active_pane()` is the main id.
+- With the render-time sync this needs no `ui.activate()`; if `on_focus_in` is used instead, the test must call `ui.activate()` first.
+
+**One pane**
+- Close the split with `cmd("\\")`. `ui.press("tab")` and assert `!ui.files_focused()`, so toolbar traversal is kept. Then `ui.press("shift-tab")` and assert `ui.files_focused()`, which is the new tab stop.
+
+**Marker**
+- Assert through the `active_pane()` / `is_active_pane()` accessors. The proposed `pane-active` element is not findable by the harness without `.test_support()`.
+
+**Other**
+- Add `SwitchPane.boxed_clone()` to the list in `every_menu_bar_action_has_a_handler` (`tests/controls.rs:227-281`).
+- `frontmost()` is private and the harness window is not registered in `Windows`, so it is covered only through `active_pane()`.
+
+**Risks.** - **One-pane regression if implemented as proposed.** Binding Tab in `FILES` as a no-op removes keyboard traversal from the file list to the toolbar and sidebar in every ordinary window. The corrected plan avoids this with the split-only context.
+- **Tab ring changes.** Making `files_focus` a tab stop means Tab from the search field or another control can now land on the file area. No test pins this, and it has not been run (cargo was not allowed).
+- **macOS menu bar.** The Window menu will show a bare Tab key equivalent for Switch Pane. The kit root always consumes Tab first, and bare Delete/F5/F2 equivalents already exist, but this cannot be verified on Linux.
+- **Render-time sync edge cases.** `contains_focused` reads the previous frame, so `toggle_split` must set the state explicitly. Mutating `split_active` in `Workspace::render` must not call `cx.notify()`.
+- **Lease panic.** Reading the host Workspace from a Finder while the Workspace is being updated panics; keep `is_active_pane` reads to render paths.
+- **Control socket behaviour change.** `fff selection`, show and open now answer from or act on the split pane when it is active. This is intended, but it is a visible change for scripts and needs the `docs/protocol.md` note.
+- **Marker layout.** The marker must not change layout, or the split-view toolbar shifts against the fixed macOS traffic lights.
+
+**Notes from later reviews.** 'split-view-toolbar-clip', 'tab-bar-overflow' and 'tab-drop-and-close' land before this one and touch src/workspace.rs and src/finder/tab_bar.rs; build on them. 20 Nov: 'tab-bar-overflow' (7e5689c) and 'focus-lost-recovery' (4e5b448) are on the trunk; read both done records, which have notes for this brief (a disabled toolbar button is not a tab stop; the root's `keyboard_stays` listener; which pane gets the keyboard after a press on the chrome; Ctrl+Tab pressed in the other pane switches the first pane's tab). 'tab-drop-and-close' is being worked on in another lane at the same time and changes src/workspace.rs and src/finder/tab_bar.rs: expect to rebase over it, or it over you; keep your changes to those files as small as they can be. 'split-view-toolbar-clip' was saved for later and is not on the trunk.
 
 ## collapsible-sidebar-sections
 
@@ -1563,97 +1673,6 @@ Existing tests to rerun
 - The real-font status bar overflow at 1100pt is estimated from character widths, not measured; the headless test proves it only under the test platform's fixed-width text.
 
 **Notes from later reviews.** From the reviewer of 'search-truncation-honesty': in a window about 1000 pt wide with the sidebar showing, the toolbar's title is cut down to a single '.' while the buttons keep their full width. Check single-pane windows at 900 to 1100 pt wide as well as split view, in pictures, and make the title degrade sensibly (keep a readable, truncated title; let something else give first) if it is the same layout fault. From the reviewer of 'empty-state-messages' (on the trunk): the scope bar's folder chip is never cut short, so a folder with a long name takes a line of its own and runs past the pane's edge (picture: /home/user/polish-tools/shots/empty-state-messages-review-long-folder-name.png, at 900 pt; in a narrow split pane a much shorter name is enough). It is the same kind of fault as this brief's, one bar lower (src/finder/bars.rs, `render_scope_bar`): if it is small, give the chip a width it can't pass and cut the name in the middle with an ellipsis, as the app does for names elsewhere, with a picture and a test; if not, leave it and say so. Since 'smart-folder-save-and-leaks' the scope bar also holds a Save button, and since 'empty-state-messages' the Kind button is tinted while a kind narrows the search.
-
-## tab-drop-and-close
-
-**Tabs: drop items on a tab, middle-click to close, Close Other Tabs, and a drag label**
-
-Value 3 of 5, size M, ui, feature.
-
-**Problem.** A tab reacts only to a left click, a dragged tab, and a two-item context menu (src/finder/tab_bar.rs:363-402). Dragged files are ignored: the tab's only `drag_over`/`on_drop` are for `DraggedTab` (tab_bar.rs:369-376). Every other stand-in for a folder takes drops through `folder_drop_target` (src/finder/transfer.rs:796-817): path crumbs (src/finder/bars.rs:272), sidebar places (src/finder/sidebar.rs:751), tree folders (sidebar.rs:881). Finder moves items dropped on a tab into that tab's folder; here moving between tabs needs cut and paste or split view. Middle-click does nothing on a tab, although the app uses middle-click for 'open in a new tab' everywhere else (sidebar.rs:719-724, 847-855; bars.rs:273-278); middle-click to close is the other half of that convention. The context menu has only Close Tab and Move Tab to New Window (tab_bar.rs:378-402). A dragged tab shows nothing under the mouse: `DraggedTab` renders an empty `div()` (tab_bar.rs:22-28), while dragged favorites and column headers use `DragLabel` (src/finder/list.rs:54-60; sidebar.rs:709-711).
-
-**Proposal.** In `render_tab_bar` (tab_bar.rs:276-430): collect each tab's drop folder with its title (tab_bar.rs:288-300): `self.drop_folder()` for the tab being drawn, `tab.read(cx).drop_folder()` for the others, as tab_bar.rs:237 already does for the other pane. Wrap every non-active tab that has one in `super::transfer::folder_drop_target(tab, folder, cx)`; its `can_drop` lets a `DraggedTab` through, so reordering keeps working. Add `.on_mouse_down(MouseButton::Middle, ..)` that defers `w.close_tab(id, window, cx)` as the close button does (tab_bar.rs:354-360). Add 'Close Other Tabs' to the menu, backed by a new `Workspace::close_other_tabs(keep: EntityId, window, cx)` beside `close_tab` (src/workspace.rs:199-213): `leave_active_tab` if the active tab is going, keep only `keep`, `active = 0`, `focus_active`, `tabs_changed`. Make it `DraggedTab(usize, SharedString)` and build `super::list::DragLabel(title)` in `on_drag`. Document in docs/manual.md:156.
-
-**Checked plan.** All in cross-platform code; nothing platform-specific.
-
-**src/finder/tab_bar.rs, `render_tab_bar` (276-430)**
-
-1. Carry a drop folder per tab. In the `titles` map (288-300) build `(id, title, folder)` with `folder = if id == me { None } else { tab.read(cx).drop_folder() }`.
-   - Only the active tab draws the bar (workspace.rs:304; the split pane returns None at 277), so `me` is always the active tab. That covers "leave the active tab out" and the "can't read self through its entity" rule (comment at 287). `self.drop_folder()` is not needed.
-
-2. Add the drop target. Before `.test_support()` / `.context_menu(..)`, which changes the element type, add `.map(|tab| match folder { Some(f) => super::transfer::folder_drop_target(tab, f, cx), None => tab })`.
-   - This gives the highlight, `DraggedFiles` move/copy, and `ExternalPaths` copy from other apps.
-   - Keep the existing `DraggedTab` `drag_over` / `on_drop`.
-   - Do NOT wrap tabs in `spring_loaded`: `Spring::Show` navigates the active browser to that folder (transfer.rs:310) instead of selecting the tab.
-   - The tabs closure now captures `cx` mutably. It is consumed by `.children(tabs)` before `cx.listener` for `new-tab` (line 422), so it should compile; if the borrow checker objects, `.collect::<Vec<_>>()` the tabs first.
-
-3. Middle-click to close. Add `.on_mouse_down(MouseButton::Middle, move |_, window, cx| { let host = middle.clone(); window.defer(cx, move |window, cx| { host.update(cx, |w, cx| w.close_tab(id, window, cx)).ok(); }); })`, with one more `weak.clone()` at line 315.
-   - Use the deferred pattern, as the close button does at 354-360, because the handler runs while the active Finder is drawing.
-   - The bar only exists with two or more tabs, so this never removes the window.
-
-4. Drag label. Simpler than the proposal: keep `struct DraggedTab(usize)`, delete its `Render` impl (24-28), and write `.on_drag(DraggedTab(ix), { let label = label.clone(); move |_, _, _, cx| cx.new(|_| super::list::DragLabel(label.clone())) })`, exactly as sidebar.rs:709-711 does. No payload change is needed.
-
-5. Context menu. Add a "Close Other Tabs" item between Close Tab and Move Tab to New Window, deferred like the others, calling `w.close_other_tabs(id, window, cx)`.
-
-**src/workspace.rs, beside `close_tab` (199)**
-
-```rust
-pub fn close_other_tabs(&mut self, keep: EntityId, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(kept) = self.tabs.iter().find(|t| t.entity_id() == keep).cloned() else { return };
-    if self.tabs.len() < 2 { return; }
-    if self.active().entity_id() != keep { self.leave_active_tab(window, cx); }
-    self.tabs = vec![kept];
-    self.active = 0;
-    self.focus_active(window, cx);
-    self.tabs_changed(cx);
-}
-```
-
-Leave `split` alone.
-
-**Docs**
-- docs/manual.md:156: add drop items on a tab to move them to its folder (copy with the copy key or across volumes; not on a tab showing search results, Recents or the Trash), middle-click to close, and Close Other Tabs in the right-click menu.
-- docs/manual.md:162 already covers the reload.
-- CHANGELOG.md: add an entry under [Unreleased] > Added.
-- If the tests go in tests/basics.rs, the per-file description at docs/manual.md:1288 can stay as it is.
-
-**Tests.** Headless UI tests with `Ui::open_with(cx, &fx.dir, Open { workspace: true, ..Default::default() })` from tests/common/mod.rs. Helpers: `ui.drag`, `ui.click_with(MouseButton::Middle, ..)`, `ui.right_click`, `ui.click_menu_item`, `ui.menu_labels`, `ui.click`, `ui.press(&cmd("t"))`, `item_id`, `Fixture`. Read tab state through `ui.workspace` with `workspace.read_with(ui.cx, |w, _| (w.tabs().len(), w.active_index()))`, as `tabs_and_split_view` does at tests/file_ops.rs:1044. `ui.view` stays the first tab even after it is closed, so do not use `ui.folder()` for the kept tab.
-
-**(1) tests/file_ops.rs, new test `dropping_on_a_tab_moves_into_its_folder`**, next to `dragging_onto_a_folder_moves_or_copies` (519):
-- `ui.press(&cmd("t"))`; navigate the new active tab to `fx.path("Projects")` via `second.update(cx, |f, cx| f.navigate(Location::Folder(..), window, cx))`, as at 1060-1067.
-- `ui.click(("tab", 0usize))`, then `ui.click("view-list")`.
-- `ui.drag(item_id("name-cell", &fx.path("notes.txt")), ("tab", 1usize), Modifiers::none())`. The source must be `name-cell` in list view, or `tile` in the default icon view. It must not be `row`.
-- Assert `fx.path("Projects/notes.txt").exists()` and `!fx.path("notes.txt").exists()`.
-- Assert the second tab's `rows_for_test()` contains notes.txt (the reload).
-- Assert the tab count and active index are unchanged at (2, 0).
-- Optional: repeat with the copy modifier (`alt` on macOS, `control` elsewhere, as at 536-540) and assert both files exist.
-- Optional: type a query in the second tab, or navigate it to `Location::Recents`, and assert a drop on it changes nothing.
-
-**(2) tests/basics.rs, new test `middle_click_closes_a_tab`** (the file already has `with_tabs`, `tabs()` and a `MouseButton` import):
-- Three tabs via two `cmd("t")` presses; active is 2.
-- `ui.click_with(MouseButton::Middle, ("tab", 0usize))`: assert (2, 1) and the same active entity id.
-- `ui.click_with(MouseButton::Middle, ("tab", 1usize))`: assert (1, 0) and `!ui.exists("tab-bar")`.
-
-**(3) tests/basics.rs, new test `close_other_tabs_keeps_the_one_clicked`**:
-- Three tabs, with tab 1 navigated to Projects; active is 2.
-- `ui.right_click(("tab", 1usize))`; assert `ui.menu_labels()` contains "Close Other Tabs"; `ui.click_menu_item("Close Other Tabs")`.
-- Assert (1, 0), `workspace.active().entity_id()` equals tab 1's id, and its `current_folder()` is Projects.
-
-**(4) Regression**: the reorder drags in `tabs_and_split_view` (tests/file_ops.rs:1069-1076) must still pass unchanged; they exercise `DraggedTab` through the new `can_drop` and the new `DragLabel` preview. `favorites_drag_into_another_order` (tests/basics.rs:318) already shows drops land under a `DragLabel`.
-
-**Risks.** Low overall.
-
-- **Stale destination.** The drop folder is captured when the active tab renders. A hidden tab's folder can change underneath it (a rename is followed in `reload_quietly`), but titles have the same staleness today, and the active tab redraws after any file change.
-- **Swallowed self-drop.** Dropping a folder on a tab that shows that same folder is swallowed by `can_drop` (the drag is taken at div.rs:2973-2976). That is harmless and matches rows and crumbs.
-- **Closing tabs mid-transfer.** Close Other Tabs and middle-click drop Finder entities. A transfer still running in a closed tab finishes on disk but loses its completion handler: no Undo record and no reload of the others. Close Tab has the same gap today, so this is not a new class of problem.
-- **Accidental close.** A middle-click on a tab closes it with no confirmation. That is the standard convention; tabs hold no unsaved state apart from an in-place rename.
-- **Split view.** The active tab is not a drop target, so dragging from the split pane onto the active tab's tab does nothing. Dropping on the pane itself works.
-- **Label offset.** `DragLabel` is drawn at the tab's origin offset from the cursor, the same as favorites; on a 240pt-wide tab it can sit some way left of the pointer. Cosmetic.
-- **Merge conflict.** This edits `render_tab_bar`, as the tab-bar-overflow candidate does; land them together or in sequence.
-
-User value is 3 rather than 4: these are four small conveniences, and each has a workaround today (the close button, cut and paste, F6 in split view).
-
-**Notes from later reviews.** 'tab-bar-overflow' lands right before this one and makes the tab strip scroll; build on it.
 
 ## table-preview-column-widths
 

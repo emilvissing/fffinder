@@ -1,36 +1,3 @@
-# Beyond the cut-off of 00:30 UTC, 20 Nov: saved for later, highest value first.
-collapsible-sidebar-sections  # 3 M
-content-match-highlight  # 3 M
-context-menus-fit  # 3 M
-filter-stale-keep-set  # 3 M
-go-to-folder-keyboard  # 3 M
-icon-tile-hit-target  # 3 M
-idle-redraw-after-search  # 3 M
-image-preview-details  # 3 M
-inactive-selection-colour  # 3 S
-multi-word-highlights  # 3 S
-name-clash-details  # 3 M
-preview-card-height  # 3 S
-quick-look-empty-state  # 3 S
-recent-searches  # 3 M
-recents-walk-index  # 3 S
-regex-content-search  # 3 M
-restore-session-tabs  # 3 M
-search-roots-notes-dedupe  # 3 S
-search-settings-hints-steppers  # 3 M
-search-settings-without-effect  # 3 S
-search-start-no-flash  # 3 S
-select-all-perf  # 3 M
-settings-rows-fit  # 3 S
-split-view-toolbar-clip  # 3 M
-tab-drop-and-close  # 3 M
-table-preview-column-widths  # 3 S
-tree-arrows-past-smart-folder  # 3 S
-type-select-space  # 3 S
-view-switch-keeps-selection  # 3 M
-adhoc-index-feedback  # 2 M
-files-changed-off-thread  # 2 S
-get-info-stop-walk  # 2 S
-path-bar-no-io  # 2 S
-preview-page-keys  # 2 S
-query-history-boost  # 2 M
+# Beyond the cut-off of 20 Nov: saved for later. The first two were parked last, at the owner's request; the rest is highest value first.
+column-row-menu-wrong-item  # 5 S  parked at 04:10 UTC, 20 Nov, at the owner's request
+split-active-pane  # 4 M  parked at 04:10 UTC, 20 Nov, at the owner's request

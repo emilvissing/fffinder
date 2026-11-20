@@ -2,5 +2,5 @@
 stray-double-click-opens-file
 accented-names-search
 near-miss-beside-scattered
+tab-drop-and-close
 stale-rows-on-place-change
-split-active-pane

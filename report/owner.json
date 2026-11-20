@@ -75,6 +75,11 @@
   "text": "A two-finger swipe over the tabs scrolls them, sideways and up or down. With six or more tabs, ⌘\\ keeps the showing tab in view. Right-click a tab, then drag the window's edge: the menu closes."
  },
  {
+  "cat": "mac",
+  "id": "stray-double-click-opens-file",
+  "text": "Double-click Done in Settings while a file is under the pointer: the file does not open. Then double-click a file: it opens as before. Close Quick Look's window with a click and click a file right away: it is selected."
+ },
+ {
   "cat": "changed",
   "id": "smart-folder-save-and-leaks",
   "text": "A Smart Folder's filter, kind and scope now end with its search, so the next folder you open is no longer filtered. If you used a Smart Folder to load a filter and then browse, type the filter in the filter bar instead."
@@ -170,6 +175,21 @@
   "text": "Collapsing every group keeps the group headers on screen; it used to say the folder was empty. An empty folder now has the right-click menu with New Folder and Paste."
  },
  {
+  "cat": "changed",
+  "id": "stale-previews-and-cancel",
+  "text": "A preview is read again when its file changes: a couple of seconds after another program saves it, the Preview Pane, the gallery and Quick Look show the new contents. Refresh and switching between light and dark no longer leave a preview on a spinner."
+ },
+ {
+  "cat": "changed",
+  "id": "stray-double-click-opens-file",
+  "text": "An item opens only when both clicks of a double-click are on it. A double-click on a dialog's Done or Cancel no longer opens the file under the pointer, and clicking on quickly after opening a folder no longer opens folder after folder."
+ },
+ {
+  "cat": "changed",
+  "id": "column-pane-selection-by-path",
+  "text": "In the column view an item stays selected when its column is read again, sorted or refreshed; it used to jump to a neighbour. Sort By now sorts every column, and Escape clears the selection there as in the other views."
+ },
+ {
   "cat": "call",
   "id": "fuzzy-word-case",
   "text": "A search word with a capital runs two searches, so that capitals can count as a preference instead of a requirement. A simpler one-search version was written and set aside."
@@ -233,6 +253,11 @@
   "cat": "call",
   "id": "tab-bar-overflow",
   "text": "The tab bar comes back to the showing tab whenever its width changes, also after you scrolled away from it by hand. One listener at the end of `render_tab_bar` decides this."
+ },
+ {
+  "cat": "call",
+  "id": "stray-double-click-opens-file",
+  "text": "A stray second click does nothing at all; it does not select the file under it. A sloppy double-click that starts just beside an item no longer opens it, and the column view is the least forgiving about that."
  },
  {
   "cat": "limit",
@@ -318,6 +343,21 @@
   "cat": "limit",
   "id": "collapsed-groups-empty-view",
   "text": "The status bar counts only the rows that show, so it reads “0 items” under collapsed groups whose headers count more. New Folder while its group is collapsed leaves the keyboard in a name field that isn't drawn. A follow-up for both is queued."
+ },
+ {
+  "cat": "limit",
+  "id": "stale-previews-and-cancel",
+  "text": "A picture's preview and thumbnail still show the first version that was read, until fffinder restarts. A file written over in place, which changes nothing about its folder, shows as it was until Refresh."
+ },
+ {
+  "cat": "limit",
+  "id": "stale-previews-and-cancel",
+  "text": "Loads for items you have already moved past are still not cancelled: holding an arrow key starts one preview load per item passed. That half of the plan was left out."
+ },
+ {
+  "cat": "limit",
+  "id": "column-pane-selection-by-path",
+  "text": "In the column view, Paste, New Folder and New File always go to the window's folder, even when a later column is the one in use. The status bar's selection count does not follow the column in use."
  },
  {
   "cat": "upstream",

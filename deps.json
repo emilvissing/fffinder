@@ -17,8 +17,7 @@
   ],
   "split-active-pane": [
     "split-view-toolbar-clip",
-    "tab-bar-overflow",
-    "tab-drop-and-close"
+    "tab-bar-overflow"
   ],
   "content-match-highlight": [
     "cancel-content-search",
