@@ -357,6 +357,53 @@ fn a_rename_in_the_tree_leaves_a_columns_selection_alone(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn a_press_on_a_file_that_ends_a_rename_in_the_tree_leaves_the_file_selected(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("tree-name-press");
+    let (mut ui, home) = tree_window(cx, &fx);
+    ui.activate();
+    let projects = home.under(fx.path("Projects"));
+    ui.click(home.disclosure_id());
+    ui.click("view-list");
+
+    // The folder is listed among the files as well. A right-click on a file
+    // there keeps the name, and its menu acts on the file.
+    ui.right_click(projects.row_id());
+    ui.click_menu_item("Rename…");
+    ui.type_text("Work");
+    ui.right_click(item_id("row", &fx.path("notes.txt")));
+    assert!(fx.path("Work").is_dir());
+    assert_eq!(ui.selected(), ["notes.txt"]);
+    ui.click_menu_item("Move to Trash");
+    assert!(!fx.path("notes.txt").exists());
+    assert!(fx.path("Work").is_dir(), "not the folder just renamed");
+
+    // The same on a file that was selected before the name was edited,
+    // where the press selects nothing new.
+    ui.select("Budget.csv");
+    ui.right_click(home.under(fx.path("Work")).row_id());
+    ui.click_menu_item("Rename…");
+    ui.type_text("Jobs");
+    ui.right_click(item_id("row", &fx.path("Budget.csv")));
+    assert!(fx.path("Jobs").is_dir());
+    assert_eq!(ui.selected(), ["Budget.csv"]);
+    ui.click_menu_item("Move to Trash");
+    assert!(!fx.path("Budget.csv").exists());
+    assert!(fx.path("Jobs").is_dir(), "not the folder just renamed");
+
+    // Such a file stays selected after Return as well. The folder is
+    // selected among the files only when nothing else is.
+    ui.select("Roadmap.md");
+    ui.right_click(home.under(fx.path("Jobs")).row_id());
+    ui.click_menu_item("Rename…");
+    ui.type_text("Plans");
+    ui.press("enter");
+    assert!(fx.path("Plans").is_dir());
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+}
+
+#[gpui_kit::test]
 fn a_folder_named_in_the_tree_is_held_to_the_filter_in_the_files(cx: &mut TestAppContext) {
     let Some(nu) = fffinder::nushell::find_nu(None) else {
         eprintln!("nu not installed; skipping");

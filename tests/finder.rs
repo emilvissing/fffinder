@@ -1037,6 +1037,45 @@ fn a_result_renamed_here_isnt_searched_for_again(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_click_on_another_result_that_ends_a_rename_leaves_that_result_selected(
+    cx: &mut TestAppContext,
+) {
+    let fx = Fixture::new("search-rename-click");
+    std::fs::write(fx.path("Atlas Notes.txt"), "x").unwrap();
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.click("view-list");
+    ui.press(&cmd("f"));
+    ui.type_text("atlas");
+
+    ui.click(item_id("row", &fx.path("Projects/atlas/Project Atlas.txt")));
+    ui.press("f2");
+    ui.type_text("Atlas Plan");
+    ui.click(item_id("row", &fx.path("Atlas Notes.txt")));
+
+    assert!(lists(&ui, "Atlas Plan.txt"), "{:?}", ui.names());
+    assert_eq!(ui.selected(), ["Atlas Notes.txt"]);
+
+    // A result inside a folder that is renamed among the results keeps its
+    // row, so it stays selected as well, and its menu doesn't act on the
+    // folder.
+    ui.click(item_id("row", &fx.path("Projects/atlas")));
+    ui.press("f2");
+    ui.type_text("maps");
+    ui.right_click(item_id("row", &fx.path("Projects/atlas/Atlas Plan.txt")));
+    assert!(lists(&ui, "maps"), "{:?}", ui.names());
+    assert_eq!(ui.selected(), ["Atlas Plan.txt"]);
+    assert!(
+        ui.menu_labels()
+            .contains(&"Cut “Atlas Plan.txt”".to_string())
+    );
+    ui.click_menu_item("Move to Trash");
+    assert!(
+        fx.path("Projects/maps").is_dir(),
+        "not the folder just renamed"
+    );
+}
+
+#[gpui_kit::test]
 fn results_stay_when_what_changed_isnt_among_them(cx: &mut TestAppContext) {
     let fx = Fixture::new("search-follows-none");
     let mut ui = Ui::open(cx, &fx.dir);

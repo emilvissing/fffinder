@@ -1562,6 +1562,29 @@ impl Finder {
 
     /// List the current location, then select the items at `select`.
     fn load_listing(&mut self, select: Vec<PathBuf>, quiet: bool, cx: &mut Context<Self>) {
+        self.load_listing_unless(select, None, quiet, cx);
+    }
+
+    /// [`Self::load_listing`], quietly, for an item that was just renamed
+    /// from `was` to `now`. It's selected under its new name, unless
+    /// another item is selected by then. The press that ended the edit may
+    /// have been on that item, to select it or to open its menu, and what a
+    /// key or the menu does next goes to what is selected.
+    fn load_listing_renamed(&mut self, was: &Path, now: PathBuf, cx: &mut Context<Self>) {
+        self.load_listing_unless(vec![now], Some(was.to_path_buf()), true, cx);
+    }
+
+    /// [`Self::load_listing`]. With `renamed_from`, where the item at
+    /// `select` was until it was renamed, the item is left unselected when
+    /// another one is selected by then (see [`Self::selected_among_rows`])
+    /// and is still listed.
+    fn load_listing_unless(
+        &mut self,
+        select: Vec<PathBuf>,
+        renamed_from: Option<PathBuf>,
+        quiet: bool,
+        cx: &mut Context<Self>,
+    ) {
         let location = self.history.current().clone();
         let show_hidden = self.config.show_hidden;
         let last_opened = self.wants_last_opened();
@@ -1632,12 +1655,31 @@ impl Finder {
                         this.trashed.clear();
                     }
                 }
+                // What else is selected is asked before the rows are made
+                // again. The old name leaves the selection then, and in the
+                // gallery, which always shows an item, the first one takes
+                // its place: no choice of the user's.
+                let others: HashSet<PathBuf> = match &renamed_from {
+                    Some(was) => {
+                        let selected = this.selected_among_rows().into_iter();
+                        let others = selected.filter(|path| *path != was.as_path());
+                        others.map(Path::to_path_buf).collect()
+                    }
+                    None => HashSet::new(),
+                };
                 this.rebuild_rows(cx);
+                // One of them that is still listed keeps the selection. An
+                // item inside a folder that was open in the list isn't: its
+                // row was under the folder's old name, and the folder is
+                // closed under its new one. Giving way to it would leave
+                // nothing selected.
+                let kept = |path: &&Path| others.contains(*path);
+                let another = !others.is_empty() && this.selected_among_rows().iter().any(kept);
                 let found: Vec<usize> = select
                     .iter()
                     .filter_map(|path| this.rows.iter().position(|r| r.entry.path == *path))
                     .collect();
-                if let Some((&first, rest)) = found.split_first() {
+                if !another && let Some((&first, rest)) = found.split_first() {
                     this.selection.select_only(first);
                     for &ix in rest {
                         this.selection.toggle(ix);
@@ -2917,6 +2959,25 @@ impl Finder {
         self.selection
             .indices()
             .filter_map(|ix| self.rows.get(ix).map(|r| r.entry.clone()))
+            .collect()
+    }
+
+    /// The items selected among the rows. In the column view the rows are
+    /// the first column's, and what counts is the item selected there while
+    /// it is the column in use: only then does the window select in it by
+    /// itself (see [`Self::select_row_in_columns`]), and the other views'
+    /// selection can hold items that no column shows selected.
+    fn selected_among_rows(&self) -> Vec<&Path> {
+        if self.effective_view() == ViewMode::Columns {
+            let first = self.columns.first().filter(|_| self.active_column == 0);
+            let selected = first.and_then(|pane| pane.entries.get(pane.selected?));
+            let path = selected.map(|entry| entry.path.as_path());
+            return path.into_iter().collect();
+        }
+        self.selection
+            .indices()
+            .filter_map(|ix| self.rows.get(ix))
+            .map(|row| row.entry.path.as_path())
             .collect()
     }
 
@@ -4207,7 +4268,8 @@ impl Finder {
     /// An item was renamed from `was` to `now`. A column after the first
     /// that lists its folder would show the old name until the folder is
     /// next looked at for changes, so it's read again at once, and the item
-    /// stays selected there if it was. The first column follows the rows.
+    /// stays selected there if it was, unless something else has been
+    /// selected by then. The first column follows the rows.
     fn renamed_in_columns(&mut self, was: &Path, now: PathBuf, cx: &mut Context<Self>) {
         let Some(dir) = was.parent() else {
             return;
@@ -4216,7 +4278,7 @@ impl Finder {
         if let Some((col, pane)) = panes.find(|(_, pane)| pane.dir == dir) {
             let selected = pane.selected.and_then(|ix| pane.entries.get(ix));
             let select = selected.is_some_and(|entry| entry.path == was);
-            self.load_column(col, dir.to_path_buf(), select.then_some(now), cx);
+            self.load_column_unless(col, dir.to_path_buf(), select.then_some(now), true, cx);
         }
     }
 
@@ -4229,6 +4291,21 @@ impl Finder {
         col: usize,
         dir: PathBuf,
         select: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_column_unless(col, dir, select, false, cx);
+    }
+
+    /// [`Self::load_column`]. With `gives_way`, as for an item just renamed
+    /// (see [`Self::load_listing_renamed`]), the item at `select` is left
+    /// unselected when another item has been selected in the column in the
+    /// meantime, or a column before it has become the one in use.
+    fn load_column_unless(
+        &mut self,
+        col: usize,
+        dir: PathBuf,
+        select: Option<PathBuf>,
+        gives_way: bool,
         cx: &mut Context<Self>,
     ) {
         let show_hidden = self.config.show_hidden;
@@ -4261,10 +4338,21 @@ impl Finder {
                         |path: &PathBuf| entries.iter().position(|entry| entry.path == *path);
                     let kept = selected_path.as_ref().and_then(position);
                     let wanted = select.as_ref().and_then(position);
+                    let wanted = if gives_way {
+                        // Not when another item is selected here by now,
+                        // nor when a column before this one has become
+                        // the one in use, which selecting here would
+                        // undo. A column after it shows what was in the
+                        // item under its old name, and is opened again
+                        // for the new one.
+                        wanted.filter(|_| kept.is_none() && this.active_column >= col)
+                    } else {
+                        wanted.filter(|ix| kept != Some(*ix))
+                    };
                     pane.selected = kept;
                     pane.entries = entries;
                     pane.stamp = stamp;
-                    if let Some(ix) = wanted.filter(|ix| kept != Some(*ix)) {
+                    if let Some(ix) = wanted {
                         this.select_in_column_quiet(col, ix, cx);
                     } else if selected_path.is_some() && kept.is_none() {
                         // The columns after this one showed what was in the

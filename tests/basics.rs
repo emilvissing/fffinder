@@ -1886,6 +1886,51 @@ fn leaving_a_refused_name_says_why_once_and_keeps_the_selection(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+fn a_press_on_another_item_that_ends_a_rename_leaves_that_item_selected(cx: &mut TestAppContext) {
+    let fx = Fixture::new("rename-press-other");
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    ui.click("view-list");
+
+    // The press keeps the name, and the folder is read again for it. The
+    // item pressed is still the selected one after that, and the menu the
+    // press opened acts on the item it names.
+    ui.select("notes.txt");
+    ui.press("f2");
+    ui.type_text("plan");
+    ui.right_click(item_id("row", &fx.path("Roadmap.md")));
+    assert!(fx.path("plan.txt").exists());
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    assert!(ui.menu_labels().contains(&"Cut “Roadmap.md”".to_string()));
+    ui.click_menu_item("Move to Trash");
+    assert!(!fx.path("Roadmap.md").exists());
+    assert!(fx.path("plan.txt").exists(), "not the item just renamed");
+
+    // The same after a click, for the keys that follow it, among the icons.
+    ui.click("view-icons");
+    ui.select("plan.txt");
+    ui.press("f2");
+    ui.type_text("todo");
+    ui.click(item_id("tile", &fx.path("Budget.csv")));
+    assert!(fx.path("todo.txt").exists());
+    assert_eq!(ui.selected(), ["Budget.csv"]);
+    ui.press(&cmd("backspace"));
+    assert!(!fx.path("Budget.csv").exists());
+    assert!(fx.path("todo.txt").exists(), "not the item just renamed");
+
+    // An arrow key that follows Return, before the folder has been read
+    // again, moves on from the item as well.
+    ui.click("view-list");
+    ui.select("todo.txt");
+    ui.press("f2");
+    ui.type_text("zebra");
+    ui.press_without_settling("enter");
+    ui.press("up");
+    assert!(fx.path("zebra.txt").exists());
+    assert_eq!(ui.selected(), ["Projects"]);
+}
+
+#[gpui_kit::test]
 fn a_dialog_opened_during_a_rename_gets_the_keyboard(cx: &mut TestAppContext) {
     let fx = Fixture::new("rename-dialog");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -2070,6 +2115,111 @@ fn a_name_changed_in_a_further_column_shows_there_at_once(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+fn a_press_on_another_row_that_ends_a_rename_leaves_that_row_selected_in_its_column(
+    cx: &mut TestAppContext,
+) {
+    let fx = projects_with("rename-press-column", &["a.txt", "b.txt", "c.txt"]);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    ui.click("view-columns");
+
+    // The first column, which lists the window's folder.
+    ui.click(item_id("crow", &fx.path("notes.txt")));
+    ui.press("f2");
+    ui.type_text("plan");
+    ui.right_click(item_id("crow", &fx.path("Roadmap.md")));
+    assert!(fx.path("plan.txt").exists());
+    assert_eq!(ui.selected(), ["Roadmap.md"]);
+    ui.click_menu_item("Move to Trash");
+    assert!(!fx.path("Roadmap.md").exists());
+    assert!(fx.path("plan.txt").exists(), "not the item just renamed");
+
+    // A further column, which shows the new name all the same.
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/b.txt")));
+    ui.press("f2");
+    ui.type_text("bb");
+    ui.right_click(item_id("crow", &fx.path("Projects/c.txt")));
+    assert_eq!(columns(&ui)[1], ["a.txt", "atlas", "bb.txt", "c.txt"]);
+    assert_eq!(ui.selected(), ["c.txt"]);
+    ui.click_menu_item("Move to Trash");
+    assert!(!fx.path("Projects/c.txt").exists());
+    assert!(
+        fx.path("Projects/bb.txt").exists(),
+        "not the item just renamed"
+    );
+
+    // A click on the folder's own row, a column back, makes that column the
+    // one in use, and it stays so.
+    ui.click(item_id("crow", &fx.path("Projects/a.txt")));
+    ui.press("f2");
+    ui.type_text("aa");
+    ui.click(item_id("crow", &fx.path("Projects")));
+    assert_eq!(columns(&ui)[1], ["aa.txt", "atlas", "bb.txt"]);
+    assert_eq!(ui.selected(), ["Projects"]);
+    ui.press("up");
+    assert_eq!(
+        ui.selected(),
+        ["plan.txt"],
+        "the keys go on from the folder"
+    );
+
+    // After Select All the other views' selection holds every item, and no
+    // column shows it. What counts is the item the first column shows
+    // selected: the one renamed after Return, and the one a press was on.
+    ui.press(&cmd("a"));
+    ui.press("f2");
+    ui.type_text("todo");
+    ui.press("enter");
+    assert_eq!(ui.selected(), ["todo.txt"]);
+    ui.press(&cmd("a"));
+    ui.press("f2");
+    ui.type_text("zebra");
+    ui.right_click(item_id("crow", &fx.path("Budget.csv")));
+    assert!(fx.path("zebra.txt").exists());
+    assert_eq!(ui.selected(), ["Budget.csv"]);
+}
+
+#[gpui_kit::test]
+fn a_press_inside_a_folder_that_ends_its_rename_leaves_the_folder_selected(
+    cx: &mut TestAppContext,
+) {
+    let fx = projects_with("rename-press-inside", &["a.txt", "b.txt"]);
+    let mut ui = Ui::open(cx, &fx.dir);
+    ui.activate();
+    ui.click("view-list");
+
+    // An item inside a folder that is open in the list has its row under
+    // the folder's old name only, and the folder is closed under its new
+    // one. Nothing else would stay selected, so the folder is, as after
+    // Return.
+    ui.select("Projects");
+    ui.press("right");
+    ui.press("f2");
+    ui.type_text("Work");
+    ui.click(item_id("row", &fx.path("Projects/b.txt")));
+    assert_eq!(
+        ui.names(),
+        ["Budget.csv", "notes.txt", "Roadmap.md", "Work"]
+    );
+    assert_eq!(ui.selected(), ["Work"]);
+
+    // The same in a column after the first, where the folder's own column
+    // is opened again for it.
+    ui.click("view-columns");
+    ui.click(item_id("crow", &fx.path("Work")));
+    ui.click(item_id("crow", &fx.path("Work/atlas")));
+    ui.press("f2");
+    ui.type_text("maps");
+    ui.click(item_id("crow", &fx.path("Work/atlas/Project Atlas.txt")));
+    assert_eq!(ui.selected(), ["maps"]);
+    assert_eq!(
+        columns(&ui)[1..],
+        [vec!["a.txt", "b.txt", "maps"], vec!["Project Atlas.txt"]]
+    );
+}
+
+#[gpui_kit::test]
 fn a_new_folder_is_named_in_place(cx: &mut TestAppContext) {
     let fx = Fixture::new("rename-new");
     let mut ui = Ui::open(cx, &fx.dir);
@@ -2100,6 +2250,19 @@ fn a_new_folder_is_selected_in_the_column_view_too(cx: &mut TestAppContext) {
     ui.press("enter");
     assert!(fx.path("Archive").is_dir());
     assert_eq!(ui.selected(), ["Archive"]);
+
+    // With a further column in use the folder is made and named in the
+    // first one all the same, which goes on showing the way to that column.
+    // The other views have the folder selected under its name.
+    ui.click(item_id("crow", &fx.path("Projects")));
+    ui.click(item_id("crow", &fx.path("Projects/atlas")));
+    ui.press(&cmd("shift-n"));
+    ui.type_text("Later");
+    ui.press("enter");
+    assert!(fx.path("Later").is_dir());
+    assert_eq!(ui.selected(), ["atlas"]);
+    ui.click("view-list");
+    assert_eq!(ui.selected(), ["Later"]);
 }
 
 /// The ID of the header of the group named `label`.

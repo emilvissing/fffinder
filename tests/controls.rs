@@ -3799,6 +3799,7 @@ fn rename_dialog_in_the_gallery(cx: &mut TestAppContext) {
     assert!(!ui.dialog_open());
     assert!(fx.path("Plan.md").exists() && !fx.path("Roadmap.md").exists());
     assert!(ui.names().contains(&"Plan.md".to_string()));
+    assert_eq!(ui.selected(), ["Plan.md"], "still the selected item");
 
     ui.select("Plan.md");
     ui.press("f2");
@@ -5268,6 +5269,11 @@ fn a_click_that_ends_a_name_under_a_filter_selects_the_item_clicked(cx: &mut Tes
     assert_eq!(ui.names(), found[1..]);
     ui.settle();
     assert!(fx.path("first note.txt").exists());
+    assert_eq!(
+        ui.selected(),
+        [found[1].as_str()],
+        "also once the filter has answered for the new name"
+    );
 }
 
 #[gpui_kit::test]
