@@ -1,0 +1,36 @@
+{
+ "id": "idle-redraw-after-search",
+ "title": "After the search field has had the keyboard once, the window redraws about twice a second for good",
+ "area": "ui",
+ "kind": "bug",
+ "problem": "Found by the reviewer of 'live-search-results' while measuring that change's idle cost (done record: /home/user/polish-tools/done/live-search-results.json, first item under 'Found, not fixed'). In their words: once the search field has had the keyboard, the window is drawn about twice a second for good, with nothing happening: 31 calls of render_content in 16 s under gdb with no search, no reload and no row rebuilt, after Ctrl+F and then Escape in a window that showed a folder. Idle CPU was 6 ticks in 15 s in a fresh window and 109 after (debug build, software rendering; 100 ticks = 1 s of CPU). It looks like the field's caret going on blinking after the keyboard has left. It is on the trunk without that change. Nobody has found the cause yet. What the orchestrator read in the kit, as a lead and no more: the caret's timer is `BlinkCursor` (gpui-base-0.8.1/src/input/base/blink_cursor.rs), which notifies the input every 500 ms while it runs, and the input notifies the view it is in. It is started by `InputState::focus` (state.rs, near line 1653), by the focus observer `on_focus`, and by window activation while the field is focused; it is stopped only by `on_blur`, and `on_blur` returns before stopping it while the field's context menu is open. `pause` is a no-op on a stopped cursor. So a start with no blur after it would blink for good: for instance `InputState::focus` called and the focus then given to something else in the same update (the focus never arrives, so no blur is sent), or a blur taken while a context menu was open. A file browser is left open all day; one search should not keep it awake from then on.",
+ "proposal": "Reproduce first, headlessly: the test executor has a clock, so count how often the window is drawn (or how often the Finder or the search field's state is notified) while nothing happens, for a fresh window and for a window after Cmd+F and Escape, over ten simulated seconds. tests/finder.rs a_search_run_again_for_the_index_shows_no_sign_of_running ('live-search-results') counts redraws for its own purpose; see how. Then find the cause before fixing anything: which entity notifies every 500 ms, who started it, and why nothing stopped it. Try each way the keyboard leaves the search field: Escape with words and without, Return or Down into the results, a click on a file, a click on the sidebar, Tab, Cmd+L or another field taking the keyboard, a dialog opening, a Smart Folder clicked, a tab switched, the window deactivated and activated. Do the same for the app's other fields if the cause is general (the Nushell filter field, the Nushell panel's field, a rename field, Go to Folder's field, a dialog's field). Then find where it began: check the base commit 66c919b (upstream's) the same way. If upstream has it, it is theirs and we fix it in the app; if it began on this branch, find the commit (`git log 66c919b..search-ui-polish`; 'escape-ends-search', 'scope-chips-keep-focus', 'search-enter-before-results', 'quick-look-window-mixup' and 'back-forward-restore-search' all move the keyboard around the search field) and say which. Fix it in the app's code: the kit is a dependency and is not ours to patch. If the cause is the app starting the field's caret without the focus arriving (focusing the field and then something else in one update), the fix is in the order or the choice of those calls. If the only cause is inside the kit and no call the app makes can stop the caret, say so with the evidence, write the closed record, and return skipped: do not ship a workaround that blurs or rebuilds fields on a timer. A second, smaller thing from the same record, to do only if it is small and certainly right, else leave and say so: while a search shows, the folder it was made in is still looked at, and each change in it reads the folder again and rebuilds the rows twice (load_listing, then load_folder_stats), which draws the window, 12 reloads and 24 rebuilds for 12 files made and removed there, though the results don't change by it.",
+ "files": [
+  "src/finder/mod.rs",
+  "src/finder/toolbar.rs",
+  "src/finder/filter.rs",
+  "tests/finder.rs",
+  "tests/controls.rs"
+ ],
+ "original_test_plan": "A headless test that fails today: after the search field has had the keyboard and lost it (at least Cmd+F then Escape, and Cmd+F, words, Return into the results), ten simulated seconds with nothing happening draw the window no more often than in a fresh window (state the bound you assert and why: the two-second look for changes and the index status poll may notify legitimately; measure a fresh window first). The same for each other way out of the field that you found to leak, and for each other field that leaked. A guard that the caret still blinks while the field has the keyboard (the window is redrawn about twice a second then, by design).",
+ "original_risks": "The fix must not cost the field its caret, its selection, or the keyboard: every test that types into the search field and every focus test ('scope-chips-keep-focus', 'escape-ends-search', 'quick-look-window-mixup', 'focus-lost-recovery' if on the trunk) must keep passing. A test that counts redraws is brittle if it counts legitimate ones; assert against a fresh window's count measured in the same test, not against zero. On a real display the measure is CPU, not frames: if you can, run the debug app under Xvfb as the reviewer of 'live-search-results' did (their notes say how they read rows and sent keys) and report ticks before and after.",
+ "raised_by": [
+  "review of live-search-results"
+ ],
+ "verifier": {
+  "verdict": "unverified",
+  "claim_check": "Not checked by a second reviewer. The reviewer of 'live-search-results' measured it in the real debug app under gdb and by CPU ticks, and says it is on the trunk without their change; the cause is not known and the orchestrator's reading of the kit is a lead only. Reproduce before changing anything; if a fresh window and a window after Cmd+F and Escape draw equally often in your measurement, write the closed record with the numbers and return skipped.",
+  "implementation_notes": "See the proposal: an investigation first, and a fix only for a cause you have shown.",
+  "test_plan": "See original_test_plan.",
+  "touches": [
+   "src/finder/mod.rs",
+   "tests/finder.rs"
+  ],
+  "risks": "See original_risks.",
+  "user_value": 3,
+  "effort": "M",
+  "worth_doing": true,
+  "already_handled": false
+ },
+ "orchestrator_notes": "'live-search-results' (153eb8f) is on the trunk: every tab's browser looks for changes every two seconds whether it shows or not, and that look costs two atomic loads when nothing changed and should not draw anything. If your counting shows that it does draw, that is a finding of its own: say so."
+}

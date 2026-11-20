@@ -1,0 +1,34 @@
+{
+ "id": "stray-double-click-opens-file",
+ "title": "Double-clicking a dialog's Done or Cancel button opens the file under it",
+ "area": "ui",
+ "kind": "bug",
+ "problem": "Found by the reviewer of 'search-syntax-click-example' (done record: /home/user/polish-tools/done/search-syntax-click-example.json). In their words: Found, not fixed (all there before this change).\n\n- A double-click on a dialog's Done button opens the file under it. The first click closes the dialog and the second lands on the file list as the second click of a double-click. Probed with 60 files in the list view: Cmd+/, then a double-click on Done, gave Open(\"…/file-18.txt\") and that file selected. Only Done was probed; by the same path it should hold for any button that closes a dialog over the files (Cancel, the ×) and for the backdrop. One way to cover them all would be a guard in item_interactions (views.rs) against a second click whose first one went elsewhere.\n\n- A double-click on the (i) in a window where the dialog doesn't open over it (most sizes) opens the Search Syntax dialog and closes it again, because the second click lands on the backdrop. Seen at 1100x700, 1100x560, 1100x520 and 900x480.",
+ "proposal": "Reproduce first, headlessly: open a dialog over a list with enough files (the Search Syntax dialog with Cmd+/ works), double-click its Done button, and assert that no file was opened and none became selected; the same for Cancel, the close button, and the backdrop. Then make the file views ignore the second click of a double-click whose first click did not land on the same item: the reviewer suggests a guard in item_interactions (src/finder/views.rs), for example remembering which item took the last mouse-down and treating a click count of 2 on another item, or after a press that went elsewhere, as a single click. Check how click_row gets its click count and what GPUI reports for a click that follows a click on another element (gpui-pre-0.3.10, the window's click tracking). The same guard should stop the Search Syntax dialog from opening and closing on a double-click of its (i) button only if that falls out naturally; otherwise leave that and say so.",
+ "files": [
+  "src/finder/views.rs",
+  "src/finder/mod.rs",
+  "tests/controls.rs",
+  "tests/basics.rs"
+ ],
+ "original_test_plan": "Headless UI tests that fail today: a double-click on a dialog's Done button over the file list opens nothing and selects nothing; the same for the backdrop. A real double-click on a file still opens it in every view (icons, list, columns, gallery), and a double-click on a folder still goes into it. A click on one file followed quickly by a click on another selects the second and opens nothing.",
+ "original_risks": "Double-click to open is the most used gesture in the window: it must not get slower, need a pause, or fail after a selection change, a scroll, or a drag that did not move. Rename-on-second-click behaviour, if the app has it, must keep working. The columns view and the sidebar have their own click handling: check them. A menu or a dialog that closes on the first click of a double-click is the case to stop; nothing else should change.",
+ "raised_by": [
+  "review of search-syntax-click-example"
+ ],
+ "verifier": {
+  "verdict": "unverified",
+  "claim_check": "Not checked by a second reviewer. The reviewer who found it probed it headlessly with 60 files in the list view. Reproduce it yourself before changing anything; if you cannot, write the closed record and return skipped with the evidence.",
+  "implementation_notes": "See the proposal: a starting point, not a checked plan.",
+  "test_plan": "See original_test_plan.",
+  "touches": [
+   "src/finder/views.rs",
+   "tests/controls.rs"
+  ],
+  "risks": "See original_risks.",
+  "user_value": 4,
+  "effort": "S",
+  "worth_doing": true,
+  "already_handled": false
+ }
+}

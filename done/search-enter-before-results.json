@@ -1,0 +1,58 @@
+{
+ "id": "search-enter-before-results",
+ "commit": "17a460e997ca7e2506509ea9e9e21258ab324e35",
+ "summary": "Return and Down Arrow in the search field no longer act on the rows that were on screen before the results arrived. While a search or a Nushell filter is still producing the rows, or the index is being built and has found nothing yet, the key waits, and the keyboard moves into the results once they are in, with the first one selected. Return no longer runs a finished search again or starts a running one over.",
+ "changelog_kind": "Fixed",
+ "changelog": "Return or Down Arrow pressed in the search field before the results were in acted on what the window still showed. The first item of the folder, or of an earlier search, was selected and then lost when the results arrived, and a quick second Return opened it. Both keys now wait for the results, and for a Nushell filter still running over them, and then move in with the first result selected. Typing on or moving the caret calls that off, and when nothing is found the keyboard stays in the search field. Return also no longer runs a search again when its results are already in, or starts over one that is still running, which made a slow contents search take longer. Refresh (Cmd+R) still runs it again.",
+ "behaviour_changes": [
+  "Return or Down Arrow in the search field, pressed while the rows are not yet the results (a search is in its 50 ms pause or running, a Nushell filter is running, or the index is still building and has found nothing), no longer selects the first row on screen or moves the keyboard. Focus stays in the field and the status bar's spinner shows the work. When the rows are in, the keyboard moves into the files with the first result selected, unless something is already selected.",
+  "That move is called off when, since the key was pressed: the field was edited, even if the words end up the same (a space typed and deleted); the words were changed from outside the field (fff gui, a second launch, a Smart Folder); the caret or selection in the field moved; the keyboard left the search field (a clicked row, the filter bar, a dialog, a menu, another tab or pane); or the window went to another place. When nothing is found, the keyboard stays in the field.",
+  "A quick second Return before the results no longer opens the folder's first item. It is another wait.",
+  "From an empty folder, Return or Down Arrow before the results used to do nothing. It now moves in when the results arrive.",
+  "Typing after an early Return stays in the search field. Before, focus had already moved, so the keys went to type-to-select in the files.",
+  "Return with the results already in only moves in; it no longer runs the search again. Return during a running search no longer starts it over. Cmd+R and F5 still re-run.",
+  "Either key during the 50 ms pause after typing starts the search at once. Return did this before; Down Arrow now does too.",
+  "Return on settled results now scrolls the first result into view when it selects it, as Down Arrow already did.",
+  "Outside a search: Down Arrow or Return in the search field while a Nushell filter is still running over a folder's items now waits for the filter (at most its 10 s limit) instead of moving in at once. Going to another folder in the meantime calls it off.",
+  "Down Arrow pressed during a wait is consumed and does not reach the field.",
+  "Manual: the Searching paragraph gains three sentences on the waiting, what calls it off, and Return not re-running a finished search."
+ ],
+ "left_out": [
+  "The plan's sync from the field at the top of move_into_results: a Change cannot be queued when a real key arrives, and the sync would end searches whose words were set without the field.",
+  "The plan's selection.clear() in the waiting branch: the waiting code never selects a stale row, and what is selected is remapped by path exactly as when Return is pressed after the results are in.",
+  "A clear on the field's Blur event: GPUI reports the window going inactive as a blur, so it would cancel the wait on switching apps.",
+  "A folder that is still loading, with no search and no filter running, is not counted as pending. Return or Down Arrow in the empty search field during a slow folder load still acts on the previous folder's rows, as before this change. The same goes for a filter still in its 400 ms pause after typing.",
+  "No test for the 'index still building and nothing found yet' clause: the harness waits for the index before it opens the window and cannot stage a scan.",
+  "No test that Return leaves a finished or running search alone: nothing observable exposes a re-run without adding a test hook.",
+  "No picture of the waiting path: shot.sh settles after every step. The three pictures show the settled path; the waiting path is covered by the headless tests.",
+  "cargo clippy --features term was not run: src/term is untouched and no signature it calls changed.",
+  "CHANGELOG.md is not edited, per the guide. The entry is in this record and in the commit message."
+ ],
+ "tests": [
+  "tests/finder.rs: return_before_the_results_are_in_waits_for_them",
+  "tests/finder.rs: down_arrow_before_the_results_are_in_waits_for_them",
+  "tests/finder.rs: return_before_the_results_are_in_waits_in_an_empty_folder_too",
+  "tests/finder.rs: a_second_return_before_the_results_are_in_opens_nothing",
+  "tests/finder.rs: return_on_a_search_that_finds_nothing_stays_in_the_field",
+  "tests/finder.rs: typing_on_after_return_calls_off_the_move_into_the_results",
+  "tests/finder.rs: a_newline_the_search_field_drops_leaves_return_waiting",
+  "tests/finder.rs: moving_the_caret_after_return_calls_off_the_move_into_the_results",
+  "tests/finder.rs: other_words_from_a_second_launch_call_off_the_move_into_the_results",
+  "tests/finder.rs: results_that_come_in_leave_the_keyboard_where_it_has_gone_since",
+  "tests/finder.rs: return_before_the_results_are_in_waits_for_the_filter_too (skips when nu is not installed)",
+  "tests/finder.rs: going_to_another_folder_calls_off_a_key_that_waits_for_the_filter (skips when nu is not installed)",
+  "tests/common/mod.rs: harness helpers Ui::press_without_settling and Ui::type_without_settling"
+ ],
+ "screenshots": [
+  "/home/user/polish-tools/shots/search-enter-before-results-return.png",
+  "/home/user/polish-tools/shots/search-enter-before-results-nothing.png",
+  "/home/user/polish-tools/shots/search-enter-before-results-down.png"
+ ],
+ "review_fixes": [
+  "A key that waited for a filter over a folder's items (no search) survived going to another folder. The old folder's filter could answer while the new folder was still loading, and the keyboard then moved into the files with a row of the folder just left selected, which was lost when the new listing arrived. Which of the two answered first decided the outcome. location_changed now drops the waiting key. Test: going_to_another_folder_calls_off_a_key_that_waits_for_the_filter.",
+  "An edit that left the words as they were did not call off the wait: after Return, a space typed and deleted still ended with the keyboard in the results. The search field's Change handler now drops the waiting key when the caret has moved. It compares the caret instead of dropping on every Change because the one-line field reports a Change for a newline it drops, and a system that sends Return's newline as text must not cancel Return. Tests: the third part of typing_on_after_return_calls_off_the_move_into_the_results, and a_newline_the_search_field_drops_leaves_return_waiting.",
+  "Added other_words_from_a_second_launch_call_off_the_move_into_the_results, so the clear in set_query (words changed from outside the field) keeps a test of its own now that edits in the field are caught earlier.",
+  "The commit message's second paragraph now lists what calls the wait off as the code has it."
+ ],
+ "notes": "Checked: 11 of the 12 new tests fail with the src change reverse-applied. The twelfth, results_that_come_in_leave_the_keyboard_where_it_has_gone_since, guards the new late focus move and fails only when the focus check in finish_enter is removed. Removing the focus check, the selection comparison, the immediate start of a search in its pause, the clear on going elsewhere, the clear on an edit, or the clear in set_query each fails exactly one test. check.sh printed CHECK OK on the trunk commit: 435 passed in 16 test binaries, 3 of 3 known root-only failures. tests/finder.rs also passes with SEED=0, 1, 7, 42 and 1234.\n\nFound, already on the trunk before this change, and not fixed here (worth its own brief): with Quick Look's own window open and drawn after the browser's, GPUI hands on_search_event Quick Look's window, because subscribe_in resolves the Finder's window as the last one that drew it. Return in the search field then gives the files the keyboard in Quick Look's window, and the browser's keyboard stays in the search field. In the new waiting path the same mix-up makes Return do nothing. I reproduced it in the headless harness by drawing Quick Look's window last, with and without this change; whether the real app hits it depends on which window draws last. Down Arrow is not affected, since key listeners get the window the key was pressed in. The Finder's other subscribe_in and observe_in handlers (the filter field, the Nushell field, adopt_settings) would get the wrong window the same way.\n\nAccepted limits of the cancel rule: a caret that moved and came back (Left, then Right), or a keyboard that left the field and came back with the same selection (a dialog opened and closed) before the results arrive, does not call off the move. Keys that change nothing (Cmd+R, Cmd+C) do not either. During an index build with partial results the keys move in at once, as the brief has it.\n\nNot verifiable here: the macOS and Windows key paths. The design relies on Return arriving once, as a key. The caret comparison keeps the wait working even where its newline is also sent as text.\n\nLikely conflicts for later briefs: escape-ends-search (the search field's capture_key_down in toolbar.rs), cancel-content-search (the debounce lines at the top of run_search's task), tests/common/mod.rs near type_text. search-skeleton-flash and results-scroll-reset build on results_pending(), which does not look at whether old rows are still shown or at a folder that is still loading.\n\nOne side effect outside the brief: a git fetch origin I ran in the lane brought the release tags v0.4.0, v0.5.0 and v0.5.1 into the shared repository. Nothing else changed there."
+}

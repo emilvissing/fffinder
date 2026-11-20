@@ -1,0 +1,40 @@
+{
+ "id": "new-item-in-hidden-row",
+ "title": "New Folder while its group is collapsed, or a filter hides it, leaves the keyboard in a name field that is never drawn; and the status bar counts short under collapsed groups",
+ "area": "ui",
+ "kind": "bug",
+ "problem": "Found by the reviewer of 'collapsed-groups-empty-view' (done record: /home/user/polish-tools/done/collapsed-groups-empty-view.json, first two items under 'Found, not fixed'), and read by the orchestrator. (A) `add_and_rename` (src/finder/inline_rename.rs) pushes the new entry, rebuilds the rows, selects the row if there is one, and then calls `begin_rename(path, ..)` whether or not a row for the item shows. With the list grouped by kind and the Folder group collapsed, New Folder (the key, the Actions menu, or the empty-space menu) makes 'untitled folder', the Folder header's count goes up, and the keyboard is in a name field that no row draws: no key does anything until something is clicked. A click on the header opens the group with the field showing and the keyboard in it; a click elsewhere ends the edit with the name kept. The net that 'focus-lost-recovery' added (`keyboard_lost`) stays out on purpose while a name is being edited, and inline_rename.rs ends an edit only on a blur, which never comes for a field that was never drawn. A Nushell filter can hide the new item the same way (a filter such as `size > 1mb` never passes a new empty folder), and New File… goes through the same function. (B) The status bar counts the rows that show. With groups collapsed it counts short: '0 items' under headers whose counts add up to the folder's, '7 items' with one group of 8 collapsed, and with a filter on, 'N of M items pass the filter' leaves out the items that pass in collapsed groups, which makes the sentence false. Since 'collapsed-groups-empty-view' the headers with their counts stay on screen when every group is collapsed, so '0 items' now stands right under headers that count 15.",
+ "proposal": "(A) Reproduce first with a headless test: list view grouped by kind, the Folder group collapsed, New Folder; the files-area keys do nothing and no rename field is drawn (see tests/controls.rs collapsing_every_group_keeps_its_headers for how groups are collapsed in a test, and tests/basics.rs for the rename tests). Then make the new item reachable. For a collapsed group: open the item's group before the edit starts, so the row and its field show (the user asked for a new folder and should see it being named). For a filter that hides the new item there is no row to show: choose and say why, between starting no edit and telling the user (a notification that the new item is hidden by the filter, with its name), or showing the new item in spite of the filter until it is named; whichever you choose, the keyboard must end somewhere that takes keys, and the folder must not be left with a name the user could not see. Check each way a new item is made (New Folder by key and by each menu, New File…, New Folder with Selection if the app has it, the tree's New Folder which has its own path) in the list, icon, column and gallery views. (B) Only if it is small and certainly right, else leave it and say so: make the status bar count the items the place lists, not the rows drawn. The reviewer's pointer: a count taken in `rebuild_rows` between `apply_filter_to` and `group_rows` would be exact (the groups' `total` is not: it counts top-level items only). The selection part of the bar ('1 of 5 selected') and the filter sentence must stay true with groups collapsed, with a filter on, and with folders open in place in the list.",
+ "files": [
+  "src/finder/inline_rename.rs",
+  "src/finder/mod.rs",
+  "src/finder/groups.rs",
+  "src/finder/bars.rs",
+  "tests/controls.rs",
+  "tests/basics.rs",
+  "docs/manual.md"
+ ],
+ "original_test_plan": "Tests that fail today: grouped by kind with Folder collapsed, New Folder shows the new folder's row with its name field, the field has the keyboard, typing and Return name it, and the files have the keyboard afterwards; with every group collapsed, the same; with a filter that hides the new folder, the keyboard is somewhere that takes keys after New Folder and what you designed happens (state it); New File… the same. For (B) if done: the status bar's count with one group collapsed, with all collapsed, and with a filter on and a passing item inside a collapsed group. Pictures for anything visible, light and dark.",
+ "original_risks": "Opening a group changes what the user chose to hide: open only the new item's group, and only when a new item is being named. `add_and_rename` ends with a quiet `load_listing`, whose answer rebuilds the rows again: the group must stay open and the field must survive that rebuild (rows are remapped by path). Collapsed groups are remembered per tab from folder to folder ('collapsed-groups-empty-view' says how), so opening one for a new folder also opens it for the next folder shown: say whether that is right or whether the group should be collapsed again once the name is given. The status bar's numbers are read by tests in several files; search the tests for the strings before changing what is counted.",
+ "raised_by": [
+  "review of collapsed-groups-empty-view"
+ ],
+ "verifier": {
+  "verdict": "unverified",
+  "claim_check": "Not checked by a second reviewer. The reviewer of 'collapsed-groups-empty-view' described both from probes of that change; the orchestrator read `add_and_rename` on the trunk (f5562db): `begin_rename` is called whether or not the item has a row. Reproduce (A) before changing anything; if the keys do work after New Folder with its group collapsed, write the closed record with the evidence and return skipped.",
+  "implementation_notes": "See the proposal: a starting point, not a checked plan. Read the done records of 'collapsed-groups-empty-view' and 'focus-lost-recovery' first.",
+  "test_plan": "See original_test_plan.",
+  "touches": [
+   "src/finder/inline_rename.rs",
+   "src/finder/mod.rs",
+   "tests/controls.rs",
+   "docs/manual.md"
+  ],
+  "risks": "See original_risks.",
+  "user_value": 4,
+  "effort": "S",
+  "worth_doing": true,
+  "already_handled": false
+ },
+ "orchestrator_notes": "'collapsed-groups-empty-view' (f5562db) and 'focus-lost-recovery' (4e5b448) are on the trunk. 'filter-stale-keep-set' (queued) changes when a filter's last answer is applied to new rows; a new item added under a filter is one of its cases, so say in your notes what the list shows between New Folder and the filter's answer."
+}

@@ -1,0 +1,33 @@
+{
+ "id": "disabled-toolbar-buttons-look",
+ "title": "Back and Forward look the same with nowhere to go as with somewhere to go",
+ "area": "ui",
+ "kind": "polish",
+ "problem": "Found by the reviewer of 'history-menus' (done record: /home/user/polish-tools/done/history-menus.json, 'Found, not fixed'). The toolbar's pill buttons are drawn in the same colour whether they are enabled or disabled: Back and Forward with no history look exactly like Back and Forward that lead somewhere. The reviewer saw it in a picture of a window with no history and traced it to pill_button (src/finder/toolbar.rs), which sets the text colour itself, overriding the kit's colour for a disabled button. Every other toolbar application the owner uses dims a button that cannot be pressed, and Finder dims Back and Forward.",
+ "proposal": "Reproduce first in pictures (shot.sh with a fresh window: Back and Forward are disabled) and in a headless test that reads the element's style if the harness can (ui.snapshot(id)), or its disabled state at least. Then let a disabled pill button show it: either stop overriding the colour when the button is disabled, or pick the theme's muted colour for that case, whichever matches how the rest of the window dims what is unavailable (look at disabled menu items and at the Empty… button over an empty Trash). Check every caller of pill_button, light and dark, and the tab bar's and bars' buttons for the same fault; fix those that are the same few lines and list the rest.",
+ "files": [
+  "src/finder/toolbar.rs",
+  "tests/controls.rs"
+ ],
+ "original_test_plan": "Pictures, light and dark, of a new window (both disabled), after going into a folder (Back enabled, Forward disabled) and after going back (Forward enabled). A headless test that fails today if the harness can read the colour or opacity; otherwise a test of the disabled state plus the pictures.",
+ "original_risks": "Contrast: a dimmed icon must still be visible in both themes. The tooltip and the right-click history menu from 'history-menus' must keep working on an enabled button and stay off a disabled one. Don't change the look of enabled buttons.",
+ "raised_by": [
+  "review of history-menus"
+ ],
+ "verifier": {
+  "verdict": "unverified",
+  "claim_check": "Not checked by a second reviewer. The reviewer who found it saw it in a picture. Reproduce it in your own pictures before changing anything; if the disabled buttons are already dimmed, write the closed record and return skipped with the evidence.",
+  "implementation_notes": "See the proposal: a starting point. Read pill_button and the kit's Button first.",
+  "test_plan": "See original_test_plan.",
+  "touches": [
+   "src/finder/toolbar.rs",
+   "tests/controls.rs"
+  ],
+  "risks": "See original_risks.",
+  "user_value": 3,
+  "effort": "S",
+  "worth_doing": true,
+  "already_handled": false
+ },
+ "orchestrator_notes": "'tooltip-shortcuts' and 'history-menus' are on the trunk and both changed these buttons; build on them."
+}

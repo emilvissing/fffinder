@@ -1,0 +1,35 @@
+{
+ "id": "table-preview-scroll",
+ "title": "A table preview can't be scrolled down: archives, SQLite files and spreadsheets show only the rows that fit",
+ "area": "ui",
+ "kind": "bug",
+ "problem": "Found by the reviewer of 'preview-scroll-per-file' (done record: /home/user/polish-tools/done/preview-scroll-per-file.json). In their words: Found, not fixed (there before this change, outside this brief, and worth a brief of its own): a table preview cannot be scrolled down. Archive listings, and SQLite files and spreadsheets opened through Nushell, show only the rows that fit: 8 of 150 in the preview pane's card and 21 of 150 in Quick Look opened from a 1100 by 700 window, while the manual promises up to 200 items and the footer says \"150 items\". Headless, a 3724-point-tall table in the pane and in the gallery does not move for a wheel event in points (300) or in lines (5); sideways it moves. The implementer saw the same in pictures. The cause is in how the table arm's scroll area is built: .overflow_scrollbar() (both axes) lays its area out as a flex row (gpui-component-0.8.1/src/scroll/scrollable.rs:176-189), so the content is stretched to the area's height, and GPUI measures what can be scrolled from the area's direct child (gpui-pre-0.3.10/src/elements/div.rs:2035-2062): nothing overflows downward, and the kit's bounce wrapper, which does the vertical scrolling, returns at max <= 0. Ways out: scroll down with .overflow_y_scrollbar() and sideways with a plain overflow_x_scroll inside it, as the list view and explore mode's grid do, or draw the rows with a uniform list as explore mode does. I measured this headlessly and in pictures, not in the app on macOS.",
+ "proposal": "Reproduce first, headlessly: a table preview taller than its area (an archive listing with 150 entries works without Nushell) does not move for a vertical wheel event, in the preview pane's card, the gallery, and Quick Look. Then make the table arm of preview_body (src/finder/preview.rs) scroll both ways. The reviewer's two ways out: scroll down with .overflow_y_scrollbar() and sideways with a plain overflow_x_scroll inside it, as the list view and explore mode's grid do; or draw the rows with a uniform list as explore mode does. Take the one that keeps the header row and the columns lined up while scrolling sideways, and keeps the per-file scroll position that 'preview-scroll-per-file' just fixed (the id on the scroll wrapper keys it). Wide tables must still scroll sideways.",
+ "files": [
+  "src/finder/preview.rs",
+  "src/finder/quick_look.rs",
+  "tests/finder.rs"
+ ],
+ "original_test_plan": "Headless UI tests that fail today: a table preview with more rows than fit scrolls down on a wheel event in the preview pane, the gallery and Quick Look, and its last row can be reached; it still scrolls sideways when wider than its area; a second file's table starts at its top. Look at pictures of each surface, light and dark.",
+ "original_risks": "The same arm draws in the preview pane's card, the gallery, the --term dialog and Quick Look's own window: check each. A scroll area inside the card must not swallow the wheel when the table fits. Very wide or very long tables (200 rows, many columns) must stay fast: nothing that lays out every cell on every frame if the current code avoids it.",
+ "raised_by": [
+  "review of preview-scroll-per-file"
+ ],
+ "verifier": {
+  "verdict": "unverified",
+  "claim_check": "Not checked by a second reviewer. The reviewer who found it measured it headlessly and in pictures, and the implementer of 'preview-scroll-per-file' saw the same. Reproduce it yourself before changing anything; if you cannot, write the closed record and return skipped with the evidence.",
+  "implementation_notes": "See the proposal: a starting point, not a checked plan. Read the code and the kit's scroll wrappers first (gpui-component-0.8.1/src/scroll/scrollable.rs, gpui-pre-0.3.10/src/elements/div.rs) and follow them where the proposal is wrong.",
+  "test_plan": "See original_test_plan.",
+  "touches": [
+   "src/finder/preview.rs",
+   "tests/finder.rs",
+   "docs/manual.md"
+  ],
+  "risks": "See original_risks.",
+  "user_value": 4,
+  "effort": "S",
+  "worth_doing": true,
+  "already_handled": false
+ },
+ "orchestrator_notes": "'preview-scroll-per-file' is on the trunk and 'preview-jump-to-match' lands right before this one in the same lane; both work in preview_body. Build on them."
+}

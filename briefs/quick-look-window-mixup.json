@@ -1,0 +1,33 @@
+{
+ "id": "quick-look-window-mixup",
+ "title": "With Quick Look's window open, the search field's Return acts in the wrong window",
+ "area": "ui",
+ "kind": "bug",
+ "problem": "Found by the reviewer of 'search-enter-before-results' (read its done record: /home/user/polish-tools/done/search-enter-before-results.json, the paragraph that starts 'Found, already on the trunk'). The Finder subscribes to its fields with `cx.subscribe_in(&search_input, window, Self::on_search_event)`, `cx.subscribe_in(&filter_input, ..)`, `cx.subscribe_in(&nu_input, ..)` and `cx.observe_in(&settings, window, Self::adopt_settings)` (src/finder/mod.rs, in Finder::new). GPUI does not remember the window passed there: when the event arrives it looks the subscriber's window up (`invoke_subscriber_in` calls `cx.with_window(subscriber.entity_id(), ..)`, gpui-pre-0.3.10/src/app/context.rs), and that lookup can answer with Quick Look's own window once that window has drawn the Finder's preview (src/finder/quick_look.rs draws from the same Finder entity). The reviewer reproduced it in the headless harness by drawing Quick Look's window after the browser's: Return in the search field then gave the files the keyboard in Quick Look's window while the browser's keyboard stayed in the search field, and in the new waiting path Return did nothing. Down Arrow is not affected, because key listeners get the window the key was pressed in. The filter field's, the Nushell field's and adopt_settings' handlers would be handed the wrong window the same way. Whether the real app hits it depends on which window drew last.",
+ "proposal": "Reproduce it first in a headless test (tests/quick_look*.rs or tests/finder.rs: open Quick Look in its own window, make it draw last, press Return in the browser's search field, and assert where the keyboard went). Then make the four handlers act in the browser's own window whatever GPUI hands them: keep the browser's window handle in the Finder (it already passes one to QuickLookWindow::new as `finder_window`) and, when the window a handler is given is not that one, run the handler's window work through `handle.update(cx, ..)` or `cx.defer` on the right window, or compare `window.window_handle()` and re-dispatch. Prefer one small helper used by all four handlers over four copies. Check how gpui-pre fills `current_window_by_entity` (src/app.rs `ensure_window`, and where a view's window is recorded when it is drawn in src/window.rs or src/view.rs) so the fix addresses the real cause.",
+ "files": [
+  "src/finder/mod.rs",
+  "src/finder/quick_look.rs"
+ ],
+ "original_test_plan": "A headless UI test that fails today: with Quick Look's window open and drawn last, Return in the search field moves the keyboard into the browser's files and selects the first result; the Nushell filter field's Return and a settings change act on the browser's window too.",
+ "original_risks": "A handler re-dispatched to another window must not run twice or re-enter an update that is already borrowing the Finder. Quick Look's window closing in between must not panic. The file chooser and split view (two Finders in one window) must keep working.",
+ "raised_by": [
+  "review of search-enter-before-results"
+ ],
+ "verifier": {
+  "verdict": "unverified",
+  "claim_check": "Not checked by a second reviewer. The reviewer who found it reproduced it in the headless harness, with and without the change they were reviewing. Reproduce it yourself before changing anything; if you cannot, or the code shows the real app cannot get there, write the closed record and return skipped with the evidence.",
+  "implementation_notes": "See the proposal. Keep the change small.",
+  "test_plan": "See original_test_plan.",
+  "touches": [
+   "src/finder/mod.rs",
+   "src/finder/quick_look.rs",
+   "tests/finder.rs"
+  ],
+  "risks": "See original_risks.",
+  "user_value": 3,
+  "effort": "S",
+  "worth_doing": true,
+  "already_handled": false
+ }
+}

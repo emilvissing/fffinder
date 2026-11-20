@@ -1,0 +1,79 @@
+{
+  "search-skeleton-flash": [
+    "search-enter-before-results"
+  ],
+  "results-scroll-reset": [
+    "search-enter-before-results",
+    "search-skeleton-flash"
+  ],
+  "search-truncation-honesty": [
+    "cancel-content-search"
+  ],
+  "preview-jump-to-match": [
+    "preview-scroll-per-file"
+  ],
+  "tab-drop-and-close": [
+    "tab-bar-overflow"
+  ],
+  "split-active-pane": [
+    "split-view-toolbar-clip",
+    "tab-bar-overflow",
+    "tab-drop-and-close"
+  ],
+  "content-match-highlight": [
+    "cancel-content-search",
+    "search-truncation-honesty"
+  ],
+  "regex-content-search": [
+    "content-match-highlight"
+  ],
+  "smart-folder-save-and-leaks": [
+    "regex-content-search"
+  ],
+  "typo-fallback-near-miss": [
+    "strict-check-scope-relative"
+  ],
+  "history-menus": [
+    "tooltip-shortcuts"
+  ],
+  "restore-session-tabs": [
+    "split-active-pane"
+  ],
+  "sorted-search-results": [
+    "search-truncation-honesty"
+  ],
+  "live-search-results": [
+    "search-truncation-honesty"
+  ],
+  "adhoc-index-feedback": [
+    "search-skeleton-flash"
+  ],
+  "search-start-no-flash": [
+    "search-skeleton-flash",
+    "results-scroll-reset",
+    "empty-state-messages",
+    "collapsed-groups-empty-view",
+    "stale-rows-on-place-change"
+  ],
+  "table-preview-scroll": [
+    "preview-jump-to-match"
+  ],
+  "menu-bar-mac-keys": [
+    "tooltip-shortcuts"
+  ],
+  "stale-rows-on-place-change": [
+    "empty-state-messages"
+  ],
+  "collapsible-sidebar-sections": [
+    "tree-arrows-past-smart-folder"
+  ],
+  "settings-rows-fit": [
+    "search-settings-hints-steppers",
+    "search-roots-notes-dedupe",
+    "search-settings-without-effect"
+  ],
+  "multi-word-highlights": [
+    "near-miss-beside-scattered",
+    "accented-names-search"
+  ]
+}

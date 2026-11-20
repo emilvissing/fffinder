@@ -1,0 +1,37 @@
+{
+ "id": "tree-arrows-past-smart-folder",
+ "title": "Tree sidebar: the Down arrow can't get past the first Smart Folder, and a Smart Folder's row has no Cmd+click or middle-click",
+ "area": "ui",
+ "kind": "bug",
+ "problem": "Found by the reviewer of 'smart-folder-save-and-leaks' (done record: /home/user/polish-tools/done/smart-folder-save-and-leaks.json, first two items under 'Found, not fixed'), and read in the code by the orchestrator. (1) With the tree sidebar (`sidebar_mode: \"tree\"`) and the keyboard in it, Down cannot get past the first Smart Folder while a line above it is still marked. `tree_cursor` (src/finder/folder_tree.rs) takes the first line that `line_is_active` (src/finder/sidebar.rs) marks as the place the arrow keys are at: `lines.iter().position(|line| self.line_is_active(line))`. A Smart Folder that searches This Computer doesn't change the window's place, so Recents, or the tree's selected folder under Favorites, stays marked above it; `move_in_tree` then steps from that line again, and every Down opens the same Smart Folder again. A folder-scoped Smart Folder does the same when its folder's line is above the Smart Folders. Probed by the reviewer on 323f173 and on the trunk with two Smart Folders for different words, from a favorite and from Recents: nine presses of Down never reach the second Smart Folder, nor Locations below. Up from below works, since the Smart Folder's line then comes before the place's. (2) The manual says of sidebar rows: 'Click a row to open it. Cmd+click or middle-click a row to open it in a new tab.' (docs/manual.md, the Sidebar section, and again under 'Opening a folder in a new tab'). A Smart Folder's row has only a plain click (`smart_row` in src/finder/sidebar.rs: one `on_click` that calls `open_smart_folder`), so Cmd+click opens it in the same tab and a middle click does nothing.",
+ "proposal": "Reproduce (1) first with a headless test in tests/folder_tree.rs beside the_arrows_go_on_past_a_smart_folder_whose_folder_is_gone (which walks Up through the Smart Folders): tree sidebar, two Smart Folders for different words that search This Computer, the keyboard in the tree on a favorite above them; Down, Down, Down must open the first, then the second, then go on to the first line under Locations. Do the same starting from Recents. Then fix where the keys think they are. The reviewer's suggestion: in `tree_cursor`, let a marked `Line::Smart` win over the other marked lines, since the search is what shows. Check Up and Down across the whole sidebar in both directions afterwards, with a This Computer Smart Folder and a folder-scoped one whose folder's line is above and one whose folder's line is below the Smart Folders, and after the search ends (Escape) the keys must be at the place's line again. Page Up, Page Down, Home and End go through the same cursor. Look at what the sidebar draws meanwhile: while a This Computer Smart Folder's search shows, both its row and the place's row may be highlighted; say what you find and leave the look alone unless it is plainly wrong. For (2): either give a Smart Folder's row the Cmd+click (Ctrl+click on Linux and Windows) and middle-click that the other rows have, opening its search in a new tab, if the new tab can be given the Smart Folder's whole search with what is already there (`open_smart_folder` and `enter_smart_folder` in src/finder/filter.rs; see how a place's row opens a new tab), or, if that is not small and certainly right, correct the two sentences in the manual to say that a Smart Folder's row opens in the same tab. Say which you did.",
+ "files": [
+  "src/finder/folder_tree.rs",
+  "src/finder/sidebar.rs",
+  "tests/folder_tree.rs",
+  "docs/manual.md"
+ ],
+ "original_test_plan": "tests/folder_tree.rs: Down from a favorite and from Recents walks through two This Computer Smart Folders and on into Locations (fails today: the words never change after the first); Up walks back the same way; with a folder-scoped Smart Folder whose folder is a favorite above it; after Escape the next Down starts from the place's line. If you add the new-tab clicks: a test that Cmd+click (secondary) and middle-click on a Smart Folder's row open a second tab showing its search with its kind, scope and filter, and leave the first tab as it was.",
+ "original_risks": "The tree's keyboard cursor is shared by the arrows, Page Up and Down, Home and End, and by typing to select; a change in which marked line wins must not move the cursor for places and folders when no Smart Folder's search shows. 'smart-folder-save-and-leaks' made the mark exact (`shows_smart_folder`: the whole search must be the saved one), so at most one Smart Folder is marked; rely on that only after checking it. 'collapsible-sidebar-sections' will let the Smart Folders section be collapsed: a hidden marked line must not capture the keys either; leave a note for it.",
+ "raised_by": [
+  "review of smart-folder-save-and-leaks"
+ ],
+ "verifier": {
+  "verdict": "unverified",
+  "claim_check": "Not checked by a second reviewer. The reviewer of 'smart-folder-save-and-leaks' probed (1) on two commits; the orchestrator read `tree_cursor`, `move_in_tree` and `line_is_active` on the trunk and they are as described. (2) was found by that change's implementer and read by its reviewer and the orchestrator (`smart_row` has a single on_click). Reproduce (1) before changing anything; if you cannot, write the closed record and return skipped with the evidence.",
+  "implementation_notes": "See the proposal: a starting point, not a checked plan.",
+  "test_plan": "See original_test_plan.",
+  "touches": [
+   "src/finder/folder_tree.rs",
+   "src/finder/sidebar.rs",
+   "tests/folder_tree.rs",
+   "docs/manual.md"
+  ],
+  "risks": "See original_risks.",
+  "user_value": 3,
+  "effort": "S",
+  "worth_doing": true,
+  "already_handled": false
+ },
+ "orchestrator_notes": "'smart-folder-save-and-leaks' (60df179) is on the trunk; read its done record first: it explains the mark (`shows_smart_folder`), the test the_arrows_go_on_past_a_smart_folder_whose_folder_is_gone, and what entering and leaving a Smart Folder does to a tab's kind, scope and filter."
+}

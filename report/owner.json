@@ -1,0 +1,332 @@
+[
+ {
+  "cat": "mac",
+  "id": "tooltip-shortcuts",
+  "text": "The Go menu shows ⌘[, ⌘] and ⌘↑, and File › Move to Trash shows ⌘⌫. The Back button's tooltip shows ⌘[, and one press of ⌘[ goes back one folder."
+ },
+ {
+  "cat": "mac",
+  "id": "menu-bar-mac-keys",
+  "text": "The menu bar shows ⌘R for View › Refresh, ⌘O for File › Open and ⌘Y for File › Quick Look. They used to show F5, Return and Space."
+ },
+ {
+  "cat": "mac",
+  "id": "history-menus",
+  "text": "A two-finger click on Back opens a menu of the places it leads to. Its tooltip reads Back to “name” with ⌘[. Resizing the window while the menu is open closes it."
+ },
+ {
+  "cat": "mac",
+  "id": "back-forward-restore-search",
+  "text": "Search, open a folder from the results, then press ⌘[ twice and ⌘] twice. Back should return to the results, then to the folder you searched from."
+ },
+ {
+  "cat": "mac",
+  "id": "disabled-toolbar-buttons-look",
+  "text": "In a new window Back and Forward are dimmed, in light and dark. With a system accent colour other than blue, the other toolbar buttons look as they did."
+ },
+ {
+  "cat": "mac",
+  "id": "show-in-enclosing-folder-key",
+  "text": "⌘Return on one selected search result opens its folder with the item selected. The item menu shows ⌘↩ beside Show in Enclosing Folder."
+ },
+ {
+  "cat": "mac",
+  "id": "smart-folder-save-and-leaks",
+  "text": "⌘S during a search opens Save Smart Folder; outside a search it shows a short notice. Edit › Save Search… does the same. With --term, try Ctrl+S: some terminals keep it for flow control."
+ },
+ {
+  "cat": "mac",
+  "id": "choose-nu-path",
+  "text": "In Settings at 110% text size, the controls at the bottom of the dialog can still be reached. Settings › Nushell › Choose… keeps a symlinked nu as the path you picked."
+ },
+ {
+  "cat": "mac",
+  "id": "table-preview-scroll",
+  "text": "A zip file's preview scrolls to its last row with the trackpad and bounces at its ends like the other previews. A wide table still scrolls sideways."
+ },
+ {
+  "cat": "mac",
+  "id": "preview-jump-to-match",
+  "text": "Opening a contents-search result shows the preview at the matching line, highlighted. Watch for an empty frame before the text appears."
+ },
+ {
+  "cat": "mac",
+  "id": "quick-look-window-mixup",
+  "text": "With Quick Look's window open beside the browser, Return in the search field moves into the results, and Quick Look still answers Escape, Space and the arrow keys."
+ },
+ {
+  "cat": "mac",
+  "id": "",
+  "text": "Window › Show Next Tab and Show Previous Tab: check whether the menu shows ⌃T and ⌃⇧T, and whether Ctrl+T switches tabs. This is older code that was only read, not changed: GPUI's menu code has no symbol for the Tab key."
+ },
+ {
+  "cat": "mac",
+  "id": "empty-state-messages",
+  "text": "Search one folder for a name that isn't there with Kind set to Image: “No Results” names the folder and the kind, both buttons work, and the Kind button is tinted in your accent colour."
+ },
+ {
+  "cat": "mac",
+  "id": "focus-lost-recovery",
+  "text": "Drag the window by the empty part of the toolbar, then press an arrow key: the selection in the files still moves. With the sidebar as a folder tree, click a tree row, hide the sidebar with ⌥⌘S, and press ⌥⌘S again: it comes back."
+ },
+ {
+  "cat": "mac",
+  "id": "tab-bar-overflow",
+  "text": "A two-finger swipe over the tabs scrolls them, sideways and up or down. With six or more tabs, ⌘\\ keeps the showing tab in view. Right-click a tab, then drag the window's edge: the menu closes."
+ },
+ {
+  "cat": "changed",
+  "id": "smart-folder-save-and-leaks",
+  "text": "A Smart Folder's filter, kind and scope now end with its search, so the next folder you open is no longer filtered. If you used a Smart Folder to load a filter and then browse, type the filter in the filter bar instead."
+ },
+ {
+  "cat": "changed",
+  "id": "smart-folder-save-and-leaks",
+  "text": "Save for Smart Folders moved from the Nushell filter bar to the scope bar of every search, and ⌘S saves the current search."
+ },
+ {
+  "cat": "changed",
+  "id": "back-forward-restore-search",
+  "text": "Back during a search only ends the search and stays in its folder. It used to go on to the previous place as well. Back and Forward now return to earlier searches."
+ },
+ {
+  "cat": "changed",
+  "id": "escape-ends-search",
+  "text": "Escape in an empty search field gives the keyboard back to the files. In a --pick chooser, pressing Escape repeatedly in the search field now ends in Cancel."
+ },
+ {
+  "cat": "changed",
+  "id": "result-tie-break",
+  "text": "Equally good matches are listed newest first, then by path, across all search locations. They used to come one search location after another."
+ },
+ {
+  "cat": "changed",
+  "id": "live-search-results",
+  "text": "Name searches and Recents update by themselves a few seconds after another program adds, removes or renames a file. Contents searches still wait for Refresh (⌘R)."
+ },
+ {
+  "cat": "changed",
+  "id": "kind-filter-single-list",
+  "text": "Kind: Document matches every type the Kind column calls a document, including .log, .conf, .env, .ini and .plist. With your home folder as a search location, ~/Library's .plist and .log files match a Document search. Taking a type out is an edit of one list in crates/fffinder-core/src/kind.rs."
+ },
+ {
+  "cat": "changed",
+  "id": "fuzzy-word-case",
+  "text": "A capital letter in a search word no longer forces an exact-case match: README finds readme.md. Capitals now only raise the rank of names that fit them."
+ },
+ {
+  "cat": "changed",
+  "id": "results-scroll-reset",
+  "text": "Search results start at the top with nothing selected whenever the words, scope or kind change. Ending a search puts the folder back as it was, selection and scroll position included."
+ },
+ {
+  "cat": "changed",
+  "id": "folder-filter-any-kind",
+  "text": "A folder filter such as `notes/ todo` keeps to folders named exactly notes, whatever the kind. It used to match meeting-notes/ as well."
+ },
+ {
+  "cat": "changed",
+  "id": "sorted-search-results",
+  "text": "Sorting search results chooses among every match, up to 20,000 per search location, so a click on a column can run the search again. It used to reorder only the items already listed."
+ },
+ {
+  "cat": "changed",
+  "id": "table-preview-scroll",
+  "text": "In the column view, the wheel over a long table preview scrolls the table. It used to move the columns sideways."
+ },
+ {
+  "cat": "changed",
+  "id": "show-in-enclosing-folder-key",
+  "text": "New key: ⌘Return (Ctrl+Enter on Linux and Windows) shows the selected result in its enclosing folder."
+ },
+ {
+  "cat": "changed",
+  "id": "query-scope-from-cli",
+  "text": "New option: `--here` searches only the folder a command opens, as in `fffinder ~/src --query readme --here`. `fff gui`, `fff pick` and the other Nushell commands take it too."
+ },
+ {
+  "cat": "changed",
+  "id": "empty-state-messages",
+  "text": "An empty file area says why it is empty. A filter that hides everything reads “No Items Pass the Filter” with a Remove Filter button, and “No Results” names the folder and kind the search was limited to, with Search This Computer and Search Any Kind buttons."
+ },
+ {
+  "cat": "changed",
+  "id": "typo-fallback-near-miss",
+  "text": "With Allow typos on, a search that matches nothing exactly lists only near misses: one typo in a word of four to seven letters, two from eight letters, none in a word of three or fewer. Some loose searches that used to find their file now find nothing, such as `prjatlz` for Project Atlas.txt."
+ },
+ {
+  "cat": "changed",
+  "id": "focus-lost-recovery",
+  "text": "A click on a row of the sidebar's list, the path bar, the status bar or the empty part of a bar no longer takes the keyboard away. The arrow keys and typing go on working in the files, or in the search field if it had the keyboard."
+ },
+ {
+  "cat": "changed",
+  "id": "tab-bar-overflow",
+  "text": "With more tabs than fit, the tab bar scrolls sideways with the wheel or a swipe, and + stays at the end. A tab you open or switch to scrolls into view."
+ },
+ {
+  "cat": "changed",
+  "id": "collapsed-groups-empty-view",
+  "text": "Collapsing every group keeps the group headers on screen; it used to say the folder was empty. An empty folder now has the right-click menu with New Folder and Paste."
+ },
+ {
+  "cat": "call",
+  "id": "fuzzy-word-case",
+  "text": "A search word with a capital runs two searches, so that capitals can count as a preference instead of a requirement. A simpler one-search version was written and set aside."
+ },
+ {
+  "cat": "call",
+  "id": "disabled-toolbar-buttons-look",
+  "text": "Disabled toolbar buttons use the UI kit's standard dimming, which is fainter than disabled menu items. A one-line change at three call sites gives the stronger look."
+ },
+ {
+  "cat": "call",
+  "id": "preview-jump-to-match",
+  "text": "The highlighted matching line is drawn in the plain text colour and loses its syntax colours, so that it reads on the highlight."
+ },
+ {
+  "cat": "call",
+  "id": "table-preview-scroll",
+  "text": "A table preview's heading row scrolls away with the first rows. Keeping it in view needs a hand-built scroll area, as explore mode has."
+ },
+ {
+  "cat": "call",
+  "id": "show-in-enclosing-folder-key",
+  "text": "The Mac's menu bar has no File › Show in Enclosing Folder. GPUI has no menu symbol for Return, so the item would most likely show, and might act on, ⌘E."
+ },
+ {
+  "cat": "call",
+  "id": "choose-nu-path",
+  "text": "Settings accepts any file as nu without running it first. A wrong pick shows an error naming the file wherever Nushell is used, and Find Automatically undoes it."
+ },
+ {
+  "cat": "call",
+  "id": "result-tie-break",
+  "text": "A one-letter search of a search location with more than 20,000 files now lists folders too, at the cost of as many of its older files."
+ },
+ {
+  "cat": "call",
+  "id": "smart-folder-save-and-leaks",
+  "text": "Rename… and Update with Current Search for a Smart Folder were left out. Saving under the same name replaces it in place and says so."
+ },
+ {
+  "cat": "call",
+  "id": "live-search-results",
+  "text": "Live results are paced. A rerun waits for files to stop coming, half a minute at most, and backs off to about once in four minutes while reruns change nothing."
+ },
+ {
+  "cat": "call",
+  "id": "empty-state-messages",
+  "text": "The buttons under “No Results” are for the mouse only. Tab skips them, because Return and Space in the file area mean Open and Quick Look."
+ },
+ {
+  "cat": "call",
+  "id": "empty-state-messages",
+  "text": "The title stays “No Results” without the words searched for. The message stays up while a search runs again, so it would name words that have no answer yet."
+ },
+ {
+  "cat": "call",
+  "id": "typo-fallback-near-miss",
+  "text": "A single letter or digit typed beside a longer word no longer narrows a search; it only ranks. `photo 2` lists every photo with photo 2.jpg first. Making digits narrow again is one condition in `checked_words` in the engine."
+ },
+ {
+  "cat": "call",
+  "id": "tab-bar-overflow",
+  "text": "The tab bar comes back to the showing tab whenever its width changes, also after you scrolled away from it by hand. One listener at the end of `render_tab_bar` decides this."
+ },
+ {
+  "cat": "limit",
+  "id": "result-tie-break",
+  "text": "A search can still vary from run to run where one search location has more than 2,000 further matches that score exactly like the last one kept."
+ },
+ {
+  "cat": "limit",
+  "id": "live-search-results",
+  "text": "A new typo match is not noticed until Refresh. Large folders outside every search location are not live until the next keystroke or Refresh."
+ },
+ {
+  "cat": "limit",
+  "id": "strict-check-scope-relative",
+  "text": "On Windows, a search word typed with a forward slash (src/main) never counts as an exact match, because Windows paths use backslashes. This could not be run here."
+ },
+ {
+  "cat": "limit",
+  "id": "results-scroll-reset",
+  "text": "`fffinder FILE --query words` does not select the file in its folder when the search ends."
+ },
+ {
+  "cat": "limit",
+  "id": "escape-ends-search",
+  "text": "The Nushell panel's field has no Escape of its own. A selection lost when a filter hides its item does not come back when the filter is emptied."
+ },
+ {
+  "cat": "limit",
+  "id": "history-menus",
+  "text": "A context menu whose button moves or disappears keeps the keyboard until the next click, for example the item menu after switching views with ⌘2."
+ },
+ {
+  "cat": "limit",
+  "id": "table-preview-scroll",
+  "text": "With nu 0.116 a MessagePack file previews as a one-column table of bytes, though the manual lists it among the files shown as tables, and an .xlsx shows one row per sheet."
+ },
+ {
+  "cat": "limit",
+  "id": "query-scope-from-cli",
+  "text": "`fff pick` treats every failure other than exit status 2 as a cancelled chooser. On Linux with no display, `fffinder --pick` neither fails nor exits."
+ },
+ {
+  "cat": "limit",
+  "id": "smart-folder-save-and-leaks",
+  "text": "Move Tab to New Window carries a search's words only. Its scope, Name or Contents, kind and filter are lost."
+ },
+ {
+  "cat": "limit",
+  "id": "show-in-enclosing-folder-key",
+  "text": "A hidden file shown in its enclosing folder while hidden files are off opens the folder with nothing selected."
+ },
+ {
+  "cat": "limit",
+  "id": "choose-nu-path",
+  "text": "Look Again gives no sign when it still finds no nu."
+ },
+ {
+  "cat": "limit",
+  "id": "typo-fallback-near-miss",
+  "text": "In a large folder a misspelled word usually has accidental matches, so the file you meant is still dropped and the accidental ones are listed. A follow-up for this is queued."
+ },
+ {
+  "cat": "limit",
+  "id": "typo-fallback-near-miss",
+  "text": "A name that stores an accent apart from its letter, as macOS writes names, is found only loosely by typing the letter, and not at all with Allow typos off. A follow-up for this is queued."
+ },
+ {
+  "cat": "limit",
+  "id": "focus-lost-recovery",
+  "text": "A shortcut that leaves the folder while a name is being edited, such as Back or Enclosing Folder, drops what was typed. The keyboard is rescued; the name is not."
+ },
+ {
+  "cat": "limit",
+  "id": "focus-lost-recovery",
+  "text": "A right-click or middle-click on a toolbar button gives that button the keyboard, so Return and Space then press it. The UI kit does this."
+ },
+ {
+  "cat": "limit",
+  "id": "tab-bar-overflow",
+  "text": "Nothing shows that more tabs exist beyond the bar's edge, and a tab can't be dragged onto one that is out of view."
+ },
+ {
+  "cat": "limit",
+  "id": "collapsed-groups-empty-view",
+  "text": "The status bar counts only the rows that show, so it reads “0 items” under collapsed groups whose headers count more. New Folder while its group is collapsed leaves the keyboard in a name field that isn't drawn. A follow-up for both is queued."
+ },
+ {
+  "cat": "upstream",
+  "id": "",
+  "text": "README.md and docs/manual.md say Rust 1.92 or newer. For macOS the GPUI dependency (gpui-pre-macos 0.3.10) did not compile with Rust 1.97.0 here; the cross-checks use 1.100.0. Not changed."
+ },
+ {
+  "cat": "upstream",
+  "id": "",
+  "text": "GitHub Actions is not enabled on the fork, so the repository's own CI has not run on this branch. Enabling it would run the real macOS and Windows jobs on every push, with no pull request needed."
+ }
+]

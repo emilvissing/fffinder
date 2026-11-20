@@ -1,0 +1,5 @@
+# Lane D after the cut-off of 00:30 UTC, 20 Nov: items rated 4 of 5 only.
+near-miss-beside-scattered
+stale-rows-on-place-change
+split-active-pane
+accented-names-search

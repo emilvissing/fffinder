@@ -1,0 +1,6 @@
+# Lane B after the cut-off of 00:30 UTC, 20 Nov: items rated 4 of 5 only.
+stray-double-click-opens-file
+accented-names-search
+near-miss-beside-scattered
+stale-rows-on-place-change
+split-active-pane

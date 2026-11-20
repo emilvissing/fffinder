@@ -1,0 +1,34 @@
+{
+ "id": "files-changed-off-thread",
+ "title": "After a file operation during a search, every result is checked on disk on the window's thread",
+ "area": "ui",
+ "kind": "perf",
+ "problem": "Found by the reviewer of 'search-skeleton-flash' (done record: /home/user/polish-tools/done/search-skeleton-flash.json, under 'Found, not fixed'). Finder::files_changed (src/finder/trash.rs) runs after every copy, move, rename, trash or put back. While a search is showing it does `self.results.retain(|r| r.entry.path.exists())`: one stat call per search result, on the window's thread. On a local disk that is quick, but results can come from any search location, and a stat on a stalled network volume blocks; the window then freezes after a file operation. The project already moved this kind of check off the window's thread elsewhere (CHANGELOG 0.5.1: 'Checking folders for changes no longer runs on the window's thread, where a stalled network volume could freeze the window').",
+ "proposal": "Do the existence checks on the background executor and apply the answer on the window's thread: collect the result paths, check them in a background task, then drop the ones that are gone from self.results if the search is still the same one (compare the search generation) and rebuild the rows. Only the paths the operation could have touched need checking when files_changed is told what changed; if the callers can pass that cheaply, check only those, otherwise check all results in the background. Keep the rest of files_changed as it is.",
+ "files": [
+  "src/finder/trash.rs",
+  "src/finder/mod.rs",
+  "tests/file_ops.rs"
+ ],
+ "original_test_plan": "A headless UI test: during a search, trash (or rename away) one result; after settling, that row is gone and the others stay; an answer for an older search generation is ignored (start a new search before the check answers). Existing file_ops tests keep passing.",
+ "original_risks": "The row of a file that was just trashed must still disappear promptly, in the same settle as before from a test's point of view. A check that answers after the search changed must not touch the new results. Selection after the operation (the `select` argument) must still work.",
+ "raised_by": [
+  "review of search-skeleton-flash"
+ ],
+ "verifier": {
+  "verdict": "unverified",
+  "claim_check": "Not checked by a second reviewer. It comes from the reviewer of an earlier improvement, who saw it while testing (read that done record, named in raised_by). Reproduce it yourself before changing anything. If you cannot, or the code shows it is not real, write the closed record and return skipped with the evidence.",
+  "implementation_notes": "See the proposal: it is a starting point, not a checked plan. Read the code first and follow it where the proposal is wrong. Keep the change small.",
+  "test_plan": "A headless UI test: during a search, trash (or rename away) one result; after settling, that row is gone and the others stay; an answer for an older search generation is ignored (start a new search before the check answers). Existing file_ops tests keep passing.",
+  "touches": [
+   "src/finder/trash.rs",
+   "src/finder/mod.rs",
+   "tests/file_ops.rs"
+  ],
+  "risks": "The row of a file that was just trashed must still disappear promptly, in the same settle as before from a test's point of view. A check that answers after the search changed must not touch the new results. Selection after the operation (the `select` argument) must still work.",
+  "user_value": 2,
+  "effort": "S",
+  "worth_doing": true,
+  "already_handled": false
+ }
+}

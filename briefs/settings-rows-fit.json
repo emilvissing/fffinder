@@ -1,0 +1,34 @@
+{
+ "id": "settings-rows-fit",
+ "title": "Settings: rows run past the dialog's edge with wider fonts ('Remember each folder's vi', the letter case buttons, Try It)",
+ "area": "ui",
+ "kind": "bug",
+ "problem": "Found by the reviewer of 'choose-nu-path' (done record: /home/user/polish-tools/done/choose-nu-path.json, third item under 'Found, not fixed') and seen by the orchestrator in that change's pictures (/home/user/polish-tools/shots/choose-nu-path-review-found.png, and -before-settings.png for the same before that change). The Settings dialog is 600 points wide and several of its rows are laid out as one line that doesn't give way. With the fonts on Linux here: under Appearance the third control's label reads 'Remember each folder's vi' and is cut at the dialog's edge (the row holds System/Light/Dark, Show hidden files, and Remember each folder's view); under Search Engine the Smart / Match Case / Ignore Case buttons end about 10 points past the content's right margin; under Nushell, with a long terminal name ('Automatic (System Default (x-terminal-emulator))', which is what Linux shows by default), Try It hangs over the right margin. In a narrow window at 150% text size the letter case buttons and the terminal menu run off the edge as well (picture: /home/user/polish-tools/shots/choose-nu-path-review-narrow-150.png). On a Mac, whose system font is narrower, the rows at 100% may just fit, which would be why it was not seen; nobody has looked there. Text size is a setting (up to 150% at least), so the rows must give way on every system.",
+ "proposal": "Reproduce in pictures first: Settings at 100%, 125% and 150% text size, light and dark, in a 1100x1150 window (so the whole dialog shows) and in a 700-point-wide one. List every row whose content passes the content's right edge or is cut without an ellipsis. Then make each such row give way in the way that suits it, in the dialog's own style (src/finder/dialogs.rs; read how the rows are built and what helpers the file has, and 'choose-nu-path' for `fit::with_cut_off_text` on a `flex_1().min_w_0().truncate()` div, which is how its status text gives way to its buttons): a row of several switches can wrap to a second line (the Search Engine switches above it already sit in rows of two); a label beside a fixed control can shrink and wrap or be cut with an ellipsis and a tooltip; a menu button with a long value can cut its value with an ellipsis so the button after it stays inside the margin. Nothing may be cut without an ellipsis, nothing may pass the right margin, and a control must never be pushed out of reach. Do not change the dialog's width or the wording of labels. Keep the rows that fit today looking exactly as they do (compare pictures before and after at 100% on a wide window: only the rows you meant to change may differ).",
+ "files": [
+  "src/finder/dialogs.rs",
+  "tests/controls.rs",
+  "docs/manual.md"
+ ],
+ "original_test_plan": "A headless test that fails today with the test fonts: open Settings, and for every control and label the harness can see in the dialog (they have IDs: read tests/controls.rs settings_* tests for them), assert its right edge is inside the dialog's content edge, at 100% and at 150% text size; and that 'Remember each folder's view' is whole (its element is as wide as its text needs, or it has wrapped). If the harness's fonts happen to make everything fit at 100%, assert at the size where it first fails and say so. Pictures before and after for each row changed, light and dark, at 100% and 150%.",
+ "original_risks": "Settings is taller than a small window and scrolls; tests click controls low in it, some without scrolling first, and on macOS there is one more row (Applications) so they have little room to spare: the reviewer of 'choose-nu-path' measured `nu-text-bigger` at 10.75 points above the fold at 110% text size with that row forced on. A row that wraps to a second line makes everything below it lower: check every settings test (tests/controls.rs settings_*, tests/settings.rs, tests/folder_tree.rs) and make those that click below your change scroll to their control first if they would otherwise depend on the spare room, as tests/folder_tree.rs does for `sidebar-list`. 'search-settings-hints-steppers', 'search-settings-without-effect' and 'search-roots-notes-dedupe' also change Settings; if they are on the trunk, build on them and read their done records.",
+ "raised_by": [
+  "review of choose-nu-path"
+ ],
+ "verifier": {
+  "verdict": "unverified",
+  "claim_check": "Not checked by a second reviewer. The reviewer of 'choose-nu-path' saw it in every picture of that change, the before one too, and the orchestrator looked at the same pictures: the Appearance row's third label is cut at 'vi', the letter case buttons and Try It pass the right margin. Only Linux fonts were seen. Reproduce in pictures before changing anything.",
+  "implementation_notes": "See the proposal: a starting point, not a checked plan.",
+  "test_plan": "See original_test_plan.",
+  "touches": [
+   "src/finder/dialogs.rs",
+   "tests/controls.rs"
+  ],
+  "risks": "See original_risks.",
+  "user_value": 3,
+  "effort": "S",
+  "worth_doing": true,
+  "already_handled": false
+ },
+ "orchestrator_notes": "'choose-nu-path' (ca4fbee) is on the trunk: the first line under NUSHELL is `nu_controls`, whose text gives way to its buttons; read its done record's notes on Settings' heights (under 'Doubts that remain' and 'For briefs still to come')."
+}

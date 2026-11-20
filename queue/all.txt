@@ -1,0 +1,10 @@
+# After the cut-off: items rated 4 of 5 only. The rest is in later.txt.
+accented-names-search
+column-pane-selection-by-path
+near-miss-beside-scattered
+new-item-in-hidden-row
+split-active-pane
+stale-previews-and-cancel
+stale-rows-on-place-change
+stray-double-click-opens-file
+thumbnail-memory

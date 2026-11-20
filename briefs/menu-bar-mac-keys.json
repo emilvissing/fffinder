@@ -1,0 +1,35 @@
+{
+ "id": "menu-bar-mac-keys",
+ "title": "macOS menu bar shows F5 for Refresh, Return for Open and Space for Quick Look instead of the Cmd keys Finder shows",
+ "area": "ui",
+ "kind": "polish",
+ "problem": "Found by the reviewer of 'tooltip-shortcuts' (done record: /home/user/polish-tools/done/tooltip-shortcuts.json, 'Found, not fixed'), from reading the code, not run on a Mac. The macOS menu bar shows an action's first binding, and that binding is also the menu item's key equivalent. So View › Refresh shows F5 (bound before Cmd+R), File › Open shows Return (bound before Cmd+Down and Cmd+O), and File › Quick Look shows Space (bound before Cmd+Y). Finder shows Cmd+O for Open and Cmd+Y for Quick Look, and Cmd+R is the Mac's usual key for a refresh. 'tooltip-shortcuts' fixed exactly this for Back, Forward, Enclosing Folder and Move to Trash by binding the Mac key first on macOS; these three were left.",
+ "proposal": "Do for Refresh, Open and Quick Look what 'tooltip-shortcuts' did for its four actions in src/actions.rs: on macOS make the Cmd binding the one the menu bar and the tooltips show (Cmd+R, Cmd+O, Cmd+Y), keeping every existing key bound and working, on every system. Read that commit first (`git show 918c6a7 -- src/actions.rs tests/finder.rs`) and follow its mechanism and its tests exactly, including the test that a key bound twice acts once (a handler must not run twice when two bindings match). Go through the rest of the menus in src/actions.rs for any other action whose first binding is not the key a Mac user expects and list what you find; change only the ones where Finder's own menu shows a different key, and say which you left and why. Update the manual's shortcut tables only if what they say becomes wrong.",
+ "files": [
+  "src/actions.rs",
+  "tests/finder.rs",
+  "docs/manual.md"
+ ],
+ "original_test_plan": "Tests in the style 'tooltip-shortcuts' added: on macOS the binding shown for Refresh, Open and Quick Look is the Cmd one (if the existing tests can only assert this under cfg(target_os = \"macos\"), write them that way and also assert, on every system, that all the old keys still act, once each). The Linux and Windows bindings and tooltips are unchanged.",
+ "original_risks": "This cannot be seen here: no macOS menu bar is drawn in this container, and code under cfg(target_os = \"macos\") is not compiled by the lane's check (a separate cross-check compiles it later). Keep the change mechanical and identical in shape to what 'tooltip-shortcuts' did, so it is right by construction. Return opens the selection in the file views but must keep its meaning in text fields and dialogs; Space must keep typing a space in fields. Don't change which keys work, only the order they are bound in.",
+ "raised_by": [
+  "review of tooltip-shortcuts"
+ ],
+ "verifier": {
+  "verdict": "unverified",
+  "claim_check": "Not checked by a second reviewer, and found by reading the code only. Check it against src/actions.rs and against how GPUI picks the key a menu item shows (gpui-pre-0.3.10, the macOS platform's menu code and Keymap::bindings_for_action) before changing anything. If the menu bar already shows the Cmd keys, write the closed record and return skipped with the evidence.",
+  "implementation_notes": "See the proposal: a starting point. Follow the mechanism of commit 918c6a7.",
+  "test_plan": "See original_test_plan.",
+  "touches": [
+   "src/actions.rs",
+   "tests/finder.rs",
+   "docs/manual.md"
+  ],
+  "risks": "See original_risks.",
+  "user_value": 3,
+  "effort": "S",
+  "worth_doing": true,
+  "already_handled": false
+ },
+ "orchestrator_notes": "The owner uses macOS, so this is what they see every day; but nothing here can show it. Be conservative, and write down exactly what you could and could not verify."
+}
